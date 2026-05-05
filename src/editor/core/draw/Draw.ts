@@ -473,6 +473,38 @@ export class Draw {
     return width - margins[1] - margins[3]
   }
 
+  public getColumnCount(): number {
+    const count = this.options.pageColumns?.columnCount ?? 1
+    return count > 1 ? Math.floor(count) : 1
+  }
+
+  public getColumnGap(): number {
+    const gap = this.options.pageColumns?.columnGap ?? 0
+    return Math.max(0, gap) * this.options.scale
+  }
+
+  public getOriginalColumnGap(): number {
+    const gap = this.options.pageColumns?.columnGap ?? 0
+    return Math.max(0, gap)
+  }
+
+  public getColumnInnerWidth(): number {
+    const innerWidth = this.getInnerWidth()
+    const count = this.getColumnCount()
+    if (count <= 1) return innerWidth
+    const totalGap = this.getColumnGap() * (count - 1)
+    return Math.floor((innerWidth - totalGap) / count)
+  }
+
+  public getColumnStartX(columnIndex: number): number {
+    const margins = this.getMargins()
+    if (this.getColumnCount() <= 1 || !columnIndex) return margins[3]
+    return (
+      margins[3] +
+      columnIndex * (this.getColumnInnerWidth() + this.getColumnGap())
+    )
+  }
+
   public getContextInnerWidth(): number {
     const positionContext = this.position.getPositionContext()
     if (positionContext.isTable) {
@@ -1754,6 +1786,10 @@ export class Draw {
         element.width = availableWidth / scale
         metrics.width = availableWidth
         metrics.height = defaultSize
+      } else if (element.type === ElementType.COLUMN_BREAK) {
+        element.width = availableWidth / scale
+        metrics.width = availableWidth
+        metrics.height = defaultSize
       } else if (
         element.type === ElementType.RADIO ||
         element.controlComponent === ControlComponent.RADIO
@@ -1952,7 +1988,8 @@ export class Draw {
           ascent,
           rowIndex: curRow.rowIndex + 1,
           rowFlex: elementList[i]?.rowFlex || elementList[i + 1]?.rowFlex,
-          isPageBreak: element.type === ElementType.PAGE_BREAK
+          isPageBreak: element.type === ElementType.PAGE_BREAK,
+          isColumnBreak: element.type === ElementType.COLUMN_BREAK
         }
         // 控件缩进
         if (
@@ -2021,13 +2058,41 @@ export class Draw {
             curRow.elementList[0]?.value === ZERO
               ? curRow.elementList.slice(1)
               : curRow.elementList
-          const gap =
-            (availableWidth - curRow.width) / (rowElementList.length - 1)
+          // 优先在词间空白处拉伸（拉丁文等带空格脚本，等同于 CSS word-spacing）
+          // 当行内不存在空白时退化为按字符分散（兼容 CJK 等无词间空白的脚本）
+          const whitespaceIndexes: number[] = []
           for (let e = 0; e < rowElementList.length - 1; e++) {
-            const el = rowElementList[e]
-            el.metrics.width += gap
+            const v = rowElementList[e].value
+            if (v === ' ' || v === ' ') {
+              whitespaceIndexes.push(e)
+            }
           }
-          curRow.width = availableWidth
+          // 整行是否含拉丁字母：用于决定无内部空白时是否按字符分散（CJK 行为）
+          let hasLatinLetter = false
+          for (let e = 0; e < rowElementList.length; e++) {
+            const v = rowElementList[e].value
+            if (v && this.LETTER_REG.test(v)) {
+              hasLatinLetter = true
+              break
+            }
+          }
+          if (whitespaceIndexes.length > 0) {
+            const gap =
+              (availableWidth - curRow.width) / whitespaceIndexes.length
+            for (let g = 0; g < whitespaceIndexes.length; g++) {
+              rowElementList[whitespaceIndexes[g]].metrics.width += gap
+            }
+            curRow.width = availableWidth
+          } else if (!hasLatinLetter && rowElementList.length > 1) {
+            // CJK 等无词间空白脚本：保留原按字符分散行为
+            const gap =
+              (availableWidth - curRow.width) / (rowElementList.length - 1)
+            for (let e = 0; e < rowElementList.length - 1; e++) {
+              rowElementList[e].metrics.width += gap
+            }
+            curRow.width = availableWidth
+          }
+          // 拉丁文单词独占行：保持自然宽度，匹配 Word/Docs 不拉伸字符的行为
         }
       }
       // 重新计算坐标、页码、下一行首行元素环绕交叉
@@ -2077,11 +2142,16 @@ export class Draw {
     } = this.options
     const height = this.getHeight()
     const marginHeight = this.getMainOuterHeight()
+    const columnCount = this.getColumnCount()
     let pageHeight = marginHeight
     let pageNo = 0
+    let columnIndex = 0
     if (pageMode === PageMode.CONTINUITY) {
+      // 连续模式下保持单列行为：所有行注入第一列，列索引归零
       pageRowList[0] = this.rowList
-      // 重置高度
+      for (let i = 0; i < this.rowList.length; i++) {
+        this.rowList[i].columnIndex = 0
+      }
       pageHeight += this.rowList.reduce(
         (pre, cur) => pre + cur.height + (cur.offsetY || 0),
         0
@@ -2099,23 +2169,45 @@ export class Draw {
       }
       this._initPageContext(this.ctxList[0])
     } else {
+      // 当前列是否已有内容：空列不触发因高度溢出而进入下一列
+      let columnEmpty = true
       for (let i = 0; i < this.rowList.length; i++) {
         const row = this.rowList[i]
         const rowOffsetY = row.offsetY || 0
-        if (
-          row.height + rowOffsetY + pageHeight > height ||
-          this.rowList[i - 1]?.isPageBreak
-        ) {
+        const prev = this.rowList[i - 1]
+        const overflow = row.height + rowOffsetY + pageHeight > height
+        const forcePageBreak = !!prev?.isPageBreak
+        const forceColumnBreak = !!prev?.isColumnBreak
+        const isLastColumn = columnIndex === columnCount - 1
+        // 当前列为空时不允许因 overflow/columnBreak 而切列；分页符仍生效
+        const canAdvance = !columnEmpty
+        const advancePage =
+          forcePageBreak ||
+          ((overflow || forceColumnBreak) && isLastColumn && canAdvance)
+        const advanceColumn =
+          (overflow || forceColumnBreak) && !isLastColumn && canAdvance
+        if (advancePage) {
           if (Number.isInteger(maxPageNo) && pageNo >= maxPageNo!) {
             this.elementList = this.elementList.slice(0, row.startIndex)
             break
           }
           pageHeight = marginHeight + row.height + rowOffsetY
-          pageRowList.push([row])
           pageNo++
+          columnIndex = 0
+          row.columnIndex = 0
+          pageRowList.push([row])
+          columnEmpty = false
+        } else if (advanceColumn) {
+          columnIndex++
+          pageHeight = marginHeight + row.height + rowOffsetY
+          row.columnIndex = columnIndex
+          pageRowList[pageNo].push(row)
+          columnEmpty = false
         } else {
           pageHeight += row.height + rowOffsetY
+          row.columnIndex = columnIndex
           pageRowList[pageNo].push(row)
+          columnEmpty = false
         }
       }
     }
@@ -2272,6 +2364,10 @@ export class Draw {
         } else if (element.type === ElementType.SEPARATOR) {
           this.separatorParticle.render(ctx, element, x, y)
         } else if (element.type === ElementType.PAGE_BREAK) {
+          if (this.mode !== EditorMode.CLEAN && !isPrintMode) {
+            this.pageBreakParticle.render(ctx, element, x, y)
+          }
+        } else if (element.type === ElementType.COLUMN_BREAK) {
           if (this.mode !== EditorMode.CLEAN && !isPrintMode) {
             this.pageBreakParticle.render(ctx, element, x, y)
           }
@@ -2743,7 +2839,8 @@ export class Draw {
       isFirstRender = false
     } = payload || {}
     let { curIndex } = payload || {}
-    const innerWidth = this.getInnerWidth()
+    // 多列布局：行的可用宽度为列宽，单列时与页面内宽一致
+    const innerWidth = this.getColumnInnerWidth()
     const isPagingMode = this.getIsPagingMode()
     // 缓存当前页数信息
     const oldPageSize = this.pageRowList.length
@@ -2766,7 +2863,8 @@ export class Draw {
       const pageHeight = this.getHeight()
       const extraHeight = this.header.getExtraHeight()
       const mainOuterHeight = this.getMainOuterHeight()
-      const startX = margins[3]
+      // 行布局起点为第一列的左上角；单列时与页面左上一致
+      const startX = this.getColumnStartX(0)
       const startY = margins[0] + extraHeight
       const surroundElementList = pickSurroundElementList(this.elementList)
       this.rowList = this.computeRowList({

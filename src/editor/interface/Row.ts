@@ -14,6 +14,8 @@ export interface IRow {
   rowFlex?: RowFlex
   startIndex: number
   isPageBreak?: boolean
+  isColumnBreak?: boolean
+  columnIndex?: number
   isList?: boolean
   listIndex?: number
   offsetX?: number

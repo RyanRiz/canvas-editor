@@ -18,6 +18,7 @@ import { IImgCaptionOption, IListOption } from './Element'
 import { ILineBreakOption } from './LineBreak'
 import { IMargin } from './Margin'
 import { IPageBreak } from './PageBreak'
+import { IPageColumns } from './PageColumns'
 import { IPageNumber } from './PageNumber'
 import { IPlaceholder } from './Placeholder'
 import { ITitleOption } from './Title'
@@ -100,6 +101,7 @@ export interface IEditorOption {
   placeholder?: IPlaceholder
   group?: IGroup
   pageBreak?: IPageBreak
+  pageColumns?: IPageColumns
   zone?: IZoneOption
   background?: IBackgroundOption
   lineBreak?: ILineBreakOption

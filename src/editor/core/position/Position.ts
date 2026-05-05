@@ -291,11 +291,12 @@ export class Position {
   public computePositionList() {
     // 置空原位置信息
     this.positionList = []
-    // 按每页行计算
-    const innerWidth = this.draw.getInnerWidth()
+    // 多列布局：以列为单位计算坐标
+    const columnCount = this.draw.getColumnCount()
+    const columnInnerWidth = this.draw.getColumnInnerWidth()
+    const pageInnerWidth = this.draw.getInnerWidth()
     const pageRowList = this.draw.getPageRowList()
     const margins = this.draw.getMargins()
-    const startX = margins[3]
     // 起始位置受页眉影响
     const header = this.draw.getHeader()
     const extraHeight = header.getExtraHeight()
@@ -304,17 +305,42 @@ export class Position {
     for (let i = 0; i < pageRowList.length; i++) {
       const rowList = pageRowList[i]
       if (!rowList?.length) continue
-      const startIndex = rowList[0].startIndex
-      this.computePageRowPosition({
-        positionList: this.positionList,
-        rowList,
-        pageNo: i,
-        startRowIndex,
-        startIndex,
-        startX,
-        startY,
-        innerWidth
-      })
+      // 单列：保持原行为，避免 columnIndex 缺省时坐标错乱
+      if (columnCount <= 1) {
+        this.computePageRowPosition({
+          positionList: this.positionList,
+          rowList,
+          pageNo: i,
+          startRowIndex,
+          startIndex: rowList[0].startIndex,
+          startX: margins[3],
+          startY,
+          innerWidth: pageInnerWidth
+        })
+        startRowIndex += rowList.length
+        continue
+      }
+      // 多列：按 columnIndex 切分连续段，每段在所属列的 rect 内独立计算 y
+      let segStart = 0
+      for (let k = 1; k <= rowList.length; k++) {
+        const isBoundary =
+          k === rowList.length ||
+          (rowList[k].columnIndex ?? 0) !== (rowList[k - 1].columnIndex ?? 0)
+        if (!isBoundary) continue
+        const segRows = rowList.slice(segStart, k)
+        const colIdx = segRows[0].columnIndex ?? 0
+        this.computePageRowPosition({
+          positionList: this.positionList,
+          rowList: segRows,
+          pageNo: i,
+          startRowIndex: startRowIndex + segStart,
+          startIndex: segRows[0].startIndex,
+          startX: this.draw.getColumnStartX(colIdx),
+          startY,
+          innerWidth: columnInnerWidth
+        })
+        segStart = k
+      }
       startRowIndex += rowList.length
     }
   }

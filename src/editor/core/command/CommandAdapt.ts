@@ -1272,6 +1272,46 @@ export class CommandAdapt {
     ])
   }
 
+  public columnBreak() {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const activeControl = this.control.getActiveControl()
+    if (activeControl) return
+    this.insertElementList([
+      {
+        type: ElementType.COLUMN_BREAK,
+        value: WRAP
+      }
+    ])
+  }
+
+  public columnLayout(payload: { columnCount?: number; columnGap?: number }) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const next = {
+      columnCount: Math.max(
+        1,
+        Math.floor(payload.columnCount ?? this.options.pageColumns.columnCount)
+      ),
+      columnGap: Math.max(
+        0,
+        payload.columnGap ?? this.options.pageColumns.columnGap
+      )
+    }
+    const cur = this.options.pageColumns
+    if (
+      cur.columnCount === next.columnCount &&
+      cur.columnGap === next.columnGap
+    ) {
+      return
+    }
+    this.options.pageColumns = next
+    this.draw.render({
+      isSetCursor: false,
+      isSubmitHistory: false
+    })
+  }
+
   public addWatermark(payload: IWatermark) {
     const isReadonly = this.draw.isReadonly()
     if (isReadonly) return
