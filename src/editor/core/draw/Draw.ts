@@ -1361,7 +1361,7 @@ export class Draw {
     canvas.width = width * dpr
     canvas.height = height * dpr
     canvas.style.cursor = 'text'
-    const ctx = canvas.getContext('2d')!
+    const ctx = canvas.getContext('2d', { alpha: false })!
     // 初始化上下文配置
     this._initPageContext(ctx)
     // 缓存上下文
