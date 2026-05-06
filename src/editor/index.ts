@@ -51,6 +51,7 @@ import {
   TdSlash
 } from './dataset/enum/table/Table'
 import { MaxHeightRatio, NumberType } from './dataset/enum/Common'
+import { ChangeCaseType } from './dataset/enum/ChangeCase'
 import { TitleLevel } from './dataset/enum/Title'
 import { ListStyle, ListType } from './dataset/enum/List'
 import { ICatalog, ICatalogItem } from './interface/Catalog'
@@ -227,7 +228,8 @@ export {
   ControlState,
   FlexDirection,
   WatermarkType,
-  WatermarkLayer
+  WatermarkLayer,
+  ChangeCaseType
 }
 
 // 对外类型

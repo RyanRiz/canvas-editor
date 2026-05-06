@@ -216,6 +216,14 @@ ul {
   background-image: url('./assets/images/format.svg');
 }
 
+.menu-item__change-case i {
+  background-image: url('./assets/images/change-case.svg');
+}
+
+.menu-item__change-case .options {
+  width: 160px;
+}
+
 .menu-item__size-add i {
   background-image: url('./assets/images/size-add.svg');
 }

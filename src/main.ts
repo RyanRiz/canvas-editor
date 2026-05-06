@@ -3,6 +3,7 @@ import './style.css'
 import prism from 'prismjs'
 import Editor, {
   BlockType,
+  ChangeCaseType,
   Command,
   ControlState,
   ControlType,
@@ -134,6 +135,24 @@ window.onload = function () {
       console.log('format')
       instance.command.executeFormat()
     }
+
+  const changeCaseDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__change-case'
+  )!
+  const changeCaseOptionDom =
+    changeCaseDom.querySelector<HTMLDivElement>('.options')!
+  changeCaseDom.querySelector('i')!.onclick = function () {
+    console.log('change-case')
+    changeCaseOptionDom.classList.toggle('visible')
+  }
+  changeCaseOptionDom.onclick = function (evt) {
+    const li = evt.target as HTMLLIElement
+    const caseType = li.dataset.case as ChangeCaseType
+    if (caseType) {
+      instance.command.executeChangeCase(caseType)
+      changeCaseOptionDom.classList.remove('visible')
+    }
+  }
 
   // 3. | 字体 | 字体变大 | 字体变小 | 加粗 | 斜体 | 下划线 | 删除线 | 上标 | 下标 | 字体颜色 | 背景色 |
   const fontDom = document.querySelector<HTMLDivElement>('.menu-item__font')!

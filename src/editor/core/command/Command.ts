@@ -104,6 +104,7 @@ export class Command {
   public executeSetLocale: CommandAdapt['setLocale']
   public executeLocationCatalog: CommandAdapt['locationCatalog']
   public executeWordTool: CommandAdapt['wordTool']
+  public executeChangeCase: CommandAdapt['changeCase']
   public executeSetHTML: CommandAdapt['setHTML']
   public executeSetGroup: CommandAdapt['setGroup']
   public executeDeleteGroup: CommandAdapt['deleteGroup']
@@ -272,6 +273,7 @@ export class Command {
     this.executeSetLocale = adapt.setLocale.bind(adapt)
     this.executeLocationCatalog = adapt.locationCatalog.bind(adapt)
     this.executeWordTool = adapt.wordTool.bind(adapt)
+    this.executeChangeCase = adapt.changeCase.bind(adapt)
     this.executeSetHTML = adapt.setHTML.bind(adapt)
     this.executeSetGroup = adapt.setGroup.bind(adapt)
     this.executeDeleteGroup = adapt.deleteGroup.bind(adapt)
