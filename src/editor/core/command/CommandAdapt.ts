@@ -1,4 +1,4 @@
-import { NBSP, WRAP, ZERO } from '../../dataset/constant/Common'
+import { HORIZON_TAB, NBSP, WRAP, ZERO } from '../../dataset/constant/Common'
 import {
   AREA_CONTEXT_ATTR,
   EDITOR_ELEMENT_STYLE_ATTR,
@@ -12,6 +12,7 @@ import {
 } from '../../dataset/constant/Title'
 import { defaultWatermarkOption } from '../../dataset/constant/Watermark'
 import { ImageDisplay, LocationPosition } from '../../dataset/enum/Common'
+import { ChangeCaseType } from '../../dataset/enum/ChangeCase'
 import { ControlComponent } from '../../dataset/enum/Control'
 import {
   EditorMode,
@@ -2359,6 +2360,88 @@ export class CommandAdapt {
         isSetCursor: false
       })
     }
+  }
+
+  public changeCase(type: ChangeCaseType) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+
+    const selection = this.range.getSelectionElementList()
+    if (!selection?.length) return
+
+    const isIgnorable = (v: string) =>
+      v === ZERO || v === WRAP || v === NBSP || v === HORIZON_TAB
+
+    const isChangeable = (v: string) => !isIgnorable(v) && /[A-Za-z]/.test(v)
+
+    const isSpaceOrLineBreak = (v: string) =>
+      isIgnorable(v) || v === ' '
+
+    const isWordChar = (v: string) => /[A-Za-z0-9]/.test(v)
+
+    let capitalizeNext: boolean
+
+    switch (type) {
+      case ChangeCaseType.UPPER:
+        selection.forEach(el => {
+          if (isChangeable(el.value)) {
+            el.value = el.value.toUpperCase()
+          }
+        })
+        break
+      case ChangeCaseType.LOWER:
+        selection.forEach(el => {
+          if (isChangeable(el.value)) {
+            el.value = el.value.toLowerCase()
+          }
+        })
+        break
+      case ChangeCaseType.TOGGLE:
+        selection.forEach(el => {
+          if (isChangeable(el.value)) {
+            const ch = el.value
+            el.value =
+              ch === ch.toUpperCase() ? ch.toLowerCase() : ch.toUpperCase()
+          }
+        })
+        break
+      case ChangeCaseType.SENTENCE:
+        capitalizeNext = true
+        selection.forEach(el => {
+          if (!isChangeable(el.value)) {
+            if (/[.?!]/.test(el.value)) {
+              capitalizeNext = true
+            } else if (!isSpaceOrLineBreak(el.value)) {
+              capitalizeNext = false
+            }
+            return
+          }
+          if (capitalizeNext) {
+            el.value = el.value.toUpperCase()
+            capitalizeNext = false
+          } else {
+            el.value = el.value.toLowerCase()
+          }
+        })
+        break
+      case ChangeCaseType.CAPITALIZE:
+        capitalizeNext = true
+        selection.forEach(el => {
+          if (!isChangeable(el.value)) {
+            capitalizeNext = !isWordChar(el.value)
+            return
+          }
+          if (capitalizeNext) {
+            el.value = el.value.toUpperCase()
+            capitalizeNext = false
+          } else {
+            el.value = el.value.toLowerCase()
+          }
+        })
+        break
+    }
+
+    this.draw.render({ isSetCursor: false })
   }
 
   public setHTML(payload: Partial<IEditorHTML>) {
