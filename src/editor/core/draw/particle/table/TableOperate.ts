@@ -1,7 +1,11 @@
 import { ElementType, IElement, TableBorder, VerticalAlign } from '../../../..'
 import { ZERO } from '../../../../dataset/constant/Common'
 import { TABLE_CONTEXT_ATTR } from '../../../../dataset/constant/Element'
-import { TdBorder, TdSlash } from '../../../../dataset/enum/table/Table'
+import {
+  TableBorderStyle,
+  TdBorder,
+  TdSlash
+} from '../../../../dataset/enum/table/Table'
 import { DeepRequired } from '../../../../interface/Common'
 import { IEditorOption } from '../../../../interface/Editor'
 import { IColgroup } from '../../../../interface/table/Colgroup'
@@ -837,41 +841,143 @@ export class TableOperate {
   }
 
   public tableBorderType(payload: TableBorder) {
-    const positionContext = this.position.getPositionContext()
-    if (!positionContext.isTable) return
-    const { index } = positionContext
-    const originalElementList = this.draw.getOriginalElementList()
-    const element = originalElementList[index!]
-    if (
-      (!element.borderType && payload === TableBorder.ALL) ||
-      element.borderType === payload
-    ) {
-      return
+    const rowCol = this.tableParticle.getRangeRowCol()
+    if (!rowCol) return
+
+    let minRowIndex = Infinity
+    let maxRowIndex = -Infinity
+    let minColIndex = Infinity
+    let maxColIndex = -Infinity
+
+    for (let r = 0; r < rowCol.length; r++) {
+      for (let c = 0; c < rowCol[r].length; c++) {
+        const td = rowCol[r][c]
+        if (td.rowIndex! < minRowIndex) minRowIndex = td.rowIndex!
+        if (td.rowIndex! + td.rowspan - 1 > maxRowIndex) maxRowIndex = td.rowIndex! + td.rowspan - 1
+        if (td.colIndex! < minColIndex) minColIndex = td.colIndex!
+        if (td.colIndex! + td.colspan - 1 > maxColIndex) maxColIndex = td.colIndex! + td.colspan - 1
+      }
     }
-    element.borderType = payload
+
+    for (let r = 0; r < rowCol.length; r++) {
+      const row = rowCol[r]
+      for (let c = 0; c < row.length; c++) {
+        const td = row[c]
+        const isTop = td.rowIndex === minRowIndex
+        const isBottom = td.rowIndex! + td.rowspan - 1 === maxRowIndex
+        const isLeft = td.colIndex === minColIndex
+        const isRight = td.colIndex! + td.colspan - 1 === maxColIndex
+
+        if (payload === TableBorder.ALL) {
+          td.borderTypes = [
+            TdBorder.TOP,
+            TdBorder.RIGHT,
+            TdBorder.BOTTOM,
+            TdBorder.LEFT
+          ]
+        } else if (payload === TableBorder.EMPTY) {
+          // 保留空数组作为"明确无边框"标志，不 delete，避免网格线仍然渲染
+          td.borderTypes = []
+        } else if (payload === TableBorder.EXTERNAL) {
+          td.borderTypes = []
+          if (isTop) td.borderTypes.push(TdBorder.TOP)
+          if (isBottom) td.borderTypes.push(TdBorder.BOTTOM)
+          if (isLeft) td.borderTypes.push(TdBorder.LEFT)
+          if (isRight) td.borderTypes.push(TdBorder.RIGHT)
+        } else if (payload === TableBorder.INTERNAL) {
+          td.borderTypes = []
+          if (!isTop) td.borderTypes.push(TdBorder.TOP)
+          if (!isBottom) td.borderTypes.push(TdBorder.BOTTOM)
+          if (!isLeft) td.borderTypes.push(TdBorder.LEFT)
+          if (!isRight) td.borderTypes.push(TdBorder.RIGHT)
+        }
+      }
+    }
     const { endIndex } = this.range.getRange()
     this.draw.render({
-      curIndex: endIndex
+      curIndex: endIndex,
+      isSetCursor: false,
+      isCompute: false
     })
   }
 
   public tableBorderColor(payload: string) {
-    const positionContext = this.position.getPositionContext()
-    if (!positionContext.isTable) return
-    const { index } = positionContext
-    const originalElementList = this.draw.getOriginalElementList()
-    const element = originalElementList[index!]
-    if (
-      (!element.borderColor &&
-        payload === this.options.table.defaultBorderColor) ||
-      element.borderColor === payload
-    ) {
-      return
+    const rowCol = this.tableParticle.getRangeRowCol()
+    if (!rowCol) return
+    for (let r = 0; r < rowCol.length; r++) {
+      const row = rowCol[r]
+      for (let c = 0; c < row.length; c++) {
+        const td = row[c]
+        td.borderColor = payload
+        // 确保所有四条边都被显式渲染，使颜色变化在所有边上生效
+        if (!td.borderTypes?.length) {
+          td.borderTypes = [
+            TdBorder.TOP,
+            TdBorder.RIGHT,
+            TdBorder.BOTTOM,
+            TdBorder.LEFT
+          ]
+        }
+      }
     }
-    element.borderColor = payload
     const { endIndex } = this.range.getRange()
     this.draw.render({
       curIndex: endIndex,
+      isSetCursor: false,
+      isCompute: false
+    })
+  }
+
+  public tableBorderWidth(payload: number) {
+    const rowCol = this.tableParticle.getRangeRowCol()
+    if (!rowCol) return
+    for (let r = 0; r < rowCol.length; r++) {
+      const row = rowCol[r]
+      for (let c = 0; c < row.length; c++) {
+        const td = row[c]
+        td.borderWidth = payload
+        // 确保所有四条边都被显式渲染，使粗细变化在所有边上生效
+        if (!td.borderTypes?.length) {
+          td.borderTypes = [
+            TdBorder.TOP,
+            TdBorder.RIGHT,
+            TdBorder.BOTTOM,
+            TdBorder.LEFT
+          ]
+        }
+      }
+    }
+    const { endIndex } = this.range.getRange()
+    this.draw.render({
+      curIndex: endIndex,
+      isSetCursor: false,
+      isCompute: false
+    })
+  }
+
+  public tableBorderStyle(payload: TableBorderStyle) {
+    const rowCol = this.tableParticle.getRangeRowCol()
+    if (!rowCol) return
+    for (let r = 0; r < rowCol.length; r++) {
+      const row = rowCol[r]
+      for (let c = 0; c < row.length; c++) {
+        const td = row[c]
+        td.borderStyle = payload
+        // 确保所有四条边都被显式渲染，使样式变化在所有边上生效
+        if (!td.borderTypes?.length) {
+          td.borderTypes = [
+            TdBorder.TOP,
+            TdBorder.RIGHT,
+            TdBorder.BOTTOM,
+            TdBorder.LEFT
+          ]
+        }
+      }
+    }
+    const { endIndex } = this.range.getRange()
+    this.draw.render({
+      curIndex: endIndex,
+      isSetCursor: false,
       isCompute: false
     })
   }
@@ -879,14 +985,50 @@ export class TableOperate {
   public tableTdBorderType(payload: TdBorder) {
     const rowCol = this.tableParticle.getRangeRowCol()
     if (!rowCol) return
-    const tdList = rowCol.flat()
+
+    let minRowIndex = Infinity
+    let maxRowIndex = -Infinity
+    let minColIndex = Infinity
+    let maxColIndex = -Infinity
+
+    for (let r = 0; r < rowCol.length; r++) {
+      for (let c = 0; c < rowCol[r].length; c++) {
+        const td = rowCol[r][c]
+        if (td.rowIndex! < minRowIndex) minRowIndex = td.rowIndex!
+        if (td.rowIndex! + td.rowspan - 1 > maxRowIndex) maxRowIndex = td.rowIndex! + td.rowspan - 1
+        if (td.colIndex! < minColIndex) minColIndex = td.colIndex!
+        if (td.colIndex! + td.colspan - 1 > maxColIndex) maxColIndex = td.colIndex! + td.colspan - 1
+      }
+    }
+    
+    // 找出目标单元格：选区边缘的单元格
+    const targetCells: ITd[] = []
+    for (let r = 0; r < rowCol.length; r++) {
+      const row = rowCol[r]
+      for (let c = 0; c < row.length; c++) {
+        const td = row[c]
+        if (payload === TdBorder.TOP && td.rowIndex === minRowIndex) targetCells.push(td)
+        if (payload === TdBorder.BOTTOM && td.rowIndex! + td.rowspan - 1 === maxRowIndex) targetCells.push(td)
+        if (payload === TdBorder.LEFT && td.colIndex === minColIndex) targetCells.push(td)
+        if (payload === TdBorder.RIGHT && td.colIndex! + td.colspan - 1 === maxColIndex) targetCells.push(td)
+      }
+    }
+
     // 存在则设置边框类型，否则取消设置
-    const isSetBorderType = tdList.some(
-      td => !td.borderTypes?.includes(payload)
-    )
-    tdList.forEach(td => {
-      if (!td.borderTypes) {
-        td.borderTypes = []
+    const isSetBorderType = targetCells.some(td => {
+      if (td.borderTypes === undefined) return false // 默认状态视为四边都有，所以不缺少该边框（需要 toggle off）
+      return !td.borderTypes.includes(payload)
+    })
+
+    targetCells.forEach(td => {
+      if (td.borderTypes === undefined) {
+        // 从默认状态切换时，先设置全部四边（表示接管网格线控制权）
+        td.borderTypes = [
+          TdBorder.TOP,
+          TdBorder.RIGHT,
+          TdBorder.BOTTOM,
+          TdBorder.LEFT
+        ]
       }
       const borderTypeIndex = td.borderTypes.findIndex(type => type === payload)
       if (isSetBorderType) {
@@ -898,14 +1040,13 @@ export class TableOperate {
           td.borderTypes.splice(borderTypeIndex, 1)
         }
       }
-      // 不存在边框设置时删除字段
-      if (!td.borderTypes.length) {
-        delete td.borderTypes
-      }
+      // 保留空数组作为"明确无边框"标志，不 delete
     })
     const { endIndex } = this.range.getRange()
     this.draw.render({
-      curIndex: endIndex
+      curIndex: endIndex,
+      isSetCursor: false,
+      isCompute: false
     })
   }
 
@@ -938,7 +1079,9 @@ export class TableOperate {
     })
     const { endIndex } = this.range.getRange()
     this.draw.render({
-      curIndex: endIndex
+      curIndex: endIndex,
+      isSetCursor: false,
+      isCompute: false
     })
   }
 
@@ -953,8 +1096,9 @@ export class TableOperate {
       }
     }
     const { endIndex } = this.range.getRange()
-    this.range.setRange(endIndex, endIndex)
     this.draw.render({
+      curIndex: endIndex,
+      isSetCursor: false,
       isCompute: false
     })
   }

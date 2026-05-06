@@ -4,7 +4,7 @@ import { ElementType } from '../dataset/enum/Element'
 import { ListStyle, ListType } from '../dataset/enum/List'
 import { RowFlex } from '../dataset/enum/Row'
 import { TitleLevel } from '../dataset/enum/Title'
-import { TableBorder } from '../dataset/enum/table/Table'
+import { TableBorder, TableBorderStyle } from '../dataset/enum/table/Table'
 import { IArea } from './Area'
 import { IBlock } from './Block'
 import { ICheckbox } from './Checkbox'
@@ -70,6 +70,7 @@ export interface ITableAttr {
   colgroup?: IColgroup[]
   trList?: ITr[]
   borderType?: TableBorder
+  borderStyle?: TableBorderStyle
   borderColor?: string
   borderWidth?: number
   borderExternalWidth?: number

@@ -1,5 +1,9 @@
 import { ElementType, IElement, TableBorder } from '../../../..'
-import { TdBorder, TdSlash } from '../../../../dataset/enum/table/Table'
+import {
+  TableBorderStyle,
+  TdBorder,
+  TdSlash
+} from '../../../../dataset/enum/table/Table'
 import { DeepRequired } from '../../../../interface/Common'
 import { IEditorOption } from '../../../../interface/Editor'
 import { ITd } from '../../../../interface/table/Td'
@@ -7,16 +11,6 @@ import { ITr } from '../../../../interface/table/Tr'
 import { deepClone } from '../../../../utils'
 import { RangeManager } from '../../../range/RangeManager'
 import { Draw } from '../../Draw'
-
-interface IDrawTableBorderOption {
-  ctx: CanvasRenderingContext2D
-  startX: number
-  startY: number
-  width: number
-  height: number
-  borderExternalWidth?: number
-  isDrawFullBorder?: boolean
-}
 
 export class TableParticle {
   private draw: Draw
@@ -100,40 +94,7 @@ export class TableParticle {
     return rowCol.length ? rowCol : null
   }
 
-  private _drawOuterBorder(payload: IDrawTableBorderOption) {
-    const {
-      ctx,
-      startX,
-      startY,
-      width,
-      height,
-      isDrawFullBorder,
-      borderExternalWidth
-    } = payload
-    const { scale } = this.options
-    // 外部边框单独设置
-    const lineWidth = ctx.lineWidth
-    if (borderExternalWidth) {
-      ctx.lineWidth = borderExternalWidth * scale
-    }
-    ctx.beginPath()
-    const x = Math.round(startX)
-    const y = Math.round(startY)
-    ctx.translate(0.5, 0.5)
-    if (isDrawFullBorder) {
-      ctx.rect(x, y, width, height)
-    } else {
-      ctx.moveTo(x, y + height)
-      ctx.lineTo(x, y)
-      ctx.lineTo(x + width, y)
-    }
-    ctx.stroke()
-    // 还原边框设置
-    if (borderExternalWidth) {
-      ctx.lineWidth = lineWidth
-    }
-    ctx.translate(-0.5, -0.5)
-  }
+
 
   private _drawSlash(
     ctx: CanvasRenderingContext2D,
@@ -171,6 +132,7 @@ export class TableParticle {
       colgroup,
       trList,
       borderType,
+      borderStyle,
       borderColor,
       borderWidth = 1,
       borderExternalWidth
@@ -180,33 +142,36 @@ export class TableParticle {
       scale,
       table: { defaultBorderColor }
     } = this.options
-    const tableWidth = element.width! * scale
-    const tableHeight = element.height! * scale
+
     // 无边框
     const isEmptyBorderType = borderType === TableBorder.EMPTY
     // 仅外边框
     const isExternalBorderType = borderType === TableBorder.EXTERNAL
     // 内边框
     const isInternalBorderType = borderType === TableBorder.INTERNAL
+
+    // 构建单元格索引映射，用于查询相邻单元格是否有显式边框控制
+    const tdMap = new Map<string, ITd>()
+    for (let t = 0; t < trList.length; t++) {
+      const tr = trList[t]
+      for (let d = 0; d < tr.tdList.length; d++) {
+        const td = tr.tdList[d]
+        tdMap.set(`${td.rowIndex},${td.colIndex}`, td)
+      }
+    }
+
     ctx.save()
-    // 虚线
-    if (borderType === TableBorder.DASH) {
+    // 虚线 / 边框样式
+    if (borderStyle === TableBorderStyle.DASHED) {
+      ctx.setLineDash([3, 3])
+    } else if (borderStyle === TableBorderStyle.DOTTED) {
+      ctx.setLineDash([1, 2])
+    } else if (borderType === TableBorder.DASH) {
       ctx.setLineDash([3, 3])
     }
     ctx.lineWidth = borderWidth * scale
     ctx.strokeStyle = borderColor || defaultBorderColor
-    // 渲染边框
-    if (!isEmptyBorderType && !isInternalBorderType) {
-      this._drawOuterBorder({
-        ctx,
-        startX,
-        startY,
-        width: tableWidth,
-        height: tableHeight,
-        borderExternalWidth,
-        isDrawFullBorder: isExternalBorderType
-      })
-    }
+
     // 渲染单元格
     for (let t = 0; t < trList.length; t++) {
       const tr = trList[t]
@@ -227,10 +192,30 @@ export class TableParticle {
         const height = td.height! * scale
         const x = Math.round(td.x! * scale + startX + width)
         const y = Math.round(td.y! * scale + startY)
+        
+        ctx.save()
+        // 优先使用单元格级别的边框属性，回退到表格全局属性
+        const cellBorderWidth = td.borderWidth ?? borderWidth ?? 1
+        const cellBorderColor =
+          td.borderColor || borderColor || defaultBorderColor
+        const cellBorderStyle =
+          td.borderStyle || borderStyle || TableBorderStyle.SOLID
+
+        if (cellBorderStyle === TableBorderStyle.DASHED) {
+          ctx.setLineDash([3, 3])
+        } else if (cellBorderStyle === TableBorderStyle.DOTTED) {
+          ctx.setLineDash([1, 2])
+        } else if (borderType === TableBorder.DASH) {
+          ctx.setLineDash([3, 3])
+        } else {
+          ctx.setLineDash([])
+        }
+        ctx.lineWidth = cellBorderWidth * scale
+        ctx.strokeStyle = cellBorderColor
+
         ctx.translate(0.5, 0.5)
-        // 绘制线条
         ctx.beginPath()
-        // 单元格边框
+        // 单元格显式边框（borderTypes 路径）
         if (td.borderTypes?.includes(TdBorder.TOP)) {
           ctx.moveTo(x - width, y)
           ctx.lineTo(x, y)
@@ -251,59 +236,84 @@ export class TableParticle {
           ctx.lineTo(x - width, y + height)
           ctx.stroke()
         }
-        // 表格线
-        if (!isEmptyBorderType && !isExternalBorderType) {
-          // 右边框
-          if (
-            !isInternalBorderType ||
-            td.colIndex! + td.colspan < colgroup.length
-          ) {
-            ctx.moveTo(x, y)
-            ctx.lineTo(x, y + height)
-            // 外部边框宽度设置时 => 最右边框宽度单独设置
-            if (
-              borderExternalWidth &&
-              borderExternalWidth !== borderWidth &&
-              td.colIndex! + td.colspan === colgroup.length
-            ) {
-              const lineWidth = ctx.lineWidth
+        // 表格默认网格线
+        // 如果单元格有显式 borderTypes（包括空数组），则跳过网格线
+        const hasCellBorderControl = td.borderTypes !== undefined
+        if (!hasCellBorderControl && !isEmptyBorderType) {
+          const isOuterTop = td.rowIndex === 0
+          const isOuterLeft = td.colIndex === 0
+          const isOuterRight = td.colIndex! + td.colspan === colgroup.length
+          const isOuterBottom = td.rowIndex! + td.rowspan === trList.length
+
+          const drawGridLine = (
+            startX: number,
+            startY: number,
+            endX: number,
+            endY: number,
+            isOuter: boolean
+          ) => {
+            if (isOuter && borderExternalWidth && borderExternalWidth !== borderWidth) {
+              ctx.stroke()
+              ctx.beginPath()
+              ctx.moveTo(startX, startY)
+              ctx.lineTo(endX, endY)
+              const lw = ctx.lineWidth
               ctx.lineWidth = borderExternalWidth * scale
               ctx.stroke()
-              // 清空path
               ctx.beginPath()
-              ctx.lineWidth = lineWidth
+              ctx.lineWidth = lw
+            } else {
+              ctx.moveTo(startX, startY)
+              ctx.lineTo(endX, endY)
             }
           }
-          // 下边框
-          if (
-            !isInternalBorderType ||
-            td.rowIndex! + td.rowspan < trList.length
-          ) {
-            // 外部边框宽度设置时 => 立即绘制竖线
-            const isSetExternalBottomBorder =
-              borderExternalWidth &&
-              borderExternalWidth !== borderWidth &&
-              td.rowIndex! + td.rowspan === trList.length
-            if (isSetExternalBottomBorder) {
-              ctx.stroke()
-              // 清空path
-              ctx.beginPath()
-            }
-            ctx.moveTo(x, y + height)
-            ctx.lineTo(x - width, y + height)
-            // 外部边框宽度设置时 => 最下边框宽度单独设置
-            if (isSetExternalBottomBorder) {
-              const lineWidth = ctx.lineWidth
-              ctx.lineWidth = borderExternalWidth * scale
-              ctx.stroke()
-              // 清空path
-              ctx.beginPath()
-              ctx.lineWidth = lineWidth
-            }
+
+          // TOP
+          if (isOuterTop && !isInternalBorderType) {
+            drawGridLine(x - width, y, x, y, true)
           }
+
+          // LEFT
+          if (isOuterLeft && !isInternalBorderType) {
+            drawGridLine(x - width, y, x - width, y + height, true)
+          }
+
+          // RIGHT
+          const rightNeighbor = tdMap.get(
+            `${td.rowIndex},${td.colIndex! + td.colspan}`
+          )
+          const rightNeighborOwnsLeft =
+            rightNeighbor?.borderTypes !== undefined &&
+            rightNeighbor.borderTypes.includes(TdBorder.LEFT)
+            
+          const shouldDrawRight = isOuterRight
+            ? !isInternalBorderType
+            : !isExternalBorderType
+
+          if (!rightNeighborOwnsLeft && shouldDrawRight) {
+            drawGridLine(x, y, x, y + height, isOuterRight)
+          }
+
+          // BOTTOM
+          const bottomNeighbor = tdMap.get(
+            `${td.rowIndex! + td.rowspan},${td.colIndex}`
+          )
+          const bottomNeighborOwnsTop =
+            bottomNeighbor?.borderTypes !== undefined &&
+            bottomNeighbor.borderTypes.includes(TdBorder.TOP)
+            
+          const shouldDrawBottom = isOuterBottom
+            ? !isInternalBorderType
+            : !isExternalBorderType
+
+          if (!bottomNeighborOwnsTop && shouldDrawBottom) {
+            drawGridLine(x, y + height, x - width, y + height, isOuterBottom)
+          }
+
           ctx.stroke()
         }
         ctx.translate(-0.5, -0.5)
+        ctx.restore()
       }
     }
     ctx.restore()
