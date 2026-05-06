@@ -1,5 +1,6 @@
 import { RowFlex } from '../dataset/enum/Row'
 import { IElement, IElementMetrics } from './Element'
+import { IPageColumns } from './PageColumns'
 
 export type IRowElement = IElement & {
   metrics: IElementMetrics
@@ -24,4 +25,8 @@ export interface IRow {
   isWidthNotEnough?: boolean
   rowIndex: number
   isSurround?: boolean
+  pageColumns?: Required<IPageColumns>
+  innerWidth?: number
+  pageStartX?: number
+  pageStartY?: number
 }

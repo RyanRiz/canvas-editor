@@ -1299,6 +1299,50 @@ export class CommandAdapt {
       )
     }
     const cur = this.options.pageColumns
+    const elementList = this.draw.getElementList()
+    const { startIndex, endIndex } = this.range.getRange()
+    const hasSelection =
+      startIndex !== endIndex &&
+      startIndex >= 0 &&
+      endIndex >= 0 &&
+      endIndex < elementList.length
+    if (hasSelection) {
+      const selectionStart =
+        elementList[startIndex]?.value === ZERO ? startIndex : startIndex + 1
+      const selectionEnd = endIndex
+      if (
+        selectionStart >= 0 &&
+        selectionStart <= selectionEnd &&
+        selectionStart < elementList.length
+      ) {
+        const beforeLayout = this.draw.getPageColumnsAtIndex(selectionStart - 1)
+        const afterIndex = selectionEnd + 1
+        const afterLayout =
+          afterIndex < elementList.length
+            ? this.draw.getPageColumnsAtIndex(afterIndex)
+            : null
+        for (let i = selectionStart; i <= selectionEnd; i++) {
+          delete elementList[i].pageColumns
+        }
+        if (this.draw.isSamePageColumns(beforeLayout, next)) {
+          delete elementList[selectionStart].pageColumns
+        } else {
+          elementList[selectionStart].pageColumns = next
+        }
+        if (afterIndex < elementList.length) {
+          if (afterLayout && this.draw.isSamePageColumns(afterLayout, next)) {
+            delete elementList[afterIndex].pageColumns
+          } else if (afterLayout) {
+            elementList[afterIndex].pageColumns = afterLayout
+          }
+        }
+        this.draw.render({
+          isSetCursor: false,
+          isSubmitHistory: false
+        })
+        return
+      }
+    }
     if (
       cur.columnCount === next.columnCount &&
       cur.columnGap === next.columnGap
