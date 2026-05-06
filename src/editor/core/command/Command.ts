@@ -31,6 +31,7 @@ export class Command {
   public executeSubscript: CommandAdapt['subscript']
   public executeColor: CommandAdapt['color']
   public executeHighlight: CommandAdapt['highlight']
+  public executeSetElementExtension: CommandAdapt['setElementExtension']
   public executeTitle: CommandAdapt['title']
   public executeList: CommandAdapt['list']
   public executeRowFlex: CommandAdapt['rowFlex']
@@ -180,6 +181,8 @@ export class Command {
     this.executeSubscript = adapt.subscript.bind(adapt)
     this.executeColor = adapt.color.bind(adapt)
     this.executeHighlight = adapt.highlight.bind(adapt)
+    this.executeSetElementExtension =
+      adapt.setElementExtension.bind(adapt)
     // 标题、对齐方式、列表
     this.executeTitle = adapt.title.bind(adapt)
     this.executeList = adapt.list.bind(adapt)
