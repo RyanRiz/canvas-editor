@@ -61,6 +61,8 @@ export class Command {
   public executeEditHyperlink: CommandAdapt['editHyperlink']
   public executeSeparator: CommandAdapt['separator']
   public executePageBreak: CommandAdapt['pageBreak']
+  public executeColumnBreak: CommandAdapt['columnBreak']
+  public executeColumnLayout: CommandAdapt['columnLayout']
   public executeAddWatermark: CommandAdapt['addWatermark']
   public executeDeleteWatermark: CommandAdapt['deleteWatermark']
   public executeSearch: CommandAdapt['search']
@@ -215,6 +217,8 @@ export class Command {
     this.executeEditHyperlink = adapt.editHyperlink.bind(adapt)
     this.executeSeparator = adapt.separator.bind(adapt)
     this.executePageBreak = adapt.pageBreak.bind(adapt)
+    this.executeColumnBreak = adapt.columnBreak.bind(adapt)
+    this.executeColumnLayout = adapt.columnLayout.bind(adapt)
     this.executeAddWatermark = adapt.addWatermark.bind(adapt)
     this.executeDeleteWatermark = adapt.deleteWatermark.bind(adapt)
     this.executeSearch = adapt.search.bind(adapt)
