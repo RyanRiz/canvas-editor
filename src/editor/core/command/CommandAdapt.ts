@@ -1549,6 +1549,14 @@ export class CommandAdapt {
     return this.position.getCursorPosition()
   }
 
+  public getElementList(): IElement[] {
+    return this.draw.getOriginalMainElementList()
+  }
+
+  public getPositionList(): IElementPosition[] {
+    return this.draw.getPosition().getOriginalMainPositionList()
+  }
+
   public getRemainingContentHeight(): number {
     if (!this.draw.getIsPagingMode()) return 0
     const pageRowList = this.draw.getPageRowList()

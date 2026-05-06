@@ -129,6 +129,8 @@ export class Command {
   public getText: CommandAdapt['getText']
   public getWordCount: CommandAdapt['getWordCount']
   public getCursorPosition: CommandAdapt['getCursorPosition']
+  public getElementList: CommandAdapt['getElementList']
+  public getPositionList: CommandAdapt['getPositionList']
   public getRemainingContentHeight: CommandAdapt['getRemainingContentHeight']
   public getRange: CommandAdapt['getRange']
   public getRangeText: CommandAdapt['getRangeText']
@@ -281,6 +283,8 @@ export class Command {
     this.getText = adapt.getText.bind(adapt)
     this.getWordCount = adapt.getWordCount.bind(adapt)
     this.getCursorPosition = adapt.getCursorPosition.bind(adapt)
+    this.getElementList = adapt.getElementList.bind(adapt)
+    this.getPositionList = adapt.getPositionList.bind(adapt)
     this.getRemainingContentHeight = adapt.getRemainingContentHeight.bind(adapt)
     this.getRange = adapt.getRange.bind(adapt)
     this.getRangeText = adapt.getRangeText.bind(adapt)
