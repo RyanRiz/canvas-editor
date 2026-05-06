@@ -150,13 +150,27 @@ export class Position {
       for (let j = 0; j < curRow.elementList.length; j++) {
         const element = curRow.elementList[j]
         const metrics = element.metrics
+        const { defaultSize, defaultBasicRowMarginHeight, defaultRowMargin } =
+          this.options
+        const fontSize = element.size || defaultSize
+        let rowMarginRatio = 1
+        if (fontSize < 12) {
+          rowMarginRatio = fontSize / 12
+        } else if (fontSize > 30) {
+          rowMarginRatio = 1 + (fontSize - 30) / 30
+        }
+        const rowMargin =
+          defaultBasicRowMarginHeight *
+          rowMarginRatio *
+          (element.rowMargin ?? defaultRowMargin) *
+          scale
         const offsetY =
           !element.hide &&
           ((element.imgDisplay !== ImageDisplay.INLINE &&
             element.type === ElementType.IMAGE) ||
             element.type === ElementType.LATEX)
             ? curRow.ascent - metrics.height
-            : curRow.ascent
+            : Math.max(0, curRow.ascent - rowMargin * 1.2)
         // 偏移量（内部计算使用）
         if (element.left) {
           x += element.left
@@ -663,9 +677,9 @@ export class Position {
             position.pageNo !== positionNo ||
             (hasColumnScopedRows && !columnRowNoSet.has(position.rowIndex)) ||
             (hasColumnScopedRows
-              ? position.rowIndex !== currentPageRows.find(row =>
-                  columnRowNoSet.has(row.rowIndex)
-                )?.rowIndex
+              ? position.rowIndex !==
+                currentPageRows.find(row => columnRowNoSet.has(row.rowIndex))
+                  ?.rowIndex
               : position.rowNo !== 0)
           ) {
             continue
