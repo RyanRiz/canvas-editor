@@ -1,5 +1,5 @@
 import { EditorZone } from '../dataset/enum/Editor'
-import { IElement, IElementFillRect, IElementStyle } from './Element'
+import { IElement, IElementBasic, IElementFillRect, IElementStyle } from './Element'
 
 export interface IRange {
   startIndex: number
@@ -58,4 +58,5 @@ export type IRangeElementStyle = Pick<
   | 'italic'
   | 'underline'
   | 'strikeout'
->
+> &
+  Pick<IElementBasic, 'extension'>

@@ -31,6 +31,7 @@ export class Command {
   public executeSubscript: CommandAdapt['subscript']
   public executeColor: CommandAdapt['color']
   public executeHighlight: CommandAdapt['highlight']
+  public executeSetElementExtension: CommandAdapt['setElementExtension']
   public executeTitle: CommandAdapt['title']
   public executeList: CommandAdapt['list']
   public executeRowFlex: CommandAdapt['rowFlex']
@@ -63,6 +64,8 @@ export class Command {
   public executeEditHyperlink: CommandAdapt['editHyperlink']
   public executeSeparator: CommandAdapt['separator']
   public executePageBreak: CommandAdapt['pageBreak']
+  public executeColumnBreak: CommandAdapt['columnBreak']
+  public executeColumnLayout: CommandAdapt['columnLayout']
   public executeAddWatermark: CommandAdapt['addWatermark']
   public executeDeleteWatermark: CommandAdapt['deleteWatermark']
   public executeSearch: CommandAdapt['search']
@@ -130,6 +133,8 @@ export class Command {
   public getText: CommandAdapt['getText']
   public getWordCount: CommandAdapt['getWordCount']
   public getCursorPosition: CommandAdapt['getCursorPosition']
+  public getElementList: CommandAdapt['getElementList']
+  public getPositionList: CommandAdapt['getPositionList']
   public getRemainingContentHeight: CommandAdapt['getRemainingContentHeight']
   public getRange: CommandAdapt['getRange']
   public getRangeText: CommandAdapt['getRangeText']
@@ -182,6 +187,8 @@ export class Command {
     this.executeSubscript = adapt.subscript.bind(adapt)
     this.executeColor = adapt.color.bind(adapt)
     this.executeHighlight = adapt.highlight.bind(adapt)
+    this.executeSetElementExtension =
+      adapt.setElementExtension.bind(adapt)
     // 标题、对齐方式、列表
     this.executeTitle = adapt.title.bind(adapt)
     this.executeList = adapt.list.bind(adapt)
@@ -219,6 +226,8 @@ export class Command {
     this.executeEditHyperlink = adapt.editHyperlink.bind(adapt)
     this.executeSeparator = adapt.separator.bind(adapt)
     this.executePageBreak = adapt.pageBreak.bind(adapt)
+    this.executeColumnBreak = adapt.columnBreak.bind(adapt)
+    this.executeColumnLayout = adapt.columnLayout.bind(adapt)
     this.executeAddWatermark = adapt.addWatermark.bind(adapt)
     this.executeDeleteWatermark = adapt.deleteWatermark.bind(adapt)
     this.executeSearch = adapt.search.bind(adapt)
@@ -282,6 +291,8 @@ export class Command {
     this.getText = adapt.getText.bind(adapt)
     this.getWordCount = adapt.getWordCount.bind(adapt)
     this.getCursorPosition = adapt.getCursorPosition.bind(adapt)
+    this.getElementList = adapt.getElementList.bind(adapt)
+    this.getPositionList = adapt.getPositionList.bind(adapt)
     this.getRemainingContentHeight = adapt.getRemainingContentHeight.bind(adapt)
     this.getRange = adapt.getRange.bind(adapt)
     this.getRangeText = adapt.getRangeText.bind(adapt)

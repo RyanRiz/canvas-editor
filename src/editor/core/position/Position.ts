@@ -114,6 +114,7 @@ export class Position {
       positionList,
       rowList,
       pageNo,
+      startRowNo = 0,
       startX,
       startY,
       startRowIndex,
@@ -169,7 +170,7 @@ export class Position {
           index,
           value: element.value,
           rowIndex: startRowIndex + i,
-          rowNo: i,
+          rowNo: startRowNo + i,
           metrics,
           left: element.left || 0,
           ascent: offsetY,
@@ -291,11 +292,8 @@ export class Position {
   public computePositionList() {
     // 置空原位置信息
     this.positionList = []
-    // 按每页行计算
-    const innerWidth = this.draw.getInnerWidth()
     const pageRowList = this.draw.getPageRowList()
     const margins = this.draw.getMargins()
-    const startX = margins[3]
     // 起始位置受页眉影响
     const header = this.draw.getHeader()
     const extraHeight = header.getExtraHeight()
@@ -304,17 +302,20 @@ export class Position {
     for (let i = 0; i < pageRowList.length; i++) {
       const rowList = pageRowList[i]
       if (!rowList?.length) continue
-      const startIndex = rowList[0].startIndex
-      this.computePageRowPosition({
-        positionList: this.positionList,
-        rowList,
-        pageNo: i,
-        startRowIndex,
-        startIndex,
-        startX,
-        startY,
-        innerWidth
-      })
+      for (let k = 0; k < rowList.length; k++) {
+        const row = rowList[k]
+        this.computePageRowPosition({
+          positionList: this.positionList,
+          rowList: [row],
+          pageNo: i,
+          startRowNo: k,
+          startRowIndex: startRowIndex + k,
+          startIndex: row.startIndex,
+          startX: row.pageStartX ?? margins[3],
+          startY: row.pageStartY ?? startY,
+          innerWidth: row.innerWidth ?? this.draw.getInnerWidth()
+        })
+      }
       startRowIndex += rowList.length
     }
   }
@@ -370,6 +371,18 @@ export class Position {
     const curPageNo = payload.pageNo ?? this.draw.getPageNo()
     const isMainActive = zoneManager.isMainActive()
     const positionNo = isMainActive ? curPageNo : 0
+    const pageRowList = this.draw.getPageRowList()
+    const currentPageRows = pageRowList[positionNo] || []
+    const columnRowNoSet = new Set(
+      currentPageRows
+        .filter(row => {
+          const startX = row.pageStartX ?? this.draw.getMargins()[3]
+          const endX = startX + (row.innerWidth ?? this.draw.getInnerWidth())
+          return x >= startX && x <= endX
+        })
+        .map(row => row.rowIndex)
+    )
+    const hasColumnScopedRows = columnRowNoSet.size > 0
     // 验证浮于文字上方元素
     if (!isTable) {
       const floatTopPosition = this.getFloatPositionByXY({
@@ -554,7 +567,10 @@ export class Position {
     }
     // 判断所属行是否存在元素
     const lastLetterList = positionList.filter(
-      p => p.isLastLetter && p.pageNo === positionNo
+      p =>
+        p.isLastLetter &&
+        p.pageNo === positionNo &&
+        (!hasColumnScopedRows || columnRowNoSet.has(p.rowIndex))
     )
     for (let j = 0; j < lastLetterList.length; j++) {
       const {
@@ -643,7 +659,17 @@ export class Position {
       if (y <= margins[0]) {
         for (let p = 0; p < positionList.length; p++) {
           const position = positionList[p]
-          if (position.pageNo !== positionNo || position.rowNo !== 0) continue
+          if (
+            position.pageNo !== positionNo ||
+            (hasColumnScopedRows && !columnRowNoSet.has(position.rowIndex)) ||
+            (hasColumnScopedRows
+              ? position.rowIndex !== currentPageRows.find(row =>
+                  columnRowNoSet.has(row.rowIndex)
+                )?.rowIndex
+              : position.rowNo !== 0)
+          ) {
+            continue
+          }
           const { leftTop, rightTop } = position.coordinate
           // 小于左页边距 || 命中文字 || 首行最后元素
           if (
@@ -661,11 +687,13 @@ export class Position {
         const lastLetter = lastLetterList[lastLetterList.length - 1]
         if (lastLetter) {
           const lastRowNo = lastLetter.rowNo
+          const lastRowIndex = lastLetter.rowIndex
           for (let p = 0; p < positionList.length; p++) {
             const position = positionList[p]
             if (
               position.pageNo !== positionNo ||
-              position.rowNo !== lastRowNo
+              position.rowNo !== lastRowNo ||
+              (hasColumnScopedRows && position.rowIndex !== lastRowIndex)
             ) {
               continue
             }

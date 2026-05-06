@@ -895,6 +895,41 @@ export class CommandAdapt {
     }
   }
 
+  public setElementExtension(payload: unknown) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const selection = this.range.getSelectionElementList()
+    if (selection?.length) {
+      selection.forEach(el => {
+        if (payload !== undefined && payload !== null) {
+          el.extension = payload
+        } else {
+          delete el.extension
+        }
+      })
+      this.draw.render({ isSetCursor: false, isCompute: false })
+    } else {
+      let isSubmitHistory = true
+      const { endIndex } = this.range.getRange()
+      if (!~endIndex) return
+      const elementList = this.draw.getElementList()
+      const enterElement = elementList[endIndex]
+      this.range.setDefaultStyle({
+        extension: payload ?? undefined
+      })
+      if (enterElement?.value === ZERO) {
+        if (payload !== undefined && payload !== null) {
+          enterElement.extension = payload
+        } else {
+          delete enterElement.extension
+        }
+      } else {
+        isSubmitHistory = false
+      }
+      this.draw.render({ isSubmitHistory, curIndex: endIndex, isCompute: false })
+    }
+  }
+
   public title(payload: TitleLevel | null) {
     const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
     if (isDisabled) return
@@ -1289,6 +1324,90 @@ export class CommandAdapt {
     ])
   }
 
+  public columnBreak() {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const activeControl = this.control.getActiveControl()
+    if (activeControl) return
+    this.insertElementList([
+      {
+        type: ElementType.COLUMN_BREAK,
+        value: WRAP
+      }
+    ])
+  }
+
+  public columnLayout(payload: { columnCount?: number; columnGap?: number }) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const next = {
+      columnCount: Math.max(
+        1,
+        Math.floor(payload.columnCount ?? this.options.pageColumns.columnCount)
+      ),
+      columnGap: Math.max(
+        0,
+        payload.columnGap ?? this.options.pageColumns.columnGap
+      )
+    }
+    const cur = this.options.pageColumns
+    const elementList = this.draw.getElementList()
+    const { startIndex, endIndex } = this.range.getRange()
+    const hasSelection =
+      startIndex !== endIndex &&
+      startIndex >= 0 &&
+      endIndex >= 0 &&
+      endIndex < elementList.length
+    if (hasSelection) {
+      const selectionStart =
+        elementList[startIndex]?.value === ZERO ? startIndex : startIndex + 1
+      const selectionEnd = endIndex
+      if (
+        selectionStart >= 0 &&
+        selectionStart <= selectionEnd &&
+        selectionStart < elementList.length
+      ) {
+        const beforeLayout = this.draw.getPageColumnsAtIndex(selectionStart - 1)
+        const afterIndex = selectionEnd + 1
+        const afterLayout =
+          afterIndex < elementList.length
+            ? this.draw.getPageColumnsAtIndex(afterIndex)
+            : null
+        for (let i = selectionStart; i <= selectionEnd; i++) {
+          delete elementList[i].pageColumns
+        }
+        if (this.draw.isSamePageColumns(beforeLayout, next)) {
+          delete elementList[selectionStart].pageColumns
+        } else {
+          elementList[selectionStart].pageColumns = next
+        }
+        if (afterIndex < elementList.length) {
+          if (afterLayout && this.draw.isSamePageColumns(afterLayout, next)) {
+            delete elementList[afterIndex].pageColumns
+          } else if (afterLayout) {
+            elementList[afterIndex].pageColumns = afterLayout
+          }
+        }
+        this.draw.render({
+          isSetCursor: false,
+          isSubmitHistory: false
+        })
+        return
+      }
+    }
+    if (
+      cur.columnCount === next.columnCount &&
+      cur.columnGap === next.columnGap
+    ) {
+      return
+    }
+    this.options.pageColumns = next
+    this.draw.render({
+      isSetCursor: false,
+      isSubmitHistory: false
+    })
+  }
+
   public addWatermark(payload: IWatermark) {
     const isReadonly = this.draw.isReadonly()
     if (isReadonly) return
@@ -1529,6 +1648,14 @@ export class CommandAdapt {
 
   public getCursorPosition(): IElementPosition | null {
     return this.position.getCursorPosition()
+  }
+
+  public getElementList(): IElement[] {
+    return this.draw.getOriginalMainElementList()
+  }
+
+  public getPositionList(): IElementPosition[] {
+    return this.draw.getPosition().getOriginalMainPositionList()
   }
 
   public getRemainingContentHeight(): number {

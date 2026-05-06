@@ -10,6 +10,7 @@ import { IBlock } from './Block'
 import { ICheckbox } from './Checkbox'
 import { IPadding } from './Common'
 import { IControl } from './Control'
+import { IPageColumns } from './PageColumns'
 import { IRadio } from './Radio'
 import { ITextDecoration } from './Text'
 import { ITitle } from './Title'
@@ -22,6 +23,7 @@ export interface IElementBasic {
   value: string
   extension?: unknown
   externalId?: string
+  pageColumns?: IPageColumns
 }
 
 export interface IElementStyle {
