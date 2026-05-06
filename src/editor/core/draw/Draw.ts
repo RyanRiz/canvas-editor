@@ -2350,6 +2350,29 @@ export class Draw {
         let columnIndex = 0
         let columnHeightList = new Array(columnCount).fill(sectionTop)
         let columnHasContentList = new Array(columnCount).fill(false)
+        // 列平衡（Google Docs 风格）：当本节内容能在当前页放下时，
+        // 将每列填充到 ceil(剩余高度 / 列数)，让两列高度接近、并排显示，
+        // 而不是先把第 0 列填满整页才溢出到第 1 列。
+        let remainingSectionHeight = 0
+        for (let i = 0; i < sectionRows.length; i++) {
+          remainingSectionHeight +=
+            sectionRows[i].height + (sectionRows[i].offsetY || 0)
+        }
+        const computeBalanceThreshold = (top: number, remaining: number) => {
+          if (remaining <= 0) return contentBottomY
+          const available = contentBottomY - top
+          if (available <= 0) return contentBottomY
+          // 内容超过当前页所有列容量时，回退为贪婪填充
+          if (remaining > available * columnCount) return contentBottomY
+          return Math.min(
+            contentBottomY,
+            top + Math.ceil(remaining / columnCount)
+          )
+        }
+        let balanceThreshold = computeBalanceThreshold(
+          sectionTop,
+          remainingSectionHeight
+        )
         for (let i = 0; i < sectionRows.length; i++) {
           const row = sectionRows[i]
           const rowOffsetY = row.offsetY || 0
@@ -2364,6 +2387,10 @@ export class Draw {
             columnIndex = 0
             columnHeightList = new Array(columnCount).fill(sectionTop)
             columnHasContentList = new Array(columnCount).fill(false)
+            balanceThreshold = computeBalanceThreshold(
+              sectionTop,
+              remainingSectionHeight
+            )
           } else if (forceColumnBreak && columnHasContentList[columnIndex]) {
             if (columnIndex === columnCount - 1) {
               if (!nextPage(row.startIndex)) {
@@ -2373,14 +2400,27 @@ export class Draw {
               columnIndex = 0
               columnHeightList = new Array(columnCount).fill(sectionTop)
               columnHasContentList = new Array(columnCount).fill(false)
+              balanceThreshold = computeBalanceThreshold(
+                sectionTop,
+                remainingSectionHeight
+              )
             } else {
               columnIndex++
+              // 用户主动分列：之后不再做平衡
+              balanceThreshold = contentBottomY
             }
           }
-          const overflow =
-            columnHeightList[columnIndex] + rowOffsetY + row.height >
-            contentBottomY
-          if (overflow && columnHasContentList[columnIndex]) {
+          const projectedHeight =
+            columnHeightList[columnIndex] + rowOffsetY + row.height
+          const overflowHard = projectedHeight > contentBottomY
+          // 软溢出：以行的中点作判断（"四舍五入"式平衡），
+          // 让 col 0 略高于 col 1，与 Google Docs 行为一致；
+          // 否则因 Math.ceil + 行高离散，col 0 总是少一行。
+          const overflowBalance =
+            balanceThreshold < contentBottomY &&
+            columnHeightList[columnIndex] + rowOffsetY + row.height / 2 >
+              balanceThreshold
+          if (overflowHard && columnHasContentList[columnIndex]) {
             if (columnIndex === columnCount - 1) {
               if (!nextPage(row.startIndex)) {
                 return pageRowList
@@ -2389,9 +2429,20 @@ export class Draw {
               columnIndex = 0
               columnHeightList = new Array(columnCount).fill(sectionTop)
               columnHasContentList = new Array(columnCount).fill(false)
+              balanceThreshold = computeBalanceThreshold(
+                sectionTop,
+                remainingSectionHeight
+              )
             } else {
               columnIndex++
             }
+          } else if (
+            overflowBalance &&
+            columnHasContentList[columnIndex] &&
+            columnIndex < columnCount - 1
+          ) {
+            // 软溢出：仅切换到下一列以平衡列高，不强制换页
+            columnIndex++
           }
           row.columnIndex = columnIndex
           row.innerWidth = columnInnerWidth
@@ -2400,6 +2451,7 @@ export class Draw {
           pushRow(row)
           columnHeightList[columnIndex] += row.height + rowOffsetY
           columnHasContentList[columnIndex] = true
+          remainingSectionHeight -= row.height + rowOffsetY
         }
         pageHeight = Math.max(...columnHeightList) + trailingOuterHeight
       }
