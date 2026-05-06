@@ -890,6 +890,41 @@ export class CommandAdapt {
     }
   }
 
+  public setElementExtension(payload: unknown) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const selection = this.range.getSelectionElementList()
+    if (selection?.length) {
+      selection.forEach(el => {
+        if (payload !== undefined && payload !== null) {
+          el.extension = payload
+        } else {
+          delete el.extension
+        }
+      })
+      this.draw.render({ isSetCursor: false, isCompute: false })
+    } else {
+      let isSubmitHistory = true
+      const { endIndex } = this.range.getRange()
+      if (!~endIndex) return
+      const elementList = this.draw.getElementList()
+      const enterElement = elementList[endIndex]
+      this.range.setDefaultStyle({
+        extension: payload ?? undefined
+      })
+      if (enterElement?.value === ZERO) {
+        if (payload !== undefined && payload !== null) {
+          enterElement.extension = payload
+        } else {
+          delete enterElement.extension
+        }
+      } else {
+        isSubmitHistory = false
+      }
+      this.draw.render({ isSubmitHistory, curIndex: endIndex, isCompute: false })
+    }
+  }
+
   public title(payload: TitleLevel | null) {
     const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
     if (isDisabled) return
@@ -1596,6 +1631,14 @@ export class CommandAdapt {
 
   public getCursorPosition(): IElementPosition | null {
     return this.position.getCursorPosition()
+  }
+
+  public getElementList(): IElement[] {
+    return this.draw.getOriginalMainElementList()
+  }
+
+  public getPositionList(): IElementPosition[] {
+    return this.draw.getPosition().getOriginalMainPositionList()
   }
 
   public getRemainingContentHeight(): number {

@@ -31,6 +31,7 @@ export class Command {
   public executeSubscript: CommandAdapt['subscript']
   public executeColor: CommandAdapt['color']
   public executeHighlight: CommandAdapt['highlight']
+  public executeSetElementExtension: CommandAdapt['setElementExtension']
   public executeTitle: CommandAdapt['title']
   public executeList: CommandAdapt['list']
   public executeRowFlex: CommandAdapt['rowFlex']
@@ -130,6 +131,8 @@ export class Command {
   public getText: CommandAdapt['getText']
   public getWordCount: CommandAdapt['getWordCount']
   public getCursorPosition: CommandAdapt['getCursorPosition']
+  public getElementList: CommandAdapt['getElementList']
+  public getPositionList: CommandAdapt['getPositionList']
   public getRemainingContentHeight: CommandAdapt['getRemainingContentHeight']
   public getRange: CommandAdapt['getRange']
   public getRangeText: CommandAdapt['getRangeText']
@@ -182,6 +185,8 @@ export class Command {
     this.executeSubscript = adapt.subscript.bind(adapt)
     this.executeColor = adapt.color.bind(adapt)
     this.executeHighlight = adapt.highlight.bind(adapt)
+    this.executeSetElementExtension =
+      adapt.setElementExtension.bind(adapt)
     // 标题、对齐方式、列表
     this.executeTitle = adapt.title.bind(adapt)
     this.executeList = adapt.list.bind(adapt)
@@ -282,6 +287,8 @@ export class Command {
     this.getText = adapt.getText.bind(adapt)
     this.getWordCount = adapt.getWordCount.bind(adapt)
     this.getCursorPosition = adapt.getCursorPosition.bind(adapt)
+    this.getElementList = adapt.getElementList.bind(adapt)
+    this.getPositionList = adapt.getPositionList.bind(adapt)
     this.getRemainingContentHeight = adapt.getRemainingContentHeight.bind(adapt)
     this.getRange = adapt.getRange.bind(adapt)
     this.getRangeText = adapt.getRangeText.bind(adapt)
