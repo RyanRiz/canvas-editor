@@ -1521,7 +1521,9 @@ export class Draw {
     const listStyleMap = this.listParticle.computeListStyle(ctx, elementList)
     const rowList: IRow[] = []
     let currentPageColumns = this.normalizePageColumns(
-      isFromTable ? { columnCount: 1, columnGap: 0 } : elementList[0]?.pageColumns
+      isFromTable
+        ? { columnCount: 1, columnGap: 0 }
+        : elementList[0]?.pageColumns
     )
     if (elementList.length) {
       rowList.push({
@@ -1637,6 +1639,22 @@ export class Draw {
             const captionTop = element.imgCaption.top ?? imgCaption.top
             const captionHeight = (fontSize + captionTop) * scale
             metrics.boundingBoxAscent += captionHeight
+          }
+          // figure label height (above image)
+          if (
+            element.type === ElementType.IMAGE &&
+            this.imageParticle.isFigure(element)
+          ) {
+            metrics.boundingBoxAscent +=
+              this.imageParticle.getFigureLabelHeight(element)
+          }
+          // figure description height (below image)
+          if (
+            element.type === ElementType.IMAGE &&
+            element.imgFigureDescription
+          ) {
+            metrics.boundingBoxAscent +=
+              this.imageParticle.getFigureDescriptionHeight(element)
           }
         }
       } else if (element.type === ElementType.TABLE) {
@@ -1769,6 +1787,15 @@ export class Draw {
         // 后一个元素也是表格则移除行间距
         if (elementList[i + 1]?.type === ElementType.TABLE) {
           metrics.boundingBoxAscent -= rowMargin
+        }
+        // table figure label + description heights
+        if (this.tableParticle.isTableFigure(element)) {
+          metrics.boundingBoxAscent +=
+            this.tableParticle.getTableFigureLabelHeight(element)
+        }
+        if (element.tableFigureDescription) {
+          metrics.boundingBoxDescent +=
+            this.tableParticle.getTableFigureDescriptionHeight(element)
         }
         // 表格分页处理(拆分表格)
         if (isPagingMode) {
@@ -1983,13 +2010,22 @@ export class Draw {
           metrics.boundingBoxDescent += metrics.height / 2
         }
       }
+      const figureLabelAscent =
+        element.type === ElementType.IMAGE &&
+        this.imageParticle.isFigure(element)
+          ? this.imageParticle.getFigureLabelHeight(element)
+          : 0
+      const tableDescAscent =
+        element.type === ElementType.TABLE && element.tableFigureDescription
+          ? this.tableParticle.getTableFigureDescriptionHeight(element)
+          : 0
       const ascent =
         !element.hide &&
         ((element.imgDisplay !== ImageDisplay.INLINE &&
           element.type === ElementType.IMAGE) ||
           element.type === ElementType.LATEX)
-          ? metrics.height + rowMargin
-          : metrics.boundingBoxAscent + rowMargin
+          ? metrics.height + figureLabelAscent + rowMargin
+          : metrics.boundingBoxAscent - tableDescAscent + rowMargin
       const height =
         rowMargin +
         metrics.boundingBoxAscent +
@@ -2318,7 +2354,10 @@ export class Draw {
           this.rowList[rowIndex].pageColumns || this.getPageColumns()
         while (
           rowIndex < this.rowList.length &&
-          this.isSamePageColumns(this.rowList[rowIndex].pageColumns, pageColumns)
+          this.isSamePageColumns(
+            this.rowList[rowIndex].pageColumns,
+            pageColumns
+          )
         ) {
           sectionRows.push(this.rowList[rowIndex])
           rowIndex++

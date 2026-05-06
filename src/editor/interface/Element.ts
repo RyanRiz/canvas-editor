@@ -75,6 +75,9 @@ export interface ITableAttr {
   borderWidth?: number
   borderExternalWidth?: number
   translateX?: number
+  tableFigureLabel?: string
+  tableFigureCaption?: string
+  tableFigureDescription?: string
 }
 
 export interface ITableRule {
@@ -170,6 +173,9 @@ export interface IImageBasic {
   }
   imgCrop?: IImageCrop
   imgCaption?: IImageCaption
+  imgFigureLabel?: string
+  imgFigureCaption?: string
+  imgFigureDescription?: string
 }
 
 export type IImageElement = IImageBasic & IImageRule

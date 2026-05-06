@@ -453,9 +453,8 @@ window.onload = function () {
   }
 
   // Table Design Menu
-  const tableDesignMenuDom = document.querySelector<HTMLDivElement>(
-    '.table-design-menu'
-  )!
+  const tableDesignMenuDom =
+    document.querySelector<HTMLDivElement>('.table-design-menu')!
 
   // Table Borders dropdown
   const tableBorderDom = document.querySelector<HTMLDivElement>(
@@ -1808,6 +1807,365 @@ window.onload = function () {
       }
     }
   }
+  // Figure / Table JATS validation panels — one per IMAGE/TABLE element
+  const figureValidationListDom = document.querySelector<HTMLDivElement>(
+    '.figure-validation-list'
+  )!
+  type FigureKind = 'figure' | 'table'
+  type FigRole = 'label' | 'caption' | 'description'
+  interface FigureTarget {
+    kind: FigureKind
+    elementId: string
+    label: string
+    caption: string
+    description: string
+  }
+  // Group id format encoding figure/table id and role for tagged inline text
+  const figGroupId = (kind: FigureKind, role: FigRole, figId: string): string =>
+    `${kind === 'figure' ? 'fig' : 'tab'}-${role}-${figId}`
+  const findTaggedRange = (
+    list: IElement[],
+    groupId: string
+  ): { start: number; end: number } | null => {
+    let start = -1
+    let end = -1
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].groupIds?.includes(groupId)) {
+        if (start === -1) start = i
+        end = i
+      }
+    }
+    return start === -1 ? null : { start, end }
+  }
+  const extractTaggedText = (list: IElement[], groupId: string): string => {
+    let text = ''
+    for (const el of list) {
+      if (el.groupIds?.includes(groupId)) {
+        text += el.value
+      }
+    }
+    return text.replace(/\n/g, '').trim()
+  }
+  const deleteTagged = (groupId: string): void => {
+    const list = instance.command.getElementList()
+    const range = findTaggedRange(list, groupId)
+    if (!range) return
+    instance.command.executeSetRange(range.start - 1, range.end)
+    instance.command.executeBackspace()
+  }
+  const insertTaggedAfter = (
+    figureId: string,
+    groupId: string,
+    text: string
+  ): void => {
+    if (!text) return
+    const list = instance.command.getElementList()
+    const idx = list.findIndex(el => el.id === figureId)
+    if (idx < 0) return
+    instance.command.executeSetRange(idx, idx)
+    const chars: IElement[] = [{ value: '\n', groupIds: [groupId] }]
+    for (const c of text) {
+      chars.push({ value: c, groupIds: [groupId] })
+    }
+    chars.push({ value: '\n', groupIds: [groupId] })
+    instance.command.executeInsertElementList(chars)
+  }
+  // Inserts label and caption on the same line before the figure: "Label Caption\n"
+  const insertLabelCaptionBefore = (
+    figureId: string,
+    labelGroupId: string,
+    captionGroupId: string,
+    label: string,
+    caption: string
+  ): void => {
+    if (!label && !caption) return
+    const list = instance.command.getElementList()
+    let idx = list.findIndex(el => el.id === figureId)
+    if (idx < 0) return
+    // Guard: if previous element is not a newline, insert one so label starts on its own line
+    const prevEl = list[idx - 1]
+    if (prevEl && prevEl.value !== '\n') {
+      instance.command.executeSetRange(idx - 1, idx - 1)
+      instance.command.executeInsertElementList([{ value: '\n' }])
+      const updated = instance.command.getElementList()
+      idx = updated.findIndex(el => el.id === figureId)
+      if (idx < 0) return
+    }
+    instance.command.executeSetRange(idx - 1, idx - 1)
+    const chars: IElement[] = []
+    // rowMargin: 0 removes the bottom row-padding so the caption line sits
+    // flush against the table/figure below it. ignoreContextKeys prevents
+    // formatElementContext from inheriting surrounding rowMargin.
+    for (const c of label)
+      chars.push({ value: c, groupIds: [labelGroupId], rowMargin: 0 })
+    if (label && caption)
+      chars.push({
+        value: ' ',
+        groupIds: [labelGroupId, captionGroupId],
+        rowMargin: 0
+      })
+    for (const c of caption)
+      chars.push({ value: c, groupIds: [captionGroupId], rowMargin: 0 })
+    chars.push({
+      value: '\n',
+      groupIds: [labelGroupId, captionGroupId],
+      rowMargin: 0
+    })
+    instance.command.executeInsertElementList(chars, {
+      ignoreContextKeys: ['rowMargin']
+    })
+  }
+  const buildPanelHTML = (target: FigureTarget, lineHeight: number): string => {
+    const headerText =
+      target.kind === 'figure'
+        ? 'REQUIRED JATS DATA'
+        : 'REQUIRED TABLE JATS DATA'
+    const item = (field: string, filled: boolean, indicator: 'dot' | 'box') => `
+      <li class="figure-validation__item ${filled ? 'filled' : 'required'}" data-field="${field}">
+        <span class="figure-validation__indicator ${indicator}"></span>
+        <span class="figure-validation__name">${field}</span>
+      </li>`
+    return `
+      <div class="figure-validation__line" style="height:${Math.max(lineHeight, 24)}px"></div>
+      <div class="figure-validation__content">
+        <div class="figure-validation__header">${headerText}</div>
+        <ul class="figure-validation__list">
+          ${item('label', !!target.label, 'box')}
+          ${item('caption', !!target.caption, 'box')}
+          ${item('description', !!target.description, 'box')}
+        </ul>
+      </div>`
+  }
+  const openFigureModalFor = (target: FigureTarget) => {
+    new Dialog({
+      title: target.kind === 'figure' ? 'Figure Metadata' : 'Table Metadata',
+      data: [
+        {
+          type: 'text',
+          label: 'Label',
+          name: 'label',
+          value: target.label,
+          placeholder:
+            target.kind === 'figure'
+              ? 'e.g. Figure 1. (auto if empty)'
+              : 'e.g. Table 1. (auto if empty)'
+        },
+        {
+          type: 'text',
+          label: 'Caption',
+          name: 'caption',
+          value: target.caption,
+          placeholder: 'e.g. Weather Predict'
+        },
+        {
+          type: 'textarea',
+          label: 'Description',
+          name: 'description',
+          value: target.description,
+          placeholder:
+            target.kind === 'figure'
+              ? 'Figure description'
+              : 'Table description'
+        }
+      ],
+      onConfirm: payload => {
+        const label = (
+          payload.find(p => p.name === 'label')?.value || ''
+        ).trim()
+        const caption = (
+          payload.find(p => p.name === 'caption')?.value || ''
+        ).trim()
+        const description = (
+          payload.find(p => p.name === 'description')?.value || ''
+        ).trim()
+        const figId = target.elementId
+        const kind = target.kind
+        const labelGroup = figGroupId(kind, 'label', figId)
+        const captionGroup = figGroupId(kind, 'caption', figId)
+        const descriptionGroup = figGroupId(kind, 'description', figId)
+        // Delete existing tagged ranges first
+        deleteTagged(labelGroup)
+        deleteTagged(captionGroup)
+        deleteTagged(descriptionGroup)
+        // Insert label + caption on same line, then description after
+        insertLabelCaptionBefore(
+          figId,
+          labelGroup,
+          captionGroup,
+          label,
+          caption
+        )
+        insertTaggedAfter(figId, descriptionGroup, description)
+        // Tag the figure element itself with all active group IDs so that
+        // when cursor is inside the table, group highlight activates for
+        // its associated label/caption/description text.
+        const figGroupIds = new Set([
+          labelGroup,
+          captionGroup,
+          descriptionGroup
+        ])
+        const activeGroups: string[] = []
+        if (label || caption) activeGroups.push(labelGroup, captionGroup)
+        if (description) activeGroups.push(descriptionGroup)
+        const figList = instance.command.getElementList()
+        const figEl = figList.find(el => el.id === figId)
+        if (figEl) {
+          const kept = (figEl.groupIds || []).filter(id => !figGroupIds.has(id))
+          const newIds = [...kept, ...activeGroups]
+          if (newIds.length) figEl.groupIds = newIds
+          else delete figEl.groupIds
+        }
+        renderFigureValidationPanels()
+      }
+    })
+  }
+  const PANEL_GAP = 8
+  const renderFigureValidationPanels = () => {
+    const elementList = instance.command.getElementList()
+    const positionList = instance.command.getPositionList()
+    const opts = instance.command.getOptions()
+    const scale = opts.scale ?? 1
+    const canvases =
+      document.querySelectorAll<HTMLCanvasElement>('.editor canvas')
+    figureValidationListDom.innerHTML = ''
+    type PanelEntry = {
+      panel: HTMLDivElement
+      desiredY: number
+      target: FigureTarget
+    }
+    const entries: PanelEntry[] = []
+    for (let i = 0; i < elementList.length; i++) {
+      const el = elementList[i]
+      const pos = positionList[i]
+      if (!pos) continue
+      let target: FigureTarget | null = null
+      if (
+        (el.type === ElementType.IMAGE || el.type === ElementType.TABLE) &&
+        el.id
+      ) {
+        const kind: FigureKind =
+          el.type === ElementType.IMAGE ? 'figure' : 'table'
+        target = {
+          kind,
+          elementId: el.id,
+          label: extractTaggedText(
+            elementList,
+            figGroupId(kind, 'label', el.id)
+          ),
+          caption: extractTaggedText(
+            elementList,
+            figGroupId(kind, 'caption', el.id)
+          ),
+          description: extractTaggedText(
+            elementList,
+            figGroupId(kind, 'description', el.id)
+          )
+        }
+      }
+      if (!target) continue
+      const canvas = canvases[pos.pageNo]
+      if (!canvas) continue
+      const canvasRect = canvas.getBoundingClientRect()
+      const elementY = pos.coordinate.leftTop[1]
+      const screenY = canvasRect.top + elementY
+      const elementHeight = (el.height || 0) * scale
+      const panel = document.createElement('div')
+      panel.className = 'figure-validation'
+      if (target.label && target.caption && target.description) {
+        continue
+      }
+      panel.style.top = `${screenY}px`
+      panel.innerHTML = buildPanelHTML(target, elementHeight)
+      const targetCapture = target
+      panel.addEventListener('click', () => openFigureModalFor(targetCapture))
+      figureValidationListDom.append(panel)
+      entries.push({ panel, desiredY: screenY, target })
+    }
+    // Resolve stacking — shift overlapping panels down by panel height + gap
+    let lastBottom = -Infinity
+    for (const entry of entries) {
+      const minY = lastBottom + PANEL_GAP
+      const actualY = Math.max(entry.desiredY, minY)
+      entry.panel.style.top = `${actualY}px`
+      const panelHeight = entry.panel.offsetHeight
+      lastBottom = actualY + panelHeight
+    }
+
+    // Resolve collision between comment container and figure validations
+    const commentDom = document.querySelector<HTMLDivElement>('.comment')
+    if (commentDom) {
+      if (entries.length === 0 || commentDom.childElementCount === 0) {
+        commentDom.style.top = '200px'
+      } else {
+        let commentTop = 200
+        const commentHeight = commentDom.offsetHeight || 0
+        let overlappingDown = true
+        let iterations = 0
+
+        // Push down until no overlap
+        while (overlappingDown && iterations < 10) {
+          overlappingDown = false
+          for (const entry of entries) {
+            const pTop = parseFloat(entry.panel.style.top)
+            const pBottom = pTop + entry.panel.offsetHeight
+            if (
+              commentTop < pBottom + PANEL_GAP &&
+              commentTop + commentHeight > pTop - PANEL_GAP
+            ) {
+              commentTop = pBottom + PANEL_GAP
+              overlappingDown = true
+            }
+          }
+          iterations++
+        }
+
+        // If pushing down pushes it off the bottom of the screen, try pushing UP instead
+        if (commentTop + commentHeight > window.innerHeight - 20) {
+          commentTop = 200
+          let overlappingUp = true
+          iterations = 0
+          while (overlappingUp && iterations < 10) {
+            overlappingUp = false
+            // Iterate in reverse to push up above the highest clashing panel
+            for (let i = entries.length - 1; i >= 0; i--) {
+              const entry = entries[i]
+              const pTop = parseFloat(entry.panel.style.top)
+              const pBottom = pTop + entry.panel.offsetHeight
+              if (
+                commentTop < pBottom + PANEL_GAP &&
+                commentTop + commentHeight > pTop - PANEL_GAP
+              ) {
+                commentTop = pTop - commentHeight - PANEL_GAP
+                overlappingUp = true
+              }
+            }
+            iterations++
+          }
+          // Ensure we don't go off the top of the screen (min top: 10px)
+          if (commentTop < 10) {
+            commentTop = 10
+          }
+        }
+
+        commentDom.style.top = `${commentTop}px`
+      }
+    }
+  }
+  // Throttled scroll/resize re-positioning
+  let panelRafId = 0
+  const schedulePanelUpdate = () => {
+    if (panelRafId) return
+    panelRafId = requestAnimationFrame(() => {
+      panelRafId = 0
+      renderFigureValidationPanels()
+    })
+  }
+  window.addEventListener('scroll', schedulePanelUpdate, true)
+  window.addEventListener('resize', schedulePanelUpdate)
+  instance.eventBus.on('contentChange', schedulePanelUpdate)
+  // Initial render once content settles
+  setTimeout(renderFigureValidationPanels, 0)
+
   // 8. 内部事件监听
   instance.listener.rangeStyleChange = function (payload) {
     // 控件类型
@@ -1987,6 +2345,9 @@ window.onload = function () {
         rangeContext.startColNo + 1
       }`
     }
+
+    // Figure / Table validation panels track via contentChange
+    schedulePanelUpdate()
   }
 
   instance.eventBus.on('positionContextChange', function (payload) {
@@ -2069,6 +2430,10 @@ window.onload = function () {
       updateComment()
     })
   }
+
+  // The user wants labels and descriptions to just be regular document text.
+  // We no longer need the inline editor or double-click modal overlay hack!
+
   instance.listener.contentChange = debounce(handleContentChange, 200)
   handleContentChange()
 
@@ -2116,6 +2481,7 @@ window.onload = function () {
         })
       }
     },
+
     {
       name: '新增题注',
       icon: 'caption',
