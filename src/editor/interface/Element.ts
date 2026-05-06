@@ -194,6 +194,15 @@ export interface ILabelElement {
   }
 }
 
+export interface IPageNumberElement {
+  /** Marker indicating this text element substitutes its value with the live
+   *  page number / page count at draw time. */
+  pageNumberKind?: 'pageNo' | 'pageCount'
+  /** Numeral style used when rendering the substituted value. Falls back to
+   *  the global pageNumber.numberType option when omitted. */
+  pageNumberFormat?: 'arabic' | 'chinese' | 'roman-upper' | 'roman-lower'
+}
+
 export type IElement = IElementBasic &
   IElementStyle &
   IElementRule &
@@ -212,7 +221,8 @@ export type IElement = IElementBasic &
   ITitleElement &
   IListElement &
   IAreaElement &
-  ILabelElement
+  ILabelElement &
+  IPageNumberElement
 
 export interface IElementMetrics {
   width: number

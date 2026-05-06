@@ -1,6 +1,7 @@
 import { ZERO } from '../../../dataset/constant/Common'
 import { TEXTLIKE_ELEMENT_TYPE } from '../../../dataset/constant/Element'
 import { NUMBER_LIKE_REG } from '../../../dataset/constant/Regular'
+import { EditorZone } from '../../../dataset/enum/Editor'
 import { ElementType } from '../../../dataset/enum/Element'
 import { IRange } from '../../../interface/Range'
 import { CanvasEvent } from '../CanvasEvent'
@@ -130,11 +131,42 @@ function dblclick(host: CanvasEvent, evt: MouseEvent) {
   // 切换区域
   if (draw.getIsPagingMode()) {
     if (!~positionContext.index && positionContext.zone) {
+      // Sync active header/footer variant to the clicked page so the user
+      // edits the variant that's actually displayed there (first/even/default).
+      const pageNo = draw.getPageNo()
+      let variantSwitched = false
+      if (positionContext.zone === EditorZone.HEADER) {
+        const header = draw.getHeader()
+        const variant = header.resolveVariantForPage(pageNo)
+        if (variant !== header.getActiveVariant()) {
+          header.setActiveVariant(variant)
+          variantSwitched = true
+        }
+      } else if (positionContext.zone === EditorZone.FOOTER) {
+        const footer = draw.getFooter()
+        const variant = footer.resolveVariantForPage(pageNo)
+        if (variant !== footer.getActiveVariant()) {
+          footer.setActiveVariant(variant)
+          variantSwitched = true
+        }
+      }
       draw.getZone().setZone(positionContext.zone)
       draw.clearSideEffect()
       position.setPositionContext({
         isTable: false
       })
+      // After variant swap the previous range is invalid for the swapped
+      // elementList; reset to a valid index so typing works without an extra
+      // click. Compute must run so the swapped variant's positionList is
+      // populated before setCursor reads from it.
+      if (variantSwitched) {
+        const range = draw.getRange()
+        range.setRange(0, 0)
+        draw.render({
+          curIndex: 0,
+          isSubmitHistory: false
+        })
+      }
       return
     }
   }

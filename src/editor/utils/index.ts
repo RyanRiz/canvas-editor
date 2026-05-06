@@ -263,6 +263,34 @@ export function convertNumberToChinese(num: number) {
   return result
 }
 
+export function convertNumberToRoman(num: number, upper: boolean = true): string {
+  if (!Number.isFinite(num) || num <= 0) return ''
+  const map: [number, string][] = [
+    [1000, 'M'],
+    [900, 'CM'],
+    [500, 'D'],
+    [400, 'CD'],
+    [100, 'C'],
+    [90, 'XC'],
+    [50, 'L'],
+    [40, 'XL'],
+    [10, 'X'],
+    [9, 'IX'],
+    [5, 'V'],
+    [4, 'IV'],
+    [1, 'I']
+  ]
+  let n = Math.floor(num)
+  let result = ''
+  for (const [value, sym] of map) {
+    while (n >= value) {
+      result += sym
+      n -= value
+    }
+  }
+  return upper ? result : result.toLowerCase()
+}
+
 export function cloneProperty<T>(
   properties: (keyof T)[],
   sourceElement: T,

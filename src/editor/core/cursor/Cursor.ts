@@ -205,6 +205,15 @@ export class Cursor {
       pageNo,
       coordinate: { leftTop, leftBottom }
     } = cursorPosition
+    // Header/footer position lists are computed once for pageNo=0, so the
+    // cursorPosition.pageNo is always 0 for those zones. Use the draw's
+    // current page (set by mousedown / setPageNo) so we don't snap the
+    // viewport back to page 1 every time the user clicks a chrome zone on a
+    // later page.
+    const zoneManager = this.draw.getZone()
+    const effectivePageNo = zoneManager.isMainActive()
+      ? pageNo
+      : this.draw.getPageNo()
     // 查找滚动容器，如果是滚动容器是document，则限制范围为当前窗口
     const scrollContainer = findScrollContainer(this.container)
     const rect = {
@@ -227,7 +236,7 @@ export class Cursor {
     }
     // 当前页面距离滚动容器顶部距离
     const prePageY =
-      pageNo * (this.draw.getHeight() + this.draw.getPageGap()) +
+      effectivePageNo * (this.draw.getHeight() + this.draw.getPageGap()) +
       this.container.getBoundingClientRect().top
     // 向上移动时：以顶部距离为准，向下移动时：以底部位置为准
     const isUp = direction === MoveDirection.UP

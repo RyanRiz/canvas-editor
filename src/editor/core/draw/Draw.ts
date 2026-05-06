@@ -252,8 +252,14 @@ export class Draw {
     this.lineNumber = new LineNumber(this)
     this.waterMark = new Watermark(this)
     this.placeholder = new Placeholder(this)
-    this.header = new Header(this, data.header)
-    this.footer = new Footer(this, data.footer)
+    this.header = new Header(this, data.header, {
+      first: data.headerFirst,
+      even: data.headerEven
+    })
+    this.footer = new Footer(this, data.footer, {
+      first: data.footerFirst,
+      even: data.footerEven
+    })
     this.hyperlinkParticle = new HyperlinkParticle(this)
     this.labelParticle = new LabelParticle(this)
     this.dateParticle = new DateParticle(this)
@@ -313,16 +319,24 @@ export class Draw {
   // 设置打印数据
   public setPrintData() {
     this.printModeData = {
-      header: this.header.getElementList(),
+      header: this.header.getVariantElementList('default'),
+      headerFirst: this.header.getVariantElementList('first'),
+      headerEven: this.header.getVariantElementList('even'),
       main: this.elementList,
-      footer: this.footer.getElementList()
+      footer: this.footer.getVariantElementList('default'),
+      footerFirst: this.footer.getVariantElementList('first'),
+      footerEven: this.footer.getVariantElementList('even')
     }
     // 过滤控件辅助元素
-    const clonePrintModeData = deepClone(this.printModeData)
+    const clonePrintModeData = deepClone(this.printModeData)!
     const editorDataKeys: (keyof Omit<IEditorData, 'graffiti'>)[] = [
       'header',
+      'headerFirst',
+      'headerEven',
       'main',
-      'footer'
+      'footer',
+      'footerFirst',
+      'footerEven'
     ]
     editorDataKeys.forEach(key => {
       clonePrintModeData[key] = this.control.filterAssistElement(
@@ -1051,6 +1065,32 @@ export class Draw {
     return this.footer
   }
 
+  public setHeaderOption(payload: Partial<DeepRequired<IEditorOption>['header']>) {
+    Object.assign(this.options.header, payload)
+    this.render({
+      isSubmitHistory: false,
+      isSetCursor: false
+    })
+  }
+
+  public setFooterOption(payload: Partial<DeepRequired<IEditorOption>['footer']>) {
+    Object.assign(this.options.footer, payload)
+    this.render({
+      isSubmitHistory: false,
+      isSetCursor: false
+    })
+  }
+
+  public setPageNumberOption(
+    payload: Partial<DeepRequired<IEditorOption>['pageNumber']>
+  ) {
+    Object.assign(this.options.pageNumber, payload)
+    this.render({
+      isSubmitHistory: false,
+      isSetCursor: false
+    })
+  }
+
   public getHyperlinkParticle(): HyperlinkParticle {
     return this.hyperlinkParticle
   }
@@ -1107,9 +1147,20 @@ export class Draw {
     if (isSwitchMode) {
       this.setMode(mode)
     }
+    // 打印 / 截图时不应渲染当前选区,否则选区蓝色矩形会被烘进 PNG
+    const savedRange =
+      mode === EditorMode.PRINT ? deepClone(this.range.getRange()) : null
+    if (savedRange) {
+      this.range.clearRange()
+    }
+    // 打印模式下 setPrintData 会用过滤后的克隆数据替换 elementList,
+    // 旧的 pageRowList / positionList 仍引用过滤前的元素,导致 drawRow
+    // 走的是旧布局而 elementList 参数是新数组,偶尔会出现绘制错位/叠字.
+    // 强制 compute 重新计算以保证布局与数据一致.
+    const isPrintRender = mode === EditorMode.PRINT
     this.render({
       isLazy: false,
-      isCompute: false,
+      isCompute: isPrintRender,
       isSetCursor: false,
       isSubmitHistory: false
     })
@@ -1125,6 +1176,9 @@ export class Draw {
     }
     if (isSwitchMode) {
       this.setMode(currentMode)
+    }
+    if (savedRange) {
+      this.range.replaceRange(savedRange)
     }
     return dataUrlList
   }
@@ -1328,9 +1382,13 @@ export class Draw {
     // 同步block的最新数据
     this.blockParticle.update()
     const data: Required<IEditorData> = {
-      header: this.getHeaderElementList(),
+      header: this.header.getVariantElementList('default'),
+      headerFirst: this.header.getVariantElementList('first'),
+      headerEven: this.header.getVariantElementList('even'),
       main: mainElementList,
-      footer: this.getFooterElementList(),
+      footer: this.footer.getVariantElementList('default'),
+      footerFirst: this.footer.getVariantElementList('first'),
+      footerEven: this.footer.getVariantElementList('even'),
       graffiti: this.graffiti.getValue()
     }
     return data
@@ -1343,11 +1401,23 @@ export class Draw {
       header: zipElementList(originData.header, {
         extraPickAttrs
       }),
+      headerFirst: zipElementList(originData.headerFirst ?? [], {
+        extraPickAttrs
+      }),
+      headerEven: zipElementList(originData.headerEven ?? [], {
+        extraPickAttrs
+      }),
       main: zipElementList(originData.main, {
         extraPickAttrs,
         isClassifyArea: true
       }),
       footer: zipElementList(originData.footer, {
+        extraPickAttrs
+      }),
+      footerFirst: zipElementList(originData.footerFirst ?? [], {
+        extraPickAttrs
+      }),
+      footerEven: zipElementList(originData.footerEven ?? [], {
         extraPickAttrs
       }),
       graffiti: originData.graffiti
@@ -1360,10 +1430,35 @@ export class Draw {
   }
 
   public setValue(payload: Partial<IEditorData>, options?: ISetValueOption) {
-    const { header, main, footer } = deepClone(payload)
-    if (!header && !main && !footer) return
+    const {
+      header,
+      headerFirst,
+      headerEven,
+      main,
+      footer,
+      footerFirst,
+      footerEven
+    } = deepClone(payload)
+    if (
+      !header &&
+      !headerFirst &&
+      !headerEven &&
+      !main &&
+      !footer &&
+      !footerFirst &&
+      !footerEven
+    )
+      return
     const { isSetCursor = false } = options || {}
-    const pageComponentData = [header, main, footer]
+    const pageComponentData = [
+      header,
+      headerFirst,
+      headerEven,
+      main,
+      footer,
+      footerFirst,
+      footerEven
+    ]
     pageComponentData.forEach(data => {
       if (!data) return
       formatElementList(data, {
@@ -1373,8 +1468,12 @@ export class Draw {
     })
     this.setEditorData({
       header,
+      headerFirst,
+      headerEven,
       main,
-      footer
+      footer,
+      footerFirst,
+      footerEven
     })
     // 渲染&计算&清空历史记录
     this.historyManager.recovery()
@@ -1394,15 +1493,35 @@ export class Draw {
   }
 
   public setEditorData(payload: Partial<Omit<IEditorData, 'graffiti'>>) {
-    const { header, main, footer } = payload
+    const {
+      header,
+      headerFirst,
+      headerEven,
+      main,
+      footer,
+      footerFirst,
+      footerEven
+    } = payload
     if (header) {
-      this.header.setElementList(header)
+      this.header.setVariantElementList('default', header)
+    }
+    if (headerFirst) {
+      this.header.setVariantElementList('first', headerFirst)
+    }
+    if (headerEven) {
+      this.header.setVariantElementList('even', headerEven)
     }
     if (main) {
       this.elementList = main
     }
     if (footer) {
-      this.footer.setElementList(footer)
+      this.footer.setVariantElementList('default', footer)
+    }
+    if (footerFirst) {
+      this.footer.setVariantElementList('first', footerFirst)
+    }
+    if (footerEven) {
+      this.footer.setVariantElementList('even', footerEven)
     }
   }
 
