@@ -152,6 +152,13 @@ export class Group {
   ) {
     const groupIds = element.groupIds
     if (!groupIds) return
+    // TABLE/IMAGE elements carry groupIds only for anchor detection; skip fill
+    // so the figure itself is not highlighted — only label/caption/desc are.
+    if (
+      element.type === ElementType.TABLE ||
+      element.type === ElementType.IMAGE
+    )
+      return
     for (const groupId of groupIds) {
       const fillRect = this.fillRectMap.get(groupId)
       if (!fillRect) {
@@ -172,7 +179,21 @@ export class Group {
     // 当前激活组信息
     const range = this.range.getRange()
     const elementList = this.draw.getElementList()
-    const anchorGroupIds = elementList[range.endIndex]?.groupIds
+    let anchorGroupIds = elementList[range.endIndex]?.groupIds
+    // When cursor is inside a table cell, getElementList() returns the cell's
+    // value list which has no groupIds. Fall back to the TABLE element's groupIds
+    // from the main document list so figure label/caption/desc highlights activate.
+    if (!anchorGroupIds) {
+      const positionContext = this.draw.getPosition().getPositionContext()
+      if (
+        (positionContext.isTable || positionContext.isImage) &&
+        positionContext.index !== undefined
+      ) {
+        anchorGroupIds =
+          this.draw.getOriginalMainElementList()[positionContext.index]
+            ?.groupIds
+      }
+    }
     const {
       group: { backgroundColor, opacity, activeOpacity, activeBackgroundColor }
     } = this.options

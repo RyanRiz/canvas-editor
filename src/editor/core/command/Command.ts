@@ -77,6 +77,12 @@ export class Command {
   public executeSaveAsImageElement: CommandAdapt['saveAsImageElement']
   public executeSetImageCrop: CommandAdapt['setImageCrop']
   public executeSetImageCaption: CommandAdapt['setImageCaption']
+  public executeSetImageFigureLabel: CommandAdapt['setImageFigureLabel']
+  public executeSetTableFigureLabel: CommandAdapt['setTableFigureLabel']
+  public executeSetTableFigureCaption: CommandAdapt['setTableFigureCaption']
+  public executeSetTableFigureDescription: CommandAdapt['setTableFigureDescription']
+  public executeSetImageFigureCaption: CommandAdapt['setImageFigureCaption']
+  public executeSetImageFigureDescription: CommandAdapt['setImageFigureDescription']
   public executeChangeImageDisplay: CommandAdapt['changeImageDisplay']
   public executePageMode: CommandAdapt['pageMode']
   public executePageScale: CommandAdapt['pageScale']
@@ -188,8 +194,7 @@ export class Command {
     this.executeSubscript = adapt.subscript.bind(adapt)
     this.executeColor = adapt.color.bind(adapt)
     this.executeHighlight = adapt.highlight.bind(adapt)
-    this.executeSetElementExtension =
-      adapt.setElementExtension.bind(adapt)
+    this.executeSetElementExtension = adapt.setElementExtension.bind(adapt)
     // 标题、对齐方式、列表
     this.executeTitle = adapt.title.bind(adapt)
     this.executeList = adapt.list.bind(adapt)
@@ -240,6 +245,14 @@ export class Command {
     this.executeSaveAsImageElement = adapt.saveAsImageElement.bind(adapt)
     this.executeSetImageCrop = adapt.setImageCrop.bind(adapt)
     this.executeSetImageCaption = adapt.setImageCaption.bind(adapt)
+    this.executeSetImageFigureLabel = adapt.setImageFigureLabel.bind(adapt)
+    this.executeSetTableFigureLabel = adapt.setTableFigureLabel.bind(adapt)
+    this.executeSetTableFigureCaption = adapt.setTableFigureCaption.bind(adapt)
+    this.executeSetTableFigureDescription =
+      adapt.setTableFigureDescription.bind(adapt)
+    this.executeSetImageFigureCaption = adapt.setImageFigureCaption.bind(adapt)
+    this.executeSetImageFigureDescription =
+      adapt.setImageFigureDescription.bind(adapt)
     this.executeChangeImageDisplay = adapt.changeImageDisplay.bind(adapt)
     // 页面模式、页面缩放、纸张大小、纸张方向、页边距
     this.executePageMode = adapt.pageMode.bind(adapt)

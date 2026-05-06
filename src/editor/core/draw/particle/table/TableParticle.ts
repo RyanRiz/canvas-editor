@@ -94,8 +94,6 @@ export class TableParticle {
     return rowCol.length ? rowCol : null
   }
 
-
-
   private _drawSlash(
     ctx: CanvasRenderingContext2D,
     td: ITd,
@@ -192,7 +190,7 @@ export class TableParticle {
         const height = td.height! * scale
         const x = Math.round(td.x! * scale + startX + width)
         const y = Math.round(td.y! * scale + startY)
-        
+
         ctx.save()
         // 优先使用单元格级别的边框属性，回退到表格全局属性
         const cellBorderWidth = td.borderWidth ?? borderWidth ?? 1
@@ -252,7 +250,11 @@ export class TableParticle {
             endY: number,
             isOuter: boolean
           ) => {
-            if (isOuter && borderExternalWidth && borderExternalWidth !== borderWidth) {
+            if (
+              isOuter &&
+              borderExternalWidth &&
+              borderExternalWidth !== borderWidth
+            ) {
               ctx.stroke()
               ctx.beginPath()
               ctx.moveTo(startX, startY)
@@ -285,7 +287,7 @@ export class TableParticle {
           const rightNeighborOwnsLeft =
             rightNeighbor?.borderTypes !== undefined &&
             rightNeighbor.borderTypes.includes(TdBorder.LEFT)
-            
+
           const shouldDrawRight = isOuterRight
             ? !isInternalBorderType
             : !isExternalBorderType
@@ -301,7 +303,7 @@ export class TableParticle {
           const bottomNeighborOwnsTop =
             bottomNeighbor?.borderTypes !== undefined &&
             bottomNeighbor.borderTypes.includes(TdBorder.TOP)
-            
+
           const shouldDrawBottom = isOuterBottom
             ? !isInternalBorderType
             : !isExternalBorderType
@@ -562,5 +564,30 @@ export class TableParticle {
   ) {
     this._drawBackgroundColor(ctx, element, startX, startY)
     this._drawBorder(ctx, element, startX, startY)
+  }
+
+  public static FIGURE_LABEL_GAP = 6
+  public static FIGURE_DESCRIPTION_GAP = 8
+
+  public isTableFigure(element: IElement): boolean {
+    return (
+      element.type === ElementType.TABLE &&
+      (!!element.tableFigureLabel ||
+        !!element.tableFigureCaption ||
+        !!element.tableFigureDescription)
+    )
+  }
+
+  public getTableFigureLabelHeight(element: IElement): number {
+    if (!this.isTableFigure(element)) return 0
+    const { scale, imgCaption } = this.options
+    const fontSize = imgCaption.size + 2
+    return (fontSize + TableParticle.FIGURE_LABEL_GAP) * scale
+  }
+
+  public getTableFigureDescriptionHeight(element: IElement): number {
+    if (!element.tableFigureDescription) return 0
+    const { scale, imgCaption } = this.options
+    return (imgCaption.size + TableParticle.FIGURE_DESCRIPTION_GAP) * scale
   }
 }

@@ -927,7 +927,11 @@ export class CommandAdapt {
       } else {
         isSubmitHistory = false
       }
-      this.draw.render({ isSubmitHistory, curIndex: endIndex, isCompute: false })
+      this.draw.render({
+        isSubmitHistory,
+        curIndex: endIndex,
+        isCompute: false
+      })
     }
   }
 
@@ -1564,6 +1568,93 @@ export class CommandAdapt {
     const element = elementList[startIndex]
     if (element?.type !== ElementType.IMAGE) return
     element.imgCaption = imgCaption
+    this.draw.render({
+      isSetCursor: false
+    })
+  }
+
+  private _getCurrentTableElement(): IElement | null {
+    const positionContext = this.position.getPositionContext()
+    if (!positionContext.isTable || positionContext.index === undefined) {
+      return null
+    }
+    const originalElementList = this.draw.getOriginalElementList()
+    return originalElementList[positionContext.index] || null
+  }
+
+  public setTableFigureLabel(value: string) {
+    const tableEl = this._getCurrentTableElement()
+    if (!tableEl) return
+    if (value) {
+      tableEl.tableFigureLabel = value
+    } else {
+      delete tableEl.tableFigureLabel
+    }
+    this.draw.render({ isSetCursor: false })
+  }
+
+  public setTableFigureCaption(value: string) {
+    const tableEl = this._getCurrentTableElement()
+    if (!tableEl) return
+    if (value) {
+      tableEl.tableFigureCaption = value
+    } else {
+      delete tableEl.tableFigureCaption
+    }
+    this.draw.render({ isSetCursor: false })
+  }
+
+  public setTableFigureDescription(value: string) {
+    const tableEl = this._getCurrentTableElement()
+    if (!tableEl) return
+    if (value) {
+      tableEl.tableFigureDescription = value
+    } else {
+      delete tableEl.tableFigureDescription
+    }
+    this.draw.render({ isSetCursor: false })
+  }
+
+  public setImageFigureLabel(value: string) {
+    const { startIndex } = this.range.getRange()
+    const elementList = this.draw.getElementList()
+    const element = elementList[startIndex]
+    if (element?.type !== ElementType.IMAGE) return
+    if (value) {
+      element.imgFigureLabel = value
+    } else {
+      delete element.imgFigureLabel
+    }
+    this.draw.render({
+      isSetCursor: false
+    })
+  }
+
+  public setImageFigureCaption(value: string) {
+    const { startIndex } = this.range.getRange()
+    const elementList = this.draw.getElementList()
+    const element = elementList[startIndex]
+    if (element?.type !== ElementType.IMAGE) return
+    if (value) {
+      element.imgFigureCaption = value
+    } else {
+      delete element.imgFigureCaption
+    }
+    this.draw.render({
+      isSetCursor: false
+    })
+  }
+
+  public setImageFigureDescription(value: string) {
+    const { startIndex } = this.range.getRange()
+    const elementList = this.draw.getElementList()
+    const element = elementList[startIndex]
+    if (element?.type !== ElementType.IMAGE) return
+    if (value) {
+      element.imgFigureDescription = value
+    } else {
+      delete element.imgFigureDescription
+    }
     this.draw.render({
       isSetCursor: false
     })
@@ -2391,8 +2482,7 @@ export class CommandAdapt {
 
     const isChangeable = (v: string) => !isIgnorable(v) && /[A-Za-z]/.test(v)
 
-    const isSpaceOrLineBreak = (v: string) =>
-      isIgnorable(v) || v === ' '
+    const isSpaceOrLineBreak = (v: string) => isIgnorable(v) || v === ' '
 
     const isWordChar = (v: string) => /[A-Za-z0-9]/.test(v)
 

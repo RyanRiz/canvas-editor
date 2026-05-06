@@ -220,6 +220,124 @@ export class ImageParticle {
     ctx.restore()
   }
 
+  public static FIGURE_LABEL_GAP = 6
+  public static FIGURE_DESCRIPTION_GAP = 8
+
+  public isFigure(element: IElement): boolean {
+    return (
+      element.type === ElementType.IMAGE &&
+      (!!element.imgFigureLabel ||
+        !!element.imgFigureCaption ||
+        !!element.imgFigureDescription)
+    )
+  }
+
+  public getFigureLabelHeight(element: IElement): number {
+    if (!this.isFigure(element)) return 0
+    const { scale, imgCaption } = this.options
+    const fontSize = imgCaption.size + 2
+    return (fontSize + ImageParticle.FIGURE_LABEL_GAP) * scale
+  }
+
+  public getFigureDescriptionHeight(element: IElement): number {
+    if (!element.imgFigureDescription) return 0
+    const { scale, imgCaption } = this.options
+    return (imgCaption.size + ImageParticle.FIGURE_DESCRIPTION_GAP) * scale
+  }
+
+  private _renderFigureLabel(
+    ctx: CanvasRenderingContext2D,
+    element: IElement,
+    x: number,
+    y: number,
+    width: number
+  ) {
+    if (!this.isFigure(element)) return
+    const { scale, imgCaption } = this.options
+    const elementList = this.draw.getOriginalMainElementList()
+    const imageNo = this._countImagesBeforeTarget(elementList, element) + 1
+    const fontSize = (imgCaption.size + 2) * scale
+    const fontFamily = imgCaption.font
+    const labelGap = ImageParticle.FIGURE_LABEL_GAP * scale
+    const prefix = element.imgFigureLabel
+      ? `${element.imgFigureLabel} `
+      : `Figure ${imageNo}. `
+    ctx.save()
+    ctx.font = `bold ${fontSize}px ${fontFamily}`
+    ctx.fillStyle = '#000000'
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'alphabetic'
+    const prefixMetrics = ctx.measureText(prefix)
+    const labelY = y - labelGap - prefixMetrics.actualBoundingBoxDescent
+    ctx.fillText(prefix, x, labelY)
+    ctx.font = `${fontSize}px ${fontFamily}`
+    let captionText = element.imgFigureCaption || ''
+    const maxWidth = width - prefixMetrics.width
+    const captionMetrics = ctx.measureText(captionText)
+    if (captionMetrics.width > maxWidth && maxWidth > 0) {
+      let left = 0
+      let right = captionText.length
+      while (left < right) {
+        const mid = Math.ceil((left + right) / 2)
+        const truncated = captionText.substring(0, mid)
+        if (ctx.measureText(truncated + '...').width <= maxWidth) {
+          left = mid
+        } else {
+          right = mid - 1
+        }
+      }
+      captionText = captionText.substring(0, left) + '...'
+    }
+    if (captionText) {
+      ctx.fillText(captionText, x + prefixMetrics.width, labelY)
+    }
+    ctx.restore()
+  }
+
+  private _renderFigureDescription(
+    ctx: CanvasRenderingContext2D,
+    element: IElement,
+    x: number,
+    y: number,
+    width: number,
+    height: number
+  ) {
+    if (!element.imgFigureDescription) return
+    const { scale, imgCaption } = this.options
+    const fontSize = imgCaption.size * scale
+    const fontFamily = imgCaption.font
+    let topOffset = ImageParticle.FIGURE_DESCRIPTION_GAP * scale
+    if (element.imgCaption?.value) {
+      const captionFontSize =
+        (element.imgCaption.size || imgCaption.size) * scale
+      const captionTop = (element.imgCaption.top ?? imgCaption.top) * scale
+      topOffset += captionTop + captionFontSize
+    }
+    ctx.save()
+    ctx.font = `${fontSize}px ${fontFamily}`
+    ctx.fillStyle = '#333333'
+    ctx.textAlign = 'left'
+    ctx.textBaseline = 'top'
+    let descText = element.imgFigureDescription
+    const descMetrics = ctx.measureText(descText)
+    if (descMetrics.width > width && width > 0) {
+      let left = 0
+      let right = descText.length
+      while (left < right) {
+        const mid = Math.ceil((left + right) / 2)
+        const truncated = descText.substring(0, mid)
+        if (ctx.measureText(truncated + '...').width <= width) {
+          left = mid
+        } else {
+          right = mid - 1
+        }
+      }
+      descText = descText.substring(0, left) + '...'
+    }
+    ctx.fillText(descText, x, y + height + topOffset)
+    ctx.restore()
+  }
+
   public render(
     ctx: CanvasRenderingContext2D,
     element: IElement,
@@ -269,7 +387,9 @@ export class ImageParticle {
               height
             )
             this.imageCache.set(element.value, fallbackImage)
+            this._renderFigureLabel(ctx, element, x, y, width)
             this._renderCaption(ctx, element, x, y, width, height)
+            this._renderFigureDescription(ctx, element, x, y, width, height)
           }
           reject(error)
         }

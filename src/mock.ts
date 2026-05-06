@@ -542,5 +542,8 @@ export const options: IEditorOption = {
   zone: {
     tipDisabled: false
   },
-  maskMargin: [60, 0, 30, 0] // 菜单栏高度60，底部工具栏30为遮盖层
+  maskMargin: [60, 0, 30, 0], // 菜单栏高度60，底部工具栏30为遮盖层
+  group: {
+    opacity: 0
+  }
 }

@@ -831,12 +831,155 @@ ul {
 
 .comment {
   width: 250px;
-  height: 650px;
+  max-height: 650px;
   position: fixed;
   transform: translateX(420px);
   top: 200px;
   left: 50%;
   overflow-y: auto;
+  transition: top 0.1s ease-out;
+}
+
+.figure-validation-list {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 8;
+}
+
+.figure-validation {
+  width: 240px;
+  position: fixed;
+  transform: translateX(420px);
+  left: 50%;
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  pointer-events: auto;
+  box-sizing: border-box;
+}
+
+.figure-validation__line {
+  position: relative;
+  flex: 0 0 6px;
+  width: 6px;
+  border-right: 2px solid #e74c3c;
+  border-top: 2px solid #e74c3c;
+  border-bottom: 2px solid #e74c3c;
+  box-sizing: border-box;
+  align-self: flex-start;
+}
+
+.figure-validation__line::after {
+  content: '';
+  position: absolute;
+  left: -6px;
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed #dcdfe6;
+}
+
+.figure-validation.complete .figure-validation__line {
+  border-color: #2ecc71;
+}
+
+.figure-validation__content {
+  flex: 1;
+  background: #ffffff;
+  border: 1px solid #e74c3c;
+  border-radius: 6px;
+  padding: 12px 14px;
+  cursor: pointer;
+}
+
+.figure-validation.complete .figure-validation__content {
+  border-color: #2ecc71;
+}
+
+.figure-validation__header {
+  color: #e74c3c;
+  font-weight: 700;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  margin-bottom: 12px;
+  line-height: 1.3;
+}
+
+.figure-validation__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.figure-validation__item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 11px;
+  color: #999999;
+  cursor: pointer;
+}
+
+.figure-validation__item.required {
+  color: #e74c3c;
+  font-weight: 600;
+}
+
+.figure-validation__item.filled {
+  color: #2ecc71;
+  font-weight: 600;
+}
+
+.figure-validation__indicator {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.figure-validation__indicator.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #cccccc;
+  margin-left: 3px;
+  margin-right: 3px;
+}
+
+.figure-validation__item.filled .figure-validation__indicator.dot {
+  background: #2ecc71;
+}
+
+.figure-validation__indicator.box {
+  border: 1.5px solid #e74c3c;
+  border-radius: 2px;
+}
+
+.figure-validation__item.filled .figure-validation__indicator.box {
+  border-color: #2ecc71;
+  background: #2ecc71;
+}
+
+.figure-validation__item.filled .figure-validation__indicator.box::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 3px;
+  height: 7px;
+  border: solid #ffffff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.figure-validation__name {
+  flex: 1;
 }
 
 .comment-item {

@@ -146,9 +146,16 @@ export class Position {
       y += curRow.offsetY || 0
       // 当前td所在位置
       const tablePreX = x
-      const tablePreY = y
+      let tablePreY = y
       for (let j = 0; j < curRow.elementList.length; j++) {
         const element = curRow.elementList[j]
+        if (element.type === ElementType.TABLE && !element.hide) {
+          const draw = this.draw
+          const tableParticle = draw.getTableParticle()
+          if (tableParticle.isTableFigure(element)) {
+            tablePreY += tableParticle.getTableFigureLabelHeight(element)
+          }
+        }
         const metrics = element.metrics
         const offsetY =
           !element.hide &&
