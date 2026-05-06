@@ -44,7 +44,12 @@ import { BlockType } from './dataset/enum/Block'
 import { IBlock } from './interface/Block'
 import { ILang } from './interface/i18n/I18n'
 import { VerticalAlign } from './dataset/enum/VerticalAlign'
-import { TableBorder, TdBorder, TdSlash } from './dataset/enum/table/Table'
+import {
+  TableBorder,
+  TableBorderStyle,
+  TdBorder,
+  TdSlash
+} from './dataset/enum/table/Table'
 import { MaxHeightRatio, NumberType } from './dataset/enum/Common'
 import { TitleLevel } from './dataset/enum/Title'
 import { ListStyle, ListType } from './dataset/enum/List'
@@ -199,6 +204,7 @@ export {
   BlockType,
   PaperDirection,
   TableBorder,
+  TableBorderStyle,
   TdBorder,
   TdSlash,
   MaxHeightRatio,

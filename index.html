@@ -351,6 +351,78 @@
         </div>
       </div>
     </div>
+    <div class="menu table-design-menu" style="display: none;">
+      <div class="table-design-title">Table Design</div>
+      <div class="menu-divider"></div>
+      <div class="menu-item">
+        <div class="menu-item__table-border" title="Table Borders">
+          <i></i>
+          <div class="options table-border-options">
+            <div class="table-border-grid">
+              <div class="table-border-cell" data-border="all" title="All Borders">
+                <span class="bg-all"></span>
+              </div>
+              <div class="table-border-cell" data-border="empty" title="No Border">
+                <span class="bg-empty"></span>
+              </div>
+              <div class="table-border-cell" data-border="external" title="Outside Borders">
+                <span class="bg-external"></span>
+              </div>
+              <div class="table-border-cell" data-border="internal" title="Inside Borders">
+                <span class="bg-internal"></span>
+              </div>
+              <div class="table-border-cell" data-border="td-top" title="Top Border">
+                <span class="bg-td-top"></span>
+              </div>
+              <div class="table-border-cell" data-border="td-right" title="Right Border">
+                <span class="bg-td-right"></span>
+              </div>
+              <div class="table-border-cell" data-border="td-bottom" title="Bottom Border">
+                <span class="bg-td-bottom"></span>
+              </div>
+              <div class="table-border-cell" data-border="td-left" title="Left Border">
+                <span class="bg-td-left"></span>
+              </div>
+            </div>
+            <div class="table-border-row">
+              <label>Weight</label>
+              <select class="table-border-weight">
+                <option value="0.5">0.5 pt</option>
+                <option value="1" selected>1 pt</option>
+                <option value="1.5">1.5 pt</option>
+                <option value="2">2 pt</option>
+                <option value="3">3 pt</option>
+                <option value="4">4 pt</option>
+                <option value="6">6 pt</option>
+              </select>
+            </div>
+            <div class="table-border-row">
+              <label>Style</label>
+              <select class="table-border-style">
+                <option value="solid" selected>Solid</option>
+                <option value="dashed">Dashed</option>
+                <option value="dotted">Dotted</option>
+              </select>
+            </div>
+            <div class="table-border-row">
+              <label>Color</label>
+              <input type="color" class="table-border-color" value="#000000" />
+            </div>
+          </div>
+        </div>
+        <div class="menu-item__table-shading" title="Cell Shading">
+          <i></i>
+          <div class="options table-shading-options">
+            <div class="table-shading-title">Cell Shading</div>
+            <div class="table-shading-palette"></div>
+            <div class="table-shading-row">
+              <button type="button" class="table-shading-clear">No Color</button>
+              <input type="color" class="table-shading-custom" value="#ffff00" />
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
     <div class="catalog" editor-component="catalog">
       <div class="catalog__header">
         <span>目录</span>

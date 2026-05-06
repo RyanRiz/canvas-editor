@@ -24,7 +24,12 @@ import { ElementStyleKey } from '../../dataset/enum/ElementStyle'
 import { ListStyle, ListType } from '../../dataset/enum/List'
 import { MoveDirection } from '../../dataset/enum/Observer'
 import { RowFlex } from '../../dataset/enum/Row'
-import { TableBorder, TdBorder, TdSlash } from '../../dataset/enum/table/Table'
+import {
+  TableBorder,
+  TableBorderStyle,
+  TdBorder,
+  TdSlash
+} from '../../dataset/enum/table/Table'
 import { TitleLevel } from '../../dataset/enum/Title'
 import { VerticalAlign } from '../../dataset/enum/VerticalAlign'
 import { ICatalog } from '../../interface/Catalog'
@@ -1058,6 +1063,18 @@ export class CommandAdapt {
     const isReadonly = this.draw.isReadonly()
     if (isReadonly) return
     this.tableOperate.tableBorderColor(payload)
+  }
+
+  public tableBorderWidth(payload: number) {
+    const isReadonly = this.draw.isReadonly()
+    if (isReadonly) return
+    this.tableOperate.tableBorderWidth(payload)
+  }
+
+  public tableBorderStyle(payload: TableBorderStyle) {
+    const isReadonly = this.draw.isReadonly()
+    if (isReadonly) return
+    this.tableOperate.tableBorderStyle(payload)
   }
 
   public tableTdBorderType(payload: TdBorder) {

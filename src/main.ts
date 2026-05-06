@@ -18,6 +18,9 @@ import Editor, {
   PageMode,
   PaperDirection,
   RowFlex,
+  TableBorder,
+  TableBorderStyle,
+  TdBorder,
   TextDecorationStyle,
   TitleLevel,
   splitText
@@ -428,6 +431,197 @@ window.onload = function () {
     // 应用选择
     instance.command.executeInsertTable(rowIndex, colIndex)
     recoveryTable()
+  }
+
+  // Table Design Menu
+  const tableDesignMenuDom = document.querySelector<HTMLDivElement>(
+    '.table-design-menu'
+  )!
+
+  // Table Borders dropdown
+  const tableBorderDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__table-border'
+  )!
+  const tableBorderOptionsDom = tableBorderDom.querySelector<HTMLDivElement>(
+    '.table-border-options'
+  )!
+  const tableBorderWeightDom = tableBorderDom.querySelector<HTMLSelectElement>(
+    '.table-border-weight'
+  )!
+  const tableBorderStyleDom = tableBorderDom.querySelector<HTMLSelectElement>(
+    '.table-border-style'
+  )!
+  const tableBorderColorDom = tableBorderDom.querySelector<HTMLInputElement>(
+    '.table-border-color'
+  )!
+  tableBorderDom.onclick = function (evt) {
+    const target = evt.target as HTMLElement
+    // Toggle dropdown when clicking the icon (not inside options)
+    if (!tableBorderOptionsDom.contains(target)) {
+      tableBorderDom.classList.toggle('visible')
+      return
+    }
+    // Border position cell click
+    const cell = target.closest<HTMLDivElement>('.table-border-cell')
+    if (cell) {
+      const border = cell.dataset.border!
+      // Helper: apply current style settings after any border type change
+      const applyCurrentStyle = () => {
+        const w = parseFloat(tableBorderWeightDom.value)
+        if (!isNaN(w) && w !== 1) {
+          instance.command.executeTableBorderWidth(w)
+        }
+        const styleVal = tableBorderStyleDom.value as TableBorderStyle
+        if (styleVal !== TableBorderStyle.SOLID) {
+          instance.command.executeTableBorderStyle(styleVal)
+        }
+        const colorVal = tableBorderColorDom.value
+        if (colorVal && colorVal !== '#000000') {
+          instance.command.executeTableBorderColor(colorVal)
+        }
+      }
+      switch (border) {
+        case 'all':
+          instance.command.executeTableBorderType(TableBorder.ALL)
+          applyCurrentStyle()
+          break
+        case 'empty':
+          instance.command.executeTableBorderType(TableBorder.EMPTY)
+          break
+        case 'external':
+          instance.command.executeTableBorderType(TableBorder.EXTERNAL)
+          applyCurrentStyle()
+          break
+        case 'internal':
+          instance.command.executeTableBorderType(TableBorder.INTERNAL)
+          applyCurrentStyle()
+          break
+        case 'td-top':
+          instance.command.executeTableTdBorderType(TdBorder.TOP)
+          applyCurrentStyle()
+          break
+        case 'td-right':
+          instance.command.executeTableTdBorderType(TdBorder.RIGHT)
+          applyCurrentStyle()
+          break
+        case 'td-bottom':
+          instance.command.executeTableTdBorderType(TdBorder.BOTTOM)
+          applyCurrentStyle()
+          break
+        case 'td-left':
+          instance.command.executeTableTdBorderType(TdBorder.LEFT)
+          applyCurrentStyle()
+          break
+      }
+    }
+  }
+  tableBorderWeightDom.onchange = function () {
+    const w = parseFloat(tableBorderWeightDom.value)
+    if (!isNaN(w)) {
+      instance.command.executeTableBorderWidth(w)
+    }
+  }
+  tableBorderStyleDom.onchange = function () {
+    instance.command.executeTableBorderStyle(
+      tableBorderStyleDom.value as TableBorderStyle
+    )
+  }
+  tableBorderColorDom.onchange = function () {
+    instance.command.executeTableBorderColor(tableBorderColorDom.value)
+  }
+
+  // Cell Shading dropdown
+  const tableShadingDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__table-shading'
+  )!
+  const tableShadingOptionsDom = tableShadingDom.querySelector<HTMLDivElement>(
+    '.table-shading-options'
+  )!
+  const tableShadingPaletteDom = tableShadingDom.querySelector<HTMLDivElement>(
+    '.table-shading-palette'
+  )!
+  const tableShadingClearDom = tableShadingDom.querySelector<HTMLButtonElement>(
+    '.table-shading-clear'
+  )!
+  const tableShadingCustomDom = tableShadingDom.querySelector<HTMLInputElement>(
+    '.table-shading-custom'
+  )!
+  // Build palette: 10 cols × 5 rows = 50 colors
+  const shadingPalette = [
+    '#ffffff',
+    '#000000',
+    '#e7e6e6',
+    '#44546a',
+    '#4472c4',
+    '#ed7d31',
+    '#a5a5a5',
+    '#ffc000',
+    '#5b9bd5',
+    '#70ad47',
+    '#f2f2f2',
+    '#808080',
+    '#d0cece',
+    '#d6dce4',
+    '#d9e2f3',
+    '#fbe5d6',
+    '#ededed',
+    '#fff2cc',
+    '#deebf6',
+    '#e2efd9',
+    '#d9d9d9',
+    '#595959',
+    '#aeaaaa',
+    '#adb9ca',
+    '#b4c7e7',
+    '#f8cbad',
+    '#dbdbdb',
+    '#ffe699',
+    '#bdd7ee',
+    '#c5e0b4',
+    '#bfbfbf',
+    '#404040',
+    '#757070',
+    '#8497b0',
+    '#8faadc',
+    '#f4b183',
+    '#a6a6a6',
+    '#ffd966',
+    '#9dc3e6',
+    '#a9d18e',
+    '#c00000',
+    '#ff0000',
+    '#ffc000',
+    '#ffff00',
+    '#92d050',
+    '#00b050',
+    '#00b0f0',
+    '#0070c0',
+    '#002060',
+    '#7030a0'
+  ]
+  shadingPalette.forEach(color => {
+    const swatch = document.createElement('div')
+    swatch.className = 'table-shading-swatch'
+    swatch.style.backgroundColor = color
+    swatch.dataset.color = color
+    tableShadingPaletteDom.append(swatch)
+  })
+  tableShadingDom.onclick = function (evt) {
+    const target = evt.target as HTMLElement
+    if (!tableShadingOptionsDom.contains(target)) {
+      tableShadingDom.classList.toggle('visible')
+      return
+    }
+    const swatch = target.closest<HTMLDivElement>('.table-shading-swatch')
+    if (swatch) {
+      instance.command.executeTableTdBackgroundColor(swatch.dataset.color!)
+    }
+  }
+  tableShadingClearDom.onclick = function () {
+    instance.command.executeTableTdBackgroundColor('')
+  }
+  tableShadingCustomDom.onchange = function () {
+    instance.command.executeTableTdBackgroundColor(tableShadingCustomDom.value)
   }
 
   const imageDom = document.querySelector<HTMLDivElement>('.menu-item__image')!
@@ -1775,6 +1969,18 @@ window.onload = function () {
       }`
     }
   }
+
+  instance.eventBus.on('positionContextChange', function (payload) {
+    const { value } = payload
+    const editorDiv = document.querySelector<HTMLDivElement>('.editor > div')
+    if (value.isTable) {
+      tableDesignMenuDom.style.display = 'flex'
+      if (editorDiv) editorDiv.style.marginTop = '124px'
+    } else {
+      tableDesignMenuDom.style.display = 'none'
+      if (editorDiv) editorDiv.style.marginTop = '80px'
+    }
+  })
 
   instance.listener.visiblePageNoListChange = function (payload) {
     const text = payload.map(i => i + 1).join('、')
