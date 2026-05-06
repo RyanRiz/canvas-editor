@@ -84,6 +84,7 @@ export default class Editor {
   public register: Register
   public destroy: () => void
   public use: UsePlugin
+  public draw: Draw
 
   constructor(
     container: HTMLDivElement,
@@ -139,6 +140,8 @@ export default class Editor {
       this.eventBus,
       this.override
     )
+    // Expose draw for external access to read the layout (e.g., for PDF export)
+    this.draw = draw
     // 命令
     this.command = new Command(new CommandAdapt(draw))
     // 菜单
