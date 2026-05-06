@@ -1,5 +1,5 @@
 import { version } from '../../../../package.json'
-import { ZERO } from '../../dataset/constant/Common'
+import { WRAP, ZERO } from '../../dataset/constant/Common'
 import { RowFlex } from '../../dataset/enum/Row'
 import {
   IAppendElementListOption,
@@ -2247,6 +2247,51 @@ export class Draw {
         })
         x = surroundPosition.x
         x += metrics.width
+      }
+    }
+    // 段落缩进
+    for (let r = 0; r < rowList.length; r++) {
+      const curRow = rowList[r]
+      const repEl = curRow.elementList.find(
+        el => el.value !== ZERO && el.value !== WRAP
+      )
+      if (repEl?.indent) {
+        curRow.offsetX =
+          (curRow.offsetX || 0) + repEl.indent * defaultTabWidth * scale
+      }
+    }
+    // 段前段后间距
+    for (let r = 0; r < rowList.length; r++) {
+      const curRow = rowList[r]
+      const prevRow = rowList[r - 1]
+      const nextRow = rowList[r + 1]
+      const hasTextContent = curRow.elementList.some(
+        el => el.value !== ZERO && el.value !== WRAP
+      )
+      if (!hasTextContent) continue
+      const isFirstOfParagraph =
+        !prevRow ||
+        elementList[
+          prevRow.startIndex + prevRow.elementList.length
+        ]?.value === ZERO
+      const isLastOfParagraph =
+        !nextRow ||
+        elementList[
+          curRow.startIndex + curRow.elementList.length
+        ]?.value === ZERO
+      if (!isFirstOfParagraph && !isLastOfParagraph) continue
+      const repEl = curRow.elementList.find(
+        el => el.value !== ZERO && el.value !== WRAP
+      )
+      if (!repEl) continue
+      const extraPixel = defaultBasicRowMarginHeight * scale
+      if (isFirstOfParagraph && repEl.spaceBefore) {
+        const spaceBeforePx = extraPixel * repEl.spaceBefore
+        curRow.height += spaceBeforePx
+        curRow.ascent += spaceBeforePx
+      }
+      if (isLastOfParagraph && repEl.spaceAfter) {
+        curRow.height += extraPixel * repEl.spaceAfter
       }
     }
     return rowList

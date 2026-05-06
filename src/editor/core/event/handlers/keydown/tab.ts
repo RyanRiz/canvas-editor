@@ -1,9 +1,4 @@
-import { EDITOR_ELEMENT_STYLE_ATTR } from '../../../../dataset/constant/Element'
-import { ElementType } from '../../../../dataset/enum/Element'
 import { MoveDirection } from '../../../../dataset/enum/Observer'
-import { IElement } from '../../../../interface/Element'
-import { pickObject } from '../../../../utils'
-import { formatElementContext } from '../../../../utils/element'
 import { CanvasEvent } from '../../CanvasEvent'
 
 export function tab(evt: KeyboardEvent, host: CanvasEvent) {
@@ -18,24 +13,25 @@ export function tab(evt: KeyboardEvent, host: CanvasEvent) {
     control.initNextControl({
       direction: evt.shiftKey ? MoveDirection.UP : MoveDirection.DOWN
     })
-  } else {
-    const rangeManager = draw.getRange()
-    const elementList = draw.getElementList()
-    const { startIndex, endIndex } = rangeManager.getRange()
-    // 插入tab符
-    const anchorStyle = rangeManager.getRangeAnchorStyle(elementList, endIndex)
-    // 仅复制样式
-    const copyStyle = anchorStyle
-      ? pickObject(anchorStyle, EDITOR_ELEMENT_STYLE_ATTR)
-      : null
-    const tabElement: IElement = {
-      ...copyStyle,
-      type: ElementType.TAB,
-      value: ''
-    }
-    formatElementContext(elementList, [tabElement], startIndex, {
-      editorOptions: draw.getOptions()
-    })
-    draw.insertElementList([tabElement])
+    return
   }
+  // 缩进/减少缩进
+  const rangeManager = draw.getRange()
+  const { startIndex, endIndex } = rangeManager.getRange()
+  if (!~startIndex && !~endIndex) return
+  const rowElementList = rangeManager.getRangeRowElementList()
+  if (!rowElementList) return
+  rowElementList.forEach(element => {
+    const currentIndent = element.indent || 0
+    if (evt.shiftKey) {
+      if (currentIndent > 0) {
+        element.indent = currentIndent - 1
+      }
+    } else {
+      element.indent = currentIndent + 1
+    }
+  })
+  const isSetCursor = startIndex === endIndex
+  const curIndex = isSetCursor ? endIndex : startIndex
+  draw.render({ curIndex, isSetCursor })
 }

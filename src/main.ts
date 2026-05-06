@@ -347,6 +347,22 @@ window.onload = function () {
     instance.command.executeRowFlex(RowFlex.JUSTIFY)
   }
 
+  const increaseIndentDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__increase-indent'
+  )!
+  increaseIndentDom.onclick = function () {
+    console.log('increase-indent')
+    instance.command.executeIncreaseIndent()
+  }
+
+  const decreaseIndentDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__decrease-indent'
+  )!
+  decreaseIndentDom.onclick = function () {
+    console.log('decrease-indent')
+    instance.command.executeDecreaseIndent()
+  }
+
   const rowMarginDom = document.querySelector<HTMLDivElement>(
     '.menu-item__row-margin'
   )!
@@ -358,6 +374,36 @@ window.onload = function () {
   rowOptionDom.onclick = function (evt) {
     const li = evt.target as HTMLLIElement
     instance.command.executeRowMargin(Number(li.dataset.rowmargin!))
+  }
+
+  const spaceBeforeDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__space-before'
+  )!
+  const spaceBeforeOptionDom =
+    spaceBeforeDom.querySelector<HTMLDivElement>('.options')!
+  spaceBeforeDom.onclick = function () {
+    console.log('space-before')
+    spaceBeforeOptionDom.classList.toggle('visible')
+  }
+  spaceBeforeOptionDom.onclick = function (evt) {
+    const li = evt.target as HTMLLIElement
+    instance.command.executeSpaceBefore(
+      Number(li.dataset.spaceBefore!)
+    )
+  }
+
+  const spaceAfterDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__space-after'
+  )!
+  const spaceAfterOptionDom =
+    spaceAfterDom.querySelector<HTMLDivElement>('.options')!
+  spaceAfterDom.onclick = function () {
+    console.log('space-after')
+    spaceAfterOptionDom.classList.toggle('visible')
+  }
+  spaceAfterOptionDom.onclick = function (evt) {
+    const li = evt.target as HTMLLIElement
+    instance.command.executeSpaceAfter(Number(li.dataset.spaceAfter!))
   }
 
   const listDom = document.querySelector<HTMLDivElement>('.menu-item__list')!
