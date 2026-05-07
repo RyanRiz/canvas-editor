@@ -125,6 +125,41 @@ import { Badge } from './frame/Badge'
 import { Graffiti } from './graffiti/Graffiti'
 import { Magnifier } from './interactive/Magnifier'
 import { IPageColumns } from '../../interface/PageColumns'
+import { IRange } from '../../interface/Range'
+import { IPositionContext } from '../../interface/Position'
+
+/**
+ * PERF-PLAN §1.2 / Phase 1.2：delta-based history 的「BEFORE 状态」元数据。
+ *
+ * 一次 submitHistory 落盘 delta 时除了承载 mutation 数组，还需要把 range /
+ * positionContext / pageNo / zone 这些非元素的小状态一并锁住，否则 undo /
+ * redo 后光标位置 / 当前编辑分区就会与文档内容脱节。
+ */
+interface IDeltaHistoryMeta {
+  range: IRange
+  positionContext: IPositionContext
+  pageNo: number
+  zone: EditorZone
+}
+
+/**
+ * PERF-PLAN §1.2 / Phase 1.2：delta-based history stack 条目。
+ *
+ * 与传统的「Function 即 snapshot 还原器」并列存在；HistoryManager 在 undo /
+ * redo 时按 kind 分发：
+ *   - kind: 'snapshot'  →  call restore()，restore 内部把整份元素列表从 deepClone
+ *     拷贝回来（legacy 行为，覆盖 property-only commands 等无法 delta 描述的场景）。
+ *   - kind: 'delta'  →  applyForward 应用 mutations 顺序、还原 metaAfter；
+ *     applyBackward 应用 mutations 逆序的逆向、还原 metaBefore。两者皆在
+ *     `_isReplayingHistory=true` 的临界区内执行，避免再次入栈循环。
+ */
+export type DraftHistoryStackItem =
+  | { kind: 'snapshot'; restore: () => void }
+  | {
+      kind: 'delta'
+      applyForward: () => void
+      applyBackward: () => void
+    }
 
 export class Draw {
   private container: HTMLDivElement
@@ -173,6 +208,27 @@ export class Draw {
   } | null
   // PERF-PLAN §3.1：Mutator 边界事件订阅者。spliceElementList 完成后通知。
   private _mutationListeners: Set<MutationListener>
+  // PERF-PLAN §1.2 / Phase 1.2：自上次 submitHistory 以来积累的「主元素列表」突变事件。
+  // submitHistory 据此决定是否走 delta 分支：所有事件 scope=main 且没有破坏 delta
+  // 不变量的旁路改动时，可避免 9× full deepClone。事件由 spliceElementList 自动
+  // push（除非正在 replay history），submitHistory 完成后清空。
+  private _pendingHistoryMutations: IMutationEvent[]
+  // 标志位：自上次 submitHistory 以来发生过任何「不能用 delta 描述」的改动？
+  // 任一为真则 submitHistory 必须 snapshot：
+  //   - spliceElementList 触发的 listId/listType/listStyle 旁清理（属性写入未在 splice
+  //     event 里捕获）
+  //   - spliceElementList 受 deletable 规则保护跳过了部分元素（actualRemoved 与
+  //     deleteCount 不一致——slice 不再对称）
+  //   - 调用方显式 setEditorData / Header.setElementList / Footer.setElementList /
+  //     property-only 命令（按目前的简化策略，非 splice 路径直接 snapshot）
+  private _deltaHistoryUnsafe: boolean
+  // 第一次 mutation 落入挂起队列时捕获的「BEFORE 状态」元数据，供 delta 入栈时携带。
+  // 若整轮 submitHistory 走 snapshot 分支，本字段被忽略并清空。
+  private _preMutationMeta: IDeltaHistoryMeta | null
+  // 正在 replay history（undo/redo 的 applyForward / applyBackward 内部）时，
+  // spliceElementList 不应再次把事件推回 _pendingHistoryMutations，否则形成
+  // 自相干循环：当前撤销动作会被自己再记录一次。
+  private _isReplayingHistory: boolean
   private pageNo: number
   private renderCount: number
   private pagePixelRatio: number | null
@@ -272,6 +328,10 @@ export class Draw {
     this._mainRowCheckpoints = []
     this._mainLayoutSig = null
     this._mutationListeners = new Set()
+    this._pendingHistoryMutations = []
+    this._deltaHistoryUnsafe = false
+    this._preMutationMeta = null
+    this._isReplayingHistory = false
     this.pageNo = 0
     this.renderCount = 0
     this.pagePixelRatio = null
@@ -1033,12 +1093,6 @@ export class Draw {
     }
   }
 
-  private _resolveMutationScope(elementList: IElement[]): HistoryScope {
-    if (elementList === this.elementList) return 'main'
-    if (elementList === this.header.getElementList()) return 'header'
-    if (elementList === this.footer.getElementList()) return 'footer'
-    return 'table'
-  }
 
   public spliceElementList(
     elementList: IElement[],
@@ -1048,14 +1102,19 @@ export class Draw {
     options?: ISpliceElementListOption
   ) {
     // 主列表 / 页眉 / 页脚分别维护 dirty 标志：render() 据此精确决定布局范围
+    let scope: HistoryScope
     if (elementList === this.elementList) {
+      scope = 'main'
       const insertedLen = items?.length ?? 0
       this.markDirty(start, start + Math.max(deleteCount, insertedLen))
     } else if (elementList === this.header.getElementList()) {
+      scope = 'header'
       this._headerDirty = true
     } else if (elementList === this.footer.getElementList()) {
+      scope = 'footer'
       this._footerDirty = true
     } else {
+      scope = 'table'
       // PERF-PLAN §2.5 / Phase 2B：如果该 elementList 是某个 td.value（由上一次
       // computeRowList 在表格分支里挂上 _owningTd 反向引用），把那个 td 标 dirty。
       // 主体下次 computeRowList 抵达该单元格时会按 cacheKey + _dirty 决定是否
@@ -1068,11 +1127,17 @@ export class Draw {
         owningTd._dirty = true
       }
     }
+    // PERF-PLAN §1.2 / Phase 1.2：除主列表以外的作用域无法走 delta 分支
+    // （我们只为 main 维护逆向序列，HEADER/FOOTER/TABLE 的 elementList 引用
+    // 在 setElementList 时会被替换；retroactive splice 不可靠）。
+    if (scope !== 'main') {
+      this._deltaHistoryUnsafe = true
+    }
     // 事件订阅前先快照「将被删除」切片（splice 后无法访问）。
+    // 内部的 delta-history 记录器同样需要这份快照，因此从此版本起即便没有
+    // 外部 mutation 订阅者，只要存在 delete 也照常 slice。
     const removedSnapshot =
-      this._mutationListeners.size > 0 && deleteCount > 0
-        ? elementList.slice(start, start + deleteCount)
-        : []
+      deleteCount > 0 ? elementList.slice(start, start + deleteCount) : []
     const { isIgnoreDeletedRule = false } = options || {}
     const { group, modeRule } = this.options
     if (deleteCount > 0) {
@@ -1097,6 +1162,9 @@ export class Draw {
           delete curElement.listType
           delete curElement.listStyle
           startIndex++
+          // PERF-PLAN §1.2：本路径属于「splice 之外的旁路属性写入」——mutation
+          // 事件无法描述。记入旁路改动后，submitHistory 会回退到 snapshot 分支。
+          this._deltaHistoryUnsafe = true
         }
       }
       // 非明确忽略删除规则 && 非设计模式 && 非光标在控件内(控件内控制) =》 校验删除规则
@@ -1107,6 +1175,7 @@ export class Draw {
       ) {
         const tdDeletable = this.getTd()?.deletable
         let deleteIndex = endIndex - 1
+        let actuallyDeleted = 0
         while (deleteIndex >= start) {
           const deleteElement = elementList[deleteIndex]
           if (
@@ -1124,8 +1193,16 @@ export class Draw {
                 deleteElement?.areaIndex !== 0))
           ) {
             elementList.splice(deleteIndex, 1)
+            actuallyDeleted++
           }
           deleteIndex--
+        }
+        // PERF-PLAN §1.2：deletable 规则跳过了部分元素时 removed 切片不再对称
+        // （它仍是 `[start, start+deleteCount)`，但部分元素其实没删）。delta 入栈
+        // 时若按这份切片做逆操作会重新插入「保留下来的」元素，导致重复。
+        // 因此只要保护规则真的吃掉了某个候选删除项，立即让本轮 fallback 到 snapshot。
+        if (actuallyDeleted !== deleteCount) {
+          this._deltaHistoryUnsafe = true
         }
       } else {
         elementList.splice(start, deleteCount)
@@ -1142,11 +1219,41 @@ export class Draw {
         elementList.splice(start + i, 0, item)
       }
     }
-    // 通知突变事件订阅者（PERF-PLAN §3.1）。仅在有订阅者时才构造 payload。
-    if (this._mutationListeners.size > 0) {
+    // PERF-PLAN §1.2 / §3.1：构造 splice 事件，既给 mutation 订阅者也给 history
+    // delta 记录器使用。仅在 replay history（撤销/重做）期间不做记录，避免
+    // 自相干循环（applyBackward 调用 splice 还原时会再次进来）。
+    if (!this._isReplayingHistory) {
+      const event: IMutationEvent = {
+        kind: 'splice',
+        scope,
+        start,
+        removed: removedSnapshot,
+        inserted: items ? items.slice() : []
+      }
+      // 第一笔 mutation 入队前先锁住 BEFORE 状态——delta 入栈时携带，作为
+      // applyBackward 的「目的地」元数据。
+      if (
+        scope === 'main' &&
+        !this._deltaHistoryUnsafe &&
+        this._pendingHistoryMutations.length === 0 &&
+        this._preMutationMeta === null
+      ) {
+        this._preMutationMeta = {
+          range: deepClone(this.range.getRange()),
+          positionContext: deepClone(this.position.getPositionContext()),
+          pageNo: this.pageNo,
+          zone: this.zone.getZone()
+        }
+      }
+      this._pendingHistoryMutations.push(event)
+      // 通知 mutation 订阅者
+      if (this._mutationListeners.size > 0) {
+        this._emitMutation(event)
+      }
+    } else if (this._mutationListeners.size > 0) {
       this._emitMutation({
         kind: 'splice',
-        scope: this._resolveMutationScope(elementList),
+        scope,
         start,
         removed: removedSnapshot,
         inserted: items ? items.slice() : []
@@ -1585,6 +1692,11 @@ export class Draw {
     // 等大批量替换文档后还沿用上一份文档的恢复点（PERF-PLAN §2.2）。
     this._mainRowCheckpoints = []
     this._mainLayoutSig = null
+    // PERF-PLAN §1.2 / Phase 1.2：累积的 delta mutation 也作废——setEditorData 之后
+    // 旧的 mutations 引用着已失效的 elementList 索引，replay 会产生灾难性的越界。
+    this._pendingHistoryMutations = []
+    this._deltaHistoryUnsafe = true
+    this._preMutationMeta = null
   }
 
   /**
@@ -4043,6 +4155,139 @@ export class Draw {
   }
 
   public submitHistory(curIndex: number | undefined) {
+    // PERF-PLAN §1.2 / Phase 1.2：尝试走 delta 分支——上一次 submit 之后只
+    // 经历了 main 列表的纯 splice，没有 deletable 跳过、没有 listId 旁清理、
+    // 没有 header / footer / table 改动、且初始 snapshot 已经在栈底。任何一
+    // 项不满足都退回到 legacy snapshot（保留正确性兜底）。
+    const canUseDelta =
+      !this._deltaHistoryUnsafe &&
+      this._pendingHistoryMutations.length > 0 &&
+      this._preMutationMeta !== null &&
+      !this.historyManager.isStackEmpty() &&
+      this._pendingHistoryMutations.every(m => m.scope === 'main')
+    if (canUseDelta) {
+      this._submitDeltaHistory(curIndex)
+    } else {
+      this._submitSnapshotHistory(curIndex)
+    }
+    // 任意分支结束都重置内部累加器，准备下一轮。
+    this._pendingHistoryMutations = []
+    this._deltaHistoryUnsafe = false
+    this._preMutationMeta = null
+  }
+
+  /**
+   * PERF-PLAN §1.2 / Phase 1.2：把累积的 splice 序列封装成一对正反应用闭包，
+   * 推入 history。每个 keystroke 不再付出 ~3× full deepClone 的代价，节省的
+   * 主要是：
+   *   1. `getSlimCloneElementList(this.elementList)` 一次完整遍历 + 对象拷贝；
+   *   2. `historyManager.execute(...)` 闭包内部还要再 deepClone 一遍 main /
+   *      header / footer / range / positionContext 共 5 处。
+   *
+   * delta 体积约等于 mutations 总条数 × （插入/删除元素个数）。对于持续打字
+   * 这类 batch，体积线性于「按了几个键」，与文档总长度脱钩。
+   */
+  private _submitDeltaHistory(curIndex: number | undefined) {
+    const mutations = this._pendingHistoryMutations.slice()
+    const metaBefore = this._preMutationMeta!
+    const metaAfter: IDeltaHistoryMeta = {
+      range: deepClone(this.range.getRange()),
+      positionContext: deepClone(this.position.getPositionContext()),
+      pageNo: this.pageNo,
+      zone: this.zone.getZone()
+    }
+    const curIndexAfter = curIndex
+    const curIndexBefore = metaBefore.range.startIndex
+    const applyForward = () => {
+      this._isReplayingHistory = true
+      try {
+        // 顺序重放：每条 mutation 对当前 elementList 再次执行 splice(start,
+        // removed.length, ...inserted)——等价于「把改动重新做一遍」。
+        for (let i = 0; i < mutations.length; i++) {
+          const m = mutations[i]
+          this.elementList.splice(
+            m.start,
+            m.removed.length,
+            ...m.inserted
+          )
+        }
+      } finally {
+        this._isReplayingHistory = false
+      }
+      this.zone.setZone(metaAfter.zone)
+      this.setPageNo(metaAfter.pageNo)
+      this.position.setPositionContext(deepClone(metaAfter.positionContext))
+      this.range.replaceRange(deepClone(metaAfter.range))
+      // 按完整 elementList 重新布局——比照 snapshot 路径，触发 dirty 信号
+      // 要让 §2.2 / §2.3 的增量分支也参与；这里对所有可能受影响的位置做最大
+      // 标脏，简单可靠。
+      const bounds = this._dirtyBoundsFromMutations(mutations)
+      if (bounds) this.markDirty(bounds.start, bounds.end)
+      this.render({
+        curIndex: curIndexAfter,
+        isSubmitHistory: false,
+        isSourceHistory: true
+      })
+    }
+    const applyBackward = () => {
+      this._isReplayingHistory = true
+      try {
+        // 反向重放：每条 mutation 倒序应用其逆——splice(start, inserted.length,
+        // ...removed)。注意必须从尾到头，因为后续 mutation 的 start 索引基于
+        // 前一条已经应用之后的坐标系。
+        for (let i = mutations.length - 1; i >= 0; i--) {
+          const m = mutations[i]
+          this.elementList.splice(
+            m.start,
+            m.inserted.length,
+            ...m.removed
+          )
+        }
+      } finally {
+        this._isReplayingHistory = false
+      }
+      this.zone.setZone(metaBefore.zone)
+      this.setPageNo(metaBefore.pageNo)
+      this.position.setPositionContext(deepClone(metaBefore.positionContext))
+      this.range.replaceRange(deepClone(metaBefore.range))
+      const bounds = this._dirtyBoundsFromMutations(mutations)
+      if (bounds) this.markDirty(bounds.start, bounds.end)
+      this.render({
+        curIndex: curIndexBefore,
+        isSubmitHistory: false,
+        isSourceHistory: true
+      })
+    }
+    this.historyManager.executeDelta({ applyForward, applyBackward })
+  }
+
+  /**
+   * 计算一组 mutations 影响的「最小 [start, end)」区间，用于 undo / redo
+   * 重渲染时给增量布局提供 dirty 提示。仅在主元素列表上有效。
+   */
+  private _dirtyBoundsFromMutations(
+    mutations: IMutationEvent[]
+  ): { start: number; end: number } | null {
+    if (mutations.length === 0) return null
+    let lo = Number.POSITIVE_INFINITY
+    let hi = -1
+    for (const m of mutations) {
+      const len = Math.max(m.removed.length, m.inserted.length)
+      if (m.start < lo) lo = m.start
+      const endCandidate = m.start + len
+      if (endCandidate > hi) hi = endCandidate
+    }
+    if (hi < 0) return null
+    return { start: lo, end: hi }
+  }
+
+  /**
+   * Legacy 快照路径：兼容 property-only 命令、首次提交、跨分区改动等不能
+   * 用 delta 描述的场景。语义与 Phase 1.2 之前的 submitHistory 完全一致——
+   * 9× deepClone（主 / 页眉 / 页脚 / range / positionContext，构造时 4 次，
+   * 闭包内部 5 次）。代价比 delta 高，但只在罕见路径上发生。
+   */
+  private _submitSnapshotHistory(curIndex: number | undefined) {
     const positionContext = this.position.getPositionContext()
     const oldElementList = getSlimCloneElementList(this.elementList)
     const oldHeaderElementList = getSlimCloneElementList(
@@ -4056,13 +4301,18 @@ export class Draw {
     const oldPositionContext = deepClone(positionContext)
     const zone = this.zone.getZone()
     this.historyManager.execute(() => {
-      this.zone.setZone(zone)
-      this.setPageNo(pageNo)
-      this.position.setPositionContext(deepClone(oldPositionContext))
-      this.header.setElementList(deepClone(oldHeaderElementList))
-      this.footer.setElementList(deepClone(oldFooterElementList))
-      this.elementList = deepClone(oldElementList)
-      this.range.replaceRange(deepClone(oldRange))
+      this._isReplayingHistory = true
+      try {
+        this.zone.setZone(zone)
+        this.setPageNo(pageNo)
+        this.position.setPositionContext(deepClone(oldPositionContext))
+        this.header.setElementList(deepClone(oldHeaderElementList))
+        this.footer.setElementList(deepClone(oldFooterElementList))
+        this.elementList = deepClone(oldElementList)
+        this.range.replaceRange(deepClone(oldRange))
+      } finally {
+        this._isReplayingHistory = false
+      }
       this.render({
         curIndex,
         isSubmitHistory: false,

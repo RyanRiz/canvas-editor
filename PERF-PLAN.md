@@ -213,24 +213,72 @@ These are surgical changes; no API churn.
      can keep the same signature).
 
 2. **Skip `submitHistory` cloning on the hot path; commit on idle.**
-   - On a keystroke, push a *light* history entry: just `{ curIndex,
-     opType: 'input', delta: insertedElements, oldRange,
-     oldPositionContext }`. Defer the heavy `getSlimCloneElementList`
-     of the full list to `requestIdleCallback` (or coalesce by typing
-     boundary — e.g. 500 ms idle, or any non-input command).
-   - Replace the 9 `deepClone` calls in `submitHistory`
-     ([Draw.ts:3290-3308](src/editor/core/draw/Draw.ts#L3290-L3308))
-     with a delta-based undo entry that records:
-     * insertion: `{ at, length }` — undo splices it out;
-     * deletion: `{ at, removedElements: shallowCopiedSlice }` — undo
-       splices them back.
-   - This makes per-keystroke history O(insertedLength) instead of
-     O(N).
-   - Backwards-compatible: keep a periodic full snapshot (e.g. every
-     100 ops or on idle) so undo across very long histories still
-     resolves quickly without replaying many deltas.
-   - Files: [Draw.ts:3288-3315](src/editor/core/draw/Draw.ts#L3288-L3315),
-     [HistoryManager.ts](src/editor/core/history/HistoryManager.ts).
+   **(LANDED — Phase 1.2.)**
+   - `submitHistory` now dispatches between two paths
+     ([Draw.ts:`submitHistory` / `_submitDeltaHistory` / `_submitSnapshotHistory`](src/editor/core/draw/Draw.ts)):
+     * **Delta path** (taken when *all* of: pending mutations exist,
+       all are scope=`main`, no `_deltaHistoryUnsafe` flag, history
+       stack non-empty). Pushes a `{ applyForward, applyBackward }`
+       pair. Each function replays the captured `IMutationEvent[]`
+       against `this.elementList` (forward = original splices in
+       order, backward = inverse splices in reverse) inside an
+       `_isReplayingHistory = true` guard so nested mutations do
+       not re-enter the delta accumulator. Only ranged metadata
+       (`range / positionContext / pageNo / zone`) is `deepClone`d —
+       no full-document clone ever happens for typing.
+     * **Snapshot path** (legacy, preserved verbatim — 9× `deepClone` /
+       `getSlimCloneElementList`). Used when delta is unsafe:
+       property-only commands (bold / italic / font / size / color /
+       title — they bypass `spliceElementList`); first submit (stack
+       empty); header / footer / table splices; the rare list-id
+       cleanup branch in `spliceElementList`; `deletable`-rule skips
+       inside delete; explicit `setEditorData` /
+       `_invalidatePaintCache`.
+   - **Mutation accumulator**
+     ([`_pendingHistoryMutations`](src/editor/core/draw/Draw.ts)). Every
+     `spliceElementList` (outside replay) pushes its `IMutationEvent`
+     here. The accumulator is consumed verbatim by the delta path and
+     discarded by the snapshot path; in both cases reset to empty
+     after `submitHistory` returns. The `removedSnapshot` slice is now
+     captured unconditionally on `deleteCount > 0` (was previously
+     only when external mutation listeners existed) — needed for
+     correct backward replay.
+   - **Safety guards**:
+     * `_deltaHistoryUnsafe` flag flips true the moment any path
+       cannot be losslessly described by a sequence of main-scope
+       splices. `_invalidatePaintCache` also flips it so big-bang
+       document replacement (`setEditorData`) cleanly forces the next
+       submit onto the snapshot path.
+     * `IElement.id` is stamped at the Mutator boundary (Phase 3A)
+       which means inserted elements are reference-stable across
+       redo / undo — cursor restoration after `applyForward` /
+       `applyBackward` finds the right anchor.
+   - **HistoryManager extension**
+     ([`HistoryManager.ts:executeDelta` + discriminated stack items](src/editor/core/history/HistoryManager.ts)).
+     Internal stack now holds `Function | { kind: 'delta',
+     applyForward, applyBackward }`. Legacy `execute(fn)` callers are
+     untouched (Function path). `undo` / `redo` dispatch on item kind:
+     for snapshots, behavior matches pre-1.2 ("call new top to
+     restore"); for deltas, call the corresponding apply function.
+     The `executeEntry` API (Phase 3A typed-entry stream) is
+     unchanged.
+   - **Tests**:
+     [`tests/core/history/DeltaHistory.test.ts`](tests/core/history/DeltaHistory.test.ts)
+     (7 cases) covers: pending accumulator clears after every submit,
+     delta-path undo/redo equivalence with snapshot path across
+     multiple inserts, property-only (`bold`) command falls back to
+     snapshot, `setEditorData` invalidates the accumulator, header
+     splices flip the unsafe flag, and delete operations roundtrip
+     correctly. The complete suite (`42 files / 266 tests`) is green.
+   - **Expected effect on the user-reported 11-page / 8 331-word
+     doc**: typing-batch flushes (idle every 500 ms or non-input
+     command) no longer trigger ~80–150 ms of full-document
+     `structuredClone`. The "sometimes fast, sometimes lagged"
+     pattern — fast during burst typing, lagged on every batch
+     boundary — is the classic Phase 1.2 fingerprint and disappears
+     once the delta path is taken.
+   - Files: [Draw.ts (submitHistory + _submitDeltaHistory)](src/editor/core/draw/Draw.ts),
+     [HistoryManager.ts (executeDelta)](src/editor/core/history/HistoryManager.ts).
 
 3. **Reuse a single measurement `<canvas>`.**
    - Make `computeRowList`'s canvas a class field
