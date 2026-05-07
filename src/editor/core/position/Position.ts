@@ -18,7 +18,7 @@ import {
 } from '../../interface/Position'
 import { Draw } from '../draw/Draw'
 import { EditorMode, EditorZone } from '../../dataset/enum/Editor'
-import { deepClone, isRectIntersect } from '../../utils'
+import { isRectIntersect } from '../../utils'
 import { ImageDisplay } from '../../dataset/enum/Common'
 import { DeepRequired } from '../../interface/Common'
 import { EventBus } from '../event/eventbus/EventBus'
@@ -333,10 +333,14 @@ export class Position {
   ): IElementPosition[] {
     const { row, innerWidth } = payload
     const positionList: IElementPosition[] = []
+    // 浅拷贝即可：computePageRowPosition 不写回 row 的标量字段，
+    // 仅可能默认化共享元素的 imgFloatPosition（幂等）以及为表格元素重置
+    // td.positionList——本辅助调用仅用于行级预览（非表格行），无需 deepClone
+    // 整个元素子树。
     this.computePageRowPosition({
       positionList,
       innerWidth,
-      rowList: [deepClone(row)],
+      rowList: [{ ...row }],
       pageNo: 0,
       startX: 0,
       startY: 0,
