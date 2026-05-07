@@ -492,6 +492,7 @@ export class RangeManager {
     const { startIndex, endIndex, isCrossRowCol } = this.range
     if (!~startIndex && !~endIndex) return
     let curElement: IElement | null
+    let rowIndexElement: IElement | null = null
     if (isCrossRowCol) {
       // 单元格选择以当前表格定位
       const originalElementList = this.draw.getOriginalElementList()
@@ -501,6 +502,7 @@ export class RangeManager {
       const index = ~endIndex ? endIndex : 0
       // 行首以第一个非换行符元素定位
       const elementList = this.draw.getElementList()
+      rowIndexElement = elementList[index] ?? null
       curElement = this.getRangeAnchorStyle(elementList, index)
     }
     if (!curElement) return
@@ -520,7 +522,10 @@ export class RangeManager {
     const color = curElement.color || null
     const highlight = curElement.highlight || null
     const rowFlex = curElement.rowFlex || null
-    const rowMargin = curElement.rowMargin ?? this.options.defaultRowMargin
+    // rowMargin is a row-level property set on the actual cursor element; read it
+    // directly from rowIndexElement to avoid the ZERO-anchor skip in getAnchorElement
+    // returning the next paragraph's element (which was not updated by the command).
+    const rowMargin = rowIndexElement?.rowMargin ?? curElement.rowMargin ?? this.options.defaultRowMargin
     const dashArray = curElement.dashArray || []
     const level = curElement.level || null
     const listType = curElement.listType || null

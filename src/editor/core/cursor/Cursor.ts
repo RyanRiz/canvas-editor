@@ -142,8 +142,11 @@ export class Cursor {
     // 默认偏移高度
     const defaultOffsetHeight = CURSOR_AGENT_OFFSET_HEIGHT * scale
     // Keep the caret close to the glyph box after custom baseline adjustments.
-    const increaseHeight = Math.min(metrics.height / 10, defaultOffsetHeight)
-    const cursorHeight = metrics.height + increaseHeight * 2
+    const increaseHeight = Math.min(
+      metrics.height / 20,
+      defaultOffsetHeight / 2
+    )
+    const cursorHeight = metrics.height + increaseHeight
     const agentCursorDom = this.cursorAgent.getAgentCursorDom()
     if (isFocus) {
       setTimeout(() => {
