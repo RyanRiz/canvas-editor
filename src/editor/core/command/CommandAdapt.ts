@@ -2609,6 +2609,86 @@ export class CommandAdapt {
     this.draw.getZone().setZone(zone)
   }
 
+  public setHeaderActiveVariant(variant: 'default' | 'first' | 'even') {
+    const header = this.draw.getHeader()
+    header.setActiveVariant(variant)
+    this.draw.getZone().setZone(EditorZone.HEADER)
+    // Reset selection to start of the new variant so typing immediately lands
+    // on a valid index in the swapped elementList.
+    this.range.setRange(0, 0)
+    this.draw.render({
+      curIndex: 0,
+      isSubmitHistory: false
+    })
+  }
+
+  public setFooterActiveVariant(variant: 'default' | 'first' | 'even') {
+    const footer = this.draw.getFooter()
+    footer.setActiveVariant(variant)
+    this.draw.getZone().setZone(EditorZone.FOOTER)
+    this.range.setRange(0, 0)
+    this.draw.render({
+      curIndex: 0,
+      isSubmitHistory: false
+    })
+  }
+
+  public getHeaderActiveVariant(): 'default' | 'first' | 'even' {
+    return this.draw.getHeader().getActiveVariant()
+  }
+
+  public getFooterActiveVariant(): 'default' | 'first' | 'even' {
+    return this.draw.getFooter().getActiveVariant()
+  }
+
+  public setHeaderFirstPageEnabled(enabled: boolean) {
+    this.draw.setHeaderOption({ firstPageEnabled: enabled })
+  }
+
+  public setHeaderOddEvenEnabled(enabled: boolean) {
+    this.draw.setHeaderOption({ oddEvenEnabled: enabled })
+  }
+
+  public setFooterFirstPageEnabled(enabled: boolean) {
+    this.draw.setFooterOption({ firstPageEnabled: enabled })
+  }
+
+  public setFooterOddEvenEnabled(enabled: boolean) {
+    this.draw.setFooterOption({ oddEvenEnabled: enabled })
+  }
+
+  /**
+   * Insert an inline page-number / page-count element at the caret. Behaves
+   * like a normal text character once inserted — bold / italic / font / color
+   * all apply. The displayed value is computed per-page at draw time.
+   */
+  public insertPageNumberElement(
+    kind: 'pageNo' | 'pageCount' = 'pageNo',
+    format?: 'arabic' | 'chinese' | 'roman-upper' | 'roman-lower'
+  ) {
+    const placeholder = kind === 'pageCount' ? 'N' : '1'
+    const el: IElement = {
+      value: placeholder,
+      pageNumberKind: kind
+    }
+    if (format) el.pageNumberFormat = format
+    this.insertElementList([el])
+  }
+
+  public setPageNumberOption(payload: {
+    disabled?: boolean
+    format?: string
+    startPageNo?: number
+    fromPageNo?: number
+    numberType?: 'arabic' | 'chinese' | 'roman'
+    rowFlex?: 'left' | 'center' | 'right' | 'alignment' | 'justify'
+    color?: string
+    size?: number
+    font?: string
+  }) {
+    this.draw.setPageNumberOption(payload as any)
+  }
+
   public getControlValue(
     payload: IGetControlValueOption
   ): IGetControlValueResult | null {

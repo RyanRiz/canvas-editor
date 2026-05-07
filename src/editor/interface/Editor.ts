@@ -38,8 +38,12 @@ import { IMagnifierOption } from './Magnifier'
 
 export interface IEditorData {
   header?: IElement[]
+  headerFirst?: IElement[]
+  headerEven?: IElement[]
   main: IElement[]
   footer?: IElement[]
+  footerFirst?: IElement[]
+  footerEven?: IElement[]
   graffiti?: IGraffitiData[]
 }
 

@@ -116,6 +116,16 @@ export class Command {
   public executeDeleteGroup: CommandAdapt['deleteGroup']
   public executeLocationGroup: CommandAdapt['locationGroup']
   public executeSetZone: CommandAdapt['setZone']
+  public executeSetHeaderActiveVariant: CommandAdapt['setHeaderActiveVariant']
+  public executeSetFooterActiveVariant: CommandAdapt['setFooterActiveVariant']
+  public executeSetHeaderFirstPageEnabled: CommandAdapt['setHeaderFirstPageEnabled']
+  public executeSetHeaderOddEvenEnabled: CommandAdapt['setHeaderOddEvenEnabled']
+  public executeSetFooterFirstPageEnabled: CommandAdapt['setFooterFirstPageEnabled']
+  public executeSetFooterOddEvenEnabled: CommandAdapt['setFooterOddEvenEnabled']
+  public executeSetPageNumberOption: CommandAdapt['setPageNumberOption']
+  public executeInsertPageNumberElement: CommandAdapt['insertPageNumberElement']
+  public getHeaderActiveVariant: CommandAdapt['getHeaderActiveVariant']
+  public getFooterActiveVariant: CommandAdapt['getFooterActiveVariant']
   public executeSetControlValue: CommandAdapt['setControlValue']
   public executeSetControlValueList: CommandAdapt['setControlValueList']
   public executeSetControlExtension: CommandAdapt['setControlExtension']
@@ -292,6 +302,21 @@ export class Command {
     this.executeDeleteGroup = adapt.deleteGroup.bind(adapt)
     this.executeLocationGroup = adapt.locationGroup.bind(adapt)
     this.executeSetZone = adapt.setZone.bind(adapt)
+    this.executeSetHeaderActiveVariant = adapt.setHeaderActiveVariant.bind(adapt)
+    this.executeSetFooterActiveVariant = adapt.setFooterActiveVariant.bind(adapt)
+    this.executeSetHeaderFirstPageEnabled =
+      adapt.setHeaderFirstPageEnabled.bind(adapt)
+    this.executeSetHeaderOddEvenEnabled =
+      adapt.setHeaderOddEvenEnabled.bind(adapt)
+    this.executeSetFooterFirstPageEnabled =
+      adapt.setFooterFirstPageEnabled.bind(adapt)
+    this.executeSetFooterOddEvenEnabled =
+      adapt.setFooterOddEvenEnabled.bind(adapt)
+    this.executeSetPageNumberOption = adapt.setPageNumberOption.bind(adapt)
+    this.executeInsertPageNumberElement =
+      adapt.insertPageNumberElement.bind(adapt)
+    this.getHeaderActiveVariant = adapt.getHeaderActiveVariant.bind(adapt)
+    this.getFooterActiveVariant = adapt.getFooterActiveVariant.bind(adapt)
     this.executeUpdateOptions = adapt.updateOptions.bind(adapt)
     this.executeInsertTitle = adapt.insertTitle.bind(adapt)
     this.executeFocus = adapt.focus.bind(adapt)

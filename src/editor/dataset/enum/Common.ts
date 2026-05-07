@@ -6,7 +6,9 @@ export enum MaxHeightRatio {
 
 export enum NumberType {
   ARABIC = 'arabic',
-  CHINESE = 'chinese'
+  CHINESE = 'chinese',
+  ROMAN_UPPER = 'roman-upper',
+  ROMAN_LOWER = 'roman-lower'
 }
 
 export enum ImageDisplay {
