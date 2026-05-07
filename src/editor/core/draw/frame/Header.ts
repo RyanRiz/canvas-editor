@@ -224,10 +224,13 @@ export class Header {
     return Math.floor(height * maxHeightRadioMapping[maxHeightRadio])
   }
 
-  public getHeight(): number {
+  public getHeight(pageNo?: number): number {
     if (this.options.header.disabled) return 0
     const maxHeight = this.getMaxHeight()
-    const rowHeight = this.getRowHeight()
+    const rowHeight =
+      pageNo === undefined
+        ? this.getRowHeight()
+        : this.getVariantRowHeight(this.resolveVariantForPage(pageNo))
     return rowHeight > maxHeight ? maxHeight : rowHeight
   }
 
@@ -235,9 +238,15 @@ export class Header {
     return this.rowList.reduce((pre, cur) => pre + cur.height, 0)
   }
 
-  public getExtraHeight(): number {
+  private getVariantRowHeight(variant: ChromeVariant): number {
+    if (variant === this.activeVariant) return this.getRowHeight()
+    const layout = this._ensureVariantLayout(variant)
+    return layout.rowList.reduce((pre, cur) => pre + cur.height, 0)
+  }
+
+  public getExtraHeight(pageNo?: number): number {
     const margins = this.draw.getMargins()
-    const headerHeight = this.getHeight()
+    const headerHeight = this.getHeight(pageNo)
     const headerTop = this.getHeaderTop()
     const extraHeight = headerTop + headerHeight - margins[0]
     return extraHeight <= 0 ? 0 : extraHeight

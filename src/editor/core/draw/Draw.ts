@@ -454,15 +454,15 @@ export class Draw {
     return Math.floor(this.getOriginalHeight() * this.options.scale)
   }
 
-  public getMainHeight(): number {
+  public getMainHeight(pageNo?: number): number {
     const pageHeight = this.getHeight()
-    return pageHeight - this.getMainOuterHeight()
+    return pageHeight - this.getMainOuterHeight(pageNo)
   }
 
-  public getMainOuterHeight(): number {
+  public getMainOuterHeight(pageNo?: number): number {
     const margins = this.getMargins()
-    const headerExtraHeight = this.header.getExtraHeight()
-    const footerExtraHeight = this.footer.getExtraHeight()
+    const headerExtraHeight = this.header.getExtraHeight(pageNo)
+    const footerExtraHeight = this.footer.getExtraHeight(pageNo)
     return margins[0] + margins[2] + headerExtraHeight + footerExtraHeight
   }
 
@@ -2379,13 +2379,23 @@ export class Draw {
     } = this.options
     const height = this.getHeight()
     const margins = this.getMargins()
-    const headerExtraHeight = this.header.getExtraHeight()
-    const marginHeight = this.getMainOuterHeight()
-    const contentStartY = margins[0] + headerExtraHeight
-    const trailingOuterHeight = marginHeight - contentStartY
-    const contentBottomY = height - trailingOuterHeight
+    // marginHeight / contentStartY / trailingOuterHeight / contentBottomY are
+    // recomputed per page so header/footer variants of different heights
+    // (e.g. "Different first page") produce per-page-correct body bounds.
+    let headerExtraHeight = this.header.getExtraHeight(0)
+    let marginHeight = this.getMainOuterHeight(0)
+    let contentStartY = margins[0] + headerExtraHeight
+    let trailingOuterHeight = marginHeight - contentStartY
+    let contentBottomY = height - trailingOuterHeight
     let pageNo = 0
     let pageHeight = marginHeight
+    const recomputePageBounds = () => {
+      headerExtraHeight = this.header.getExtraHeight(pageNo)
+      marginHeight = this.getMainOuterHeight(pageNo)
+      contentStartY = margins[0] + headerExtraHeight
+      trailingOuterHeight = marginHeight - contentStartY
+      contentBottomY = height - trailingOuterHeight
+    }
     const pushRow = (row: IRow) => {
       if (!pageRowList[pageNo]) {
         pageRowList[pageNo] = []
@@ -2398,6 +2408,7 @@ export class Draw {
         return false
       }
       pageNo++
+      recomputePageBounds()
       pageHeight = marginHeight
       if (!pageRowList[pageNo]) {
         pageRowList[pageNo] = []

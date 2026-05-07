@@ -147,9 +147,12 @@ export class Footer {
     const margins = this.draw.getMargins()
     const startX = margins[3]
     const pageHeight = this.draw.getHeight()
-    // Footer height is measured from the active layout's rowList, but for
-    // inactive variants we use the same band so the footer band is uniform.
-    const footerHeight = this.getHeight()
+    // Anchor the footer band against the bottom using THIS list's row sum
+    // so each variant has its own correct startY (otherwise a tall variant
+    // would render with the active variant's offset and leak off-page).
+    const ownHeight = rowList.reduce((acc, r) => acc + r.height, 0)
+    const maxHeight = this.getMaxHeight()
+    const footerHeight = ownHeight > maxHeight ? maxHeight : ownHeight
     const startY = pageHeight - footerBottom - footerHeight
     this.position.computePageRowPosition({
       positionList,
@@ -194,10 +197,13 @@ export class Footer {
     return Math.floor(height * maxHeightRadioMapping[maxHeightRadio])
   }
 
-  public getHeight(): number {
+  public getHeight(pageNo?: number): number {
     if (this.options.footer.disabled) return 0
     const maxHeight = this.getMaxHeight()
-    const rowHeight = this.getRowHeight()
+    const rowHeight =
+      pageNo === undefined
+        ? this.getRowHeight()
+        : this.getVariantRowHeight(this.resolveVariantForPage(pageNo))
     return rowHeight > maxHeight ? maxHeight : rowHeight
   }
 
@@ -205,9 +211,15 @@ export class Footer {
     return this.rowList.reduce((pre, cur) => pre + cur.height, 0)
   }
 
-  public getExtraHeight(): number {
+  private getVariantRowHeight(variant: ChromeVariant): number {
+    if (variant === this.activeVariant) return this.getRowHeight()
+    const layout = this._ensureVariantLayout(variant)
+    return layout.rowList.reduce((pre, cur) => pre + cur.height, 0)
+  }
+
+  public getExtraHeight(pageNo?: number): number {
     const margins = this.draw.getMargins()
-    const footerHeight = this.getHeight()
+    const footerHeight = this.getHeight(pageNo)
     const footerBottom = this.getFooterBottom()
     const extraHeight = footerBottom + footerHeight - margins[2]
     return extraHeight <= 0 ? 0 : extraHeight
