@@ -316,6 +316,72 @@ diffs the result on every Nth keystroke.
 **Expected effect of Phase 2**: per-keystroke cost decoupled from
 document size. A 100-page doc edits as fast as a 1-page doc.
 
+#### Phase 2 implementation status
+
+Landed (Phase **2A**):
+
+* §2.1 **Dirty-range tracking**. `Draw._dirtyRange`, public
+  `markDirty(start, end)` / `getDirtyRange()` / `clearDirtyRange()`,
+  auto-marked by `spliceElementList` when mutating the main element
+  list. Cleared at the end of every `render()`. Header / footer / table
+  cell splices intentionally do not mark — those scopes still go
+  through the full path.
+* §2.4 **Dirty-page paint**. `_computeDirtyPages()` returns a
+  `Set<number> | null`; `null` falls back to "paint all" and is the
+  conservative default whenever there's no `_dirtyRange`, no prior
+  `_prevPageRowCounts`, or `isCompute=false`. Both `_immediateRender`
+  and `_lazyRender` consult the set plus a per-page `_drawnPages`
+  cache so off-screen lazy pages and clean pages skip their
+  `_drawPage` call. Cache is invalidated by `setEditorData` /
+  `invalidatePaintCache()` / `destroy()`.
+* New `IEditorOption` field is **not** required — the optimization is
+  on by default and degrades cleanly to the original behavior when
+  no signal is available.
+* Tests: `tests/core/draw/DirtyRange.test.ts` (10 cases) covers the
+  `markDirty` API, the auto-mark via `spliceElementList`, isolation
+  from header / footer mutations, render clearing the dirty hint,
+  paint-cache invalidation, and the differential vs full-paint
+  branches in continuous mode (lazy paging skipped because jsdom
+  doesn't fire IntersectionObserver).
+
+Deferred (Phase **2B**, future work):
+
+* §2.2 **Incremental `computeRowList`**. Requires capturing the full
+  ambient layout state at every row boundary (cumulative `pageHeight`,
+  `pageNo`, current `pageColumns`, `listId/listIndex`, `controlRealWidth`,
+  surround-element accumulator, etc.) so the loop can resume from any
+  row. The 790-line function at
+  [Draw.ts:1483-2274](src/editor/core/draw/Draw.ts#L1483-L2274) needs
+  to be refactored into a `_layoutSegment` body callable mid-list.
+  This is the bulk of the "1-2 week" estimate and is the biggest
+  remaining typing-perf lever for very long documents (currently per
+  keystroke we still walk the entire main element list once per
+  frame, even though we now paint only the dirty page).
+* §2.3 **Incremental `computePositionList`**. Lower priority than 2.2
+  — `computePositionList` is mostly object construction with no
+  `measureText`, so the constant is small. Enabling this is mostly
+  bookkeeping once 2.2 is in place (just truncate `positionList` to
+  the prefix-up-to-stable-row and walk forward).
+* §2.5 **Table-cell-local reflow**. The recursive `computeRowList`
+  call at [Draw.ts:1692](src/editor/core/draw/Draw.ts#L1692) re-flows
+  every cell on every render. When the dirty range lives entirely
+  inside one cell's `td.value`, only that cell needs to recompute.
+  Requires per-table-cell dirty tracking (a `td._dirty` flag set when
+  someone mutates `td.value`).
+* **Validation harness**. A dev-mode `__perfValidateLayout` flag that
+  runs both the full and the incremental paths, diffs the resulting
+  `rowList` / `pageRowList` / `positionList`, and throws on mismatch.
+  Essential before flipping incremental layout on by default. Not
+  needed yet because 2A doesn't change layout output, only paint
+  scope.
+
+**Why 2B is deferred from this implementation pass**: the risk of an
+incremental layout that misses one cross-row invariant (and silently
+produces wrong rendering) outweighs the perf benefit at typical
+document sizes — Phase 1's rAF coalescing already removes the lag the
+user reported. 2B should land alongside the validation harness and a
+multi-page benchmark fixture, in a dedicated PR with a soak period.
+
 ### Phase 3 — Architectural cleanups (optional, 2-3 weeks)
 
 Worthwhile only if you also want to tame `Draw.ts` (3 337 lines) and

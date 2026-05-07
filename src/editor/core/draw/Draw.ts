@@ -139,6 +139,14 @@ export class Draw {
   private _typingBatchActive: boolean
   private _typingBatchTimer: ReturnType<typeof setTimeout> | null
   private _typingBatchLastCurIndex: number | undefined
+  // 主元素列表 dirty 区间提示（PERF-PLAN §2.1）。当突变发生时由 spliceElementList
+  // 自动维护或外部通过 markDirty() 显式标记；render() 据此挑选 dirty page，
+  // 只重绘被影响的 canvas（§2.4）。提示性而非权威——为 null 时按现有 O(N) 路径处理。
+  private _dirtyRange: { start: number; end: number } | null
+  // 上一次渲染各 page 的 row 数，用于检测下游 pagination 是否漂移
+  private _prevPageRowCounts: number[] | null
+  // 已绘制（且未被标脏）的 page 索引集合：lazy 渲染时这些页不再重复绘制
+  private _drawnPages: Set<number>
   private pageNo: number
   private renderCount: number
   private pagePixelRatio: number | null
@@ -230,6 +238,9 @@ export class Draw {
     this._typingBatchActive = false
     this._typingBatchTimer = null
     this._typingBatchLastCurIndex = undefined
+    this._dirtyRange = null
+    this._prevPageRowCounts = null
+    this._drawnPages = new Set()
     this.pageNo = 0
     this.renderCount = 0
     this.pagePixelRatio = null
@@ -940,6 +951,31 @@ export class Draw {
     })
   }
 
+  /**
+   * 标记主元素列表的 dirty 区间（PERF-PLAN §2.1）。
+   * - 多次标记会取并集（最小 start、最大 end）
+   * - 仅作为渲染期 dirty-page 计算的提示；为 null 时按全量路径处理
+   * - render() 完成后会被自动清空
+   */
+  public markDirty(start: number, end: number) {
+    const lo = Math.max(0, Math.min(start, end))
+    const hi = Math.max(start, end)
+    if (this._dirtyRange === null) {
+      this._dirtyRange = { start: lo, end: hi }
+    } else {
+      if (lo < this._dirtyRange.start) this._dirtyRange.start = lo
+      if (hi > this._dirtyRange.end) this._dirtyRange.end = hi
+    }
+  }
+
+  public getDirtyRange(): { start: number; end: number } | null {
+    return this._dirtyRange
+  }
+
+  public clearDirtyRange() {
+    this._dirtyRange = null
+  }
+
   public spliceElementList(
     elementList: IElement[],
     start: number,
@@ -947,6 +983,11 @@ export class Draw {
     items?: IElement[],
     options?: ISpliceElementListOption
   ) {
+    // 仅对主元素列表自动维护 dirty 提示；header/footer/td.value 暂走全量路径
+    if (elementList === this.elementList) {
+      const insertedLen = items?.length ?? 0
+      this.markDirty(start, start + Math.max(deleteCount, insertedLen))
+    }
     const { isIgnoreDeletedRule = false } = options || {}
     const { group, modeRule } = this.options
     if (deleteCount > 0) {
@@ -1422,6 +1463,22 @@ export class Draw {
     if (footer) {
       this.footer.setElementList(footer)
     }
+    // 整体替换文档：dirty page 缓存与已绘制集合一并失效，下一次 render 强制全量重绘
+    this._invalidatePaintCache()
+  }
+
+  /**
+   * 失效化 dirty-page paint 缓存（PERF-PLAN §2.4）。在 setEditorData / 大批量
+   * 替换文档等无法用 dirty-range 描述的场景由调用方触发。
+   */
+  public invalidatePaintCache() {
+    this._invalidatePaintCache()
+  }
+
+  private _invalidatePaintCache() {
+    this._prevPageRowCounts = null
+    this._drawnPages.clear()
+    this._dirtyRange = null
   }
 
   private _wrapContainer(rootContainer: HTMLElement): HTMLDivElement {
@@ -3090,7 +3147,48 @@ export class Draw {
     this.lazyRenderIntersectionObserver?.disconnect()
   }
 
-  private _lazyRender() {
+  /**
+   * 根据上一次渲染的每页 row 数与本次渲染的 dirty 提示，计算需要重绘的 page 集合
+   * （PERF-PLAN §2.4）。返回 null 表示「无法判定，应全量重绘」。
+   *
+   * 触发非全量的条件：
+   *  - 必须有 _prevPageRowCounts（首次渲染或被 invalidatePaintCache() 清空时全量）
+   *  - 必须有 _dirtyRange 提示（无 spliceElementList 等显式信号时全量，保证安全）
+   *
+   * 落在 dirty 集合的 page：
+   *  - 包含 dirty 区间起/止元素的 page（光标插入点所在页）
+   *  - 第一处 row 数与上次不同的 page 及其后所有 page（pagination 漂移）
+   *  - 任何新增的 page
+   */
+  private _computeDirtyPages(): Set<number> | null {
+    if (this._prevPageRowCounts === null) return null
+    if (this._dirtyRange === null) return null
+    const cur = this.pageRowList
+    const curCount = cur.length
+    const prev = this._prevPageRowCounts
+    const dirty = new Set<number>()
+    // 1) row 数差异：从首处差异页起，本帧及之后均视为脏（pagination 下游漂移）
+    let firstShifted = curCount
+    for (let i = 0; i < curCount; i++) {
+      const prevLen = i < prev.length ? prev[i] : -1
+      if (prevLen !== cur[i].length) {
+        firstShifted = i
+        break
+      }
+    }
+    for (let i = firstShifted; i < curCount; i++) dirty.add(i)
+    // 2) dirty 元素区间所在页（即便 row 数不变，单页内容仍需重绘）
+    const positionList = this.position.getOriginalMainPositionList()
+    const startPos =
+      positionList[Math.min(this._dirtyRange.start, positionList.length - 1)]
+    if (startPos) dirty.add(startPos.pageNo)
+    const endPos =
+      positionList[Math.min(this._dirtyRange.end, positionList.length - 1)]
+    if (endPos) dirty.add(endPos.pageNo)
+    return dirty
+  }
+
+  private _lazyRender(dirtyPages: Set<number> | null) {
     const positionList = this.position.getOriginalMainPositionList()
     const elementList = this.getOriginalMainElementList()
     this._disconnectLazyRender()
@@ -3098,12 +3196,16 @@ export class Draw {
       entries.forEach(entry => {
         if (entry.isIntersecting) {
           const index = Number((<HTMLCanvasElement>entry.target).dataset.index)
+          // 已绘制且未被本帧标脏：跳过（PERF-PLAN §2.4）
+          const isDirty = dirtyPages === null || dirtyPages.has(index)
+          if (!isDirty && this._drawnPages.has(index)) return
           this._drawPage({
             elementList,
             positionList,
             rowList: this.pageRowList[index],
             pageNo: index
           })
+          this._drawnPages.add(index)
         }
       })
     })
@@ -3112,16 +3214,20 @@ export class Draw {
     })
   }
 
-  private _immediateRender() {
+  private _immediateRender(dirtyPages: Set<number> | null) {
     const positionList = this.position.getOriginalMainPositionList()
     const elementList = this.getOriginalMainElementList()
     for (let i = 0; i < this.pageRowList.length; i++) {
+      const isDirty = dirtyPages === null || dirtyPages.has(i)
+      // 干净且已绘制：跳过本页 _drawPage 调用
+      if (!isDirty && this._drawnPages.has(i)) continue
       this._drawPage({
         elementList,
         positionList,
         rowList: this.pageRowList[i],
         pageNo: i
       })
+      this._drawnPages.add(i)
     }
   }
 
@@ -3330,14 +3436,26 @@ export class Draw {
       this.pageList
         .splice(curPageCount, deleteCount)
         .forEach(page => page.remove())
+      // 同步移除已绘制集合中的越界条目
+      for (const idx of Array.from(this._drawnPages)) {
+        if (idx >= curPageCount) this._drawnPages.delete(idx)
+      }
     }
+    // 计算 dirty pages（PERF-PLAN §2.4）。无 dirty 提示 / 首次渲染时返回 null
+    // 表示「全部重绘」，行为与原版完全一致。
+    const dirtyPages = isCompute ? this._computeDirtyPages() : null
+    // 全量重绘时清空已绘制集合，让本次渲染无条件重画所有 page
+    if (dirtyPages === null) this._drawnPages.clear()
     // 绘制元素
     // 连续页因为有高度的变化会导致canvas渲染空白，需立即渲染，否则会出现闪动
     if (isLazy && isPagingMode) {
-      this._lazyRender()
+      this._lazyRender(dirtyPages)
     } else {
-      this._immediateRender()
+      this._immediateRender(dirtyPages)
     }
+    // 落盘本次 row 数与清除 dirty 提示，供下次渲染做差分
+    this._prevPageRowCounts = this.pageRowList.map(rl => rl.length)
+    this.clearDirtyRange()
     // 光标重绘
     if (isSetCursor) {
       curIndex = this.setCursor(curIndex)
@@ -3527,6 +3645,7 @@ export class Draw {
     }
     this._typingBatchActive = false
     this._typingBatchLastCurIndex = undefined
+    this._invalidatePaintCache()
     this.container.remove()
     this.globalEvent.removeEvent()
     this.scrollObserver.removeEvent()
