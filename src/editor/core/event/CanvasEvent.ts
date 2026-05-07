@@ -4,7 +4,7 @@ import { ICurrentPosition, IPositionContext } from '../../interface/Position'
 import { Draw } from '../draw/Draw'
 import { Position } from '../position/Position'
 import { RangeManager } from '../range/RangeManager'
-import { threeClick } from '../../utils'
+import { findScrollContainer, threeClick } from '../../utils'
 import { IRange, IRangeElementStyle } from '../../interface/Range'
 import { mousedown } from './handlers/mousedown'
 import { mouseup } from './handlers/mouseup'
@@ -47,6 +47,9 @@ export class CanvasEvent {
   private pageList: HTMLCanvasElement[]
   private range: RangeManager
   private position: Position
+  private autoScrollRafId: number | null
+  private autoScrollSpeed: number
+  private lastSelectionMouse: { clientX: number; clientY: number } | null
 
   constructor(draw: Draw) {
     this.draw = draw
@@ -65,6 +68,9 @@ export class CanvasEvent {
     this.cachePositionList = null
     this.cachePositionContext = null
     this.mouseDownStartPosition = null
+    this.autoScrollRafId = null
+    this.autoScrollSpeed = 0
+    this.lastSelectionMouse = null
   }
 
   public getDraw(): Draw {
@@ -89,8 +95,93 @@ export class CanvasEvent {
   public setIsAllowSelection(payload: boolean) {
     this.isAllowSelection = payload
     if (!payload) {
+      this.stopAutoScroll()
       this.applyPainterStyle()
     }
+  }
+
+  public stopAutoScroll() {
+    if (this.autoScrollRafId !== null) {
+      cancelAnimationFrame(this.autoScrollRafId)
+      this.autoScrollRafId = null
+    }
+    this.autoScrollSpeed = 0
+    this.lastSelectionMouse = null
+  }
+
+  private updateAutoScroll(evt: MouseEvent) {
+    this.lastSelectionMouse = { clientX: evt.clientX, clientY: evt.clientY }
+    const scrollContainer = findScrollContainer(this.pageContainer)
+    const isDocScroll = scrollContainer === document.documentElement
+    let top: number
+    let bottom: number
+    if (isDocScroll) {
+      top = 0
+      bottom = window.innerHeight
+    } else {
+      const rect = scrollContainer.getBoundingClientRect()
+      top = rect.top
+      bottom = rect.bottom
+    }
+    const threshold = 40
+    const maxSpeed = 18
+    let speed = 0
+    if (evt.clientY < top + threshold) {
+      const dist = top + threshold - evt.clientY
+      speed = -Math.min(maxSpeed, (dist / threshold) * maxSpeed)
+    } else if (evt.clientY > bottom - threshold) {
+      const dist = evt.clientY - (bottom - threshold)
+      speed = Math.min(maxSpeed, (dist / threshold) * maxSpeed)
+    }
+    this.autoScrollSpeed = speed
+    if (speed !== 0) {
+      if (this.autoScrollRafId === null) {
+        this.autoScrollRafId = requestAnimationFrame(this.autoScrollTick)
+      }
+    } else {
+      this.stopAutoScroll()
+    }
+  }
+
+  private autoScrollTick = () => {
+    this.autoScrollRafId = null
+    if (
+      !this.isAllowSelection ||
+      !this.autoScrollSpeed ||
+      !this.lastSelectionMouse
+    ) {
+      this.autoScrollSpeed = 0
+      return
+    }
+    const scrollContainer = findScrollContainer(this.pageContainer)
+    const isDocScroll = scrollContainer === document.documentElement
+    const before = isDocScroll ? window.scrollY : scrollContainer.scrollTop
+    if (isDocScroll) {
+      window.scrollBy(0, this.autoScrollSpeed)
+    } else {
+      scrollContainer.scrollTop = before + this.autoScrollSpeed
+    }
+    const after = isDocScroll ? window.scrollY : scrollContainer.scrollTop
+    if (after !== before) {
+      const { clientX, clientY } = this.lastSelectionMouse
+      const target = document.elementFromPoint(clientX, clientY)
+      if (
+        target instanceof HTMLCanvasElement &&
+        this.pageList.includes(target)
+      ) {
+        const rect = target.getBoundingClientRect()
+        const syn = new MouseEvent('mousemove', {
+          bubbles: true,
+          clientX,
+          clientY
+        })
+        Object.defineProperty(syn, 'target', { value: target })
+        Object.defineProperty(syn, 'offsetX', { value: clientX - rect.left })
+        Object.defineProperty(syn, 'offsetY', { value: clientY - rect.top })
+        mousemove(syn, this)
+      }
+    }
+    this.autoScrollRafId = requestAnimationFrame(this.autoScrollTick)
   }
 
   public setIsAllowDrag(payload: boolean) {
@@ -151,6 +242,9 @@ export class CanvasEvent {
   }
 
   public mousemove(evt: MouseEvent) {
+    if (this.isAllowSelection) {
+      this.updateAutoScroll(evt)
+    }
     mousemove(evt, this)
   }
 
