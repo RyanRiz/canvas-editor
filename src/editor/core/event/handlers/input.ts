@@ -103,12 +103,9 @@ export function input(data: string, host: CanvasEvent) {
   }
   if (~curIndex) {
     rangeManager.setRange(curIndex, curIndex)
-    // rAF 合并：fast typing 的连续 keystroke 会被合并为单帧 layout（PERF-PLAN §1.1）。
-    // isTextInput=true 进入 history 合批：连续输入只在 idle / 非输入动作时落盘单个 snapshot（§1.2）
-    draw.scheduleRender({
+    draw.render({
       curIndex,
-      isSubmitHistory: !isComposing,
-      isTextInput: true
+      isSubmitHistory: !isComposing
     })
   }
   if (isComposing && ~curIndex) {

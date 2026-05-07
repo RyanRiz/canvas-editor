@@ -13,8 +13,6 @@ import {
   IGetValueOption,
   IPainterOption
 } from '../../interface/Draw'
-import { HistoryScope } from '../../interface/History'
-import { IMutationEvent, MutationListener } from '../../interface/Mutation'
 import {
   IEditorData,
   IEditorOption,
@@ -30,7 +28,7 @@ import {
   IInsertElementListOption
 } from '../../interface/Element'
 import { IRow, IRowElement } from '../../interface/Row'
-import { deepClone, getUUID } from '../../utils'
+import { deepClone, getUUID, nextTick } from '../../utils'
 import { Cursor } from '../cursor/Cursor'
 import { CanvasEvent } from '../event/CanvasEvent'
 import { GlobalEvent } from '../event/GlobalEvent'
@@ -130,32 +128,6 @@ export class Draw {
   private pageContainer: HTMLDivElement
   private pageList: HTMLCanvasElement[]
   private ctxList: CanvasRenderingContext2D[]
-  // 复用的测量画布上下文（避免 computeRowList 每次创建 canvas）
-  private _measureCanvas: HTMLCanvasElement | null
-  private _measureCtx: CanvasRenderingContext2D | null
-  // rAF 合并渲染队列：fast-typing 时多次 keystroke 仅产出一次 layout/paint
-  private _pendingRenderPayload: IDrawOption | null
-  private _pendingRenderFrameId: number | null
-  // 输入合批（PERF-PLAN §1.2）：连续 keystroke 合并为单个 history snapshot，
-  // 闲置 500ms 或遇到非输入动作时落盘
-  private _typingBatchActive: boolean
-  private _typingBatchTimer: ReturnType<typeof setTimeout> | null
-  private _typingBatchLastCurIndex: number | undefined
-  // 主元素列表 dirty 区间提示（PERF-PLAN §2.1）。当突变发生时由 spliceElementList
-  // 自动维护或外部通过 markDirty() 显式标记；render() 据此挑选 dirty page，
-  // 只重绘被影响的 canvas（§2.4）。提示性而非权威——为 null 时按现有 O(N) 路径处理。
-  private _dirtyRange: { start: number; end: number } | null
-  // 页眉 / 页脚 dirty 标志：仅当对应 elementList 通过 spliceElementList 改动时置 true。
-  // render() 据此跳过未变更分区的布局 / 计算，尤其重要——典型场景是用户在 header 中
-  // 输入：避免为了一次按键而把整篇 N-page 主文档重新布局（PERF-PLAN §2 follow-up）。
-  private _headerDirty: boolean
-  private _footerDirty: boolean
-  // 上一次渲染各 page 的 row 数，用于检测下游 pagination 是否漂移
-  private _prevPageRowCounts: number[] | null
-  // 已绘制（且未被标脏）的 page 索引集合：lazy 渲染时这些页不再重复绘制
-  private _drawnPages: Set<number>
-  // PERF-PLAN §3.1：Mutator 边界事件订阅者。spliceElementList 完成后通知。
-  private _mutationListeners: Set<MutationListener>
   private pageNo: number
   private renderCount: number
   private pagePixelRatio: number | null
@@ -240,19 +212,6 @@ export class Draw {
     this.container = this._wrapContainer(rootContainer)
     this.pageList = []
     this.ctxList = []
-    this._measureCanvas = null
-    this._measureCtx = null
-    this._pendingRenderPayload = null
-    this._pendingRenderFrameId = null
-    this._typingBatchActive = false
-    this._typingBatchTimer = null
-    this._typingBatchLastCurIndex = undefined
-    this._dirtyRange = null
-    this._headerDirty = false
-    this._footerDirty = false
-    this._prevPageRowCounts = null
-    this._drawnPages = new Set()
-    this._mutationListeners = new Set()
     this.pageNo = 0
     this.renderCount = 0
     this.pagePixelRatio = null
@@ -977,64 +936,6 @@ export class Draw {
     })
   }
 
-  /**
-   * 标记主元素列表的 dirty 区间（PERF-PLAN §2.1）。
-   * - 多次标记会取并集（最小 start、最大 end）
-   * - 仅作为渲染期 dirty-page 计算的提示；为 null 时按全量路径处理
-   * - render() 完成后会被自动清空
-   */
-  public markDirty(start: number, end: number) {
-    const lo = Math.max(0, Math.min(start, end))
-    const hi = Math.max(start, end)
-    if (this._dirtyRange === null) {
-      this._dirtyRange = { start: lo, end: hi }
-    } else {
-      if (lo < this._dirtyRange.start) this._dirtyRange.start = lo
-      if (hi > this._dirtyRange.end) this._dirtyRange.end = hi
-    }
-  }
-
-  public getDirtyRange(): { start: number; end: number } | null {
-    return this._dirtyRange
-  }
-
-  public clearDirtyRange() {
-    this._dirtyRange = null
-  }
-
-  /**
-   * 订阅 elementList 突变事件（PERF-PLAN §3.1）。
-   *
-   * 所有结构性变更最终都走 `spliceElementList`。订阅 `onMutation` 即可在
-   * 不修改核心代码的前提下接入 CRDT runtime / 审计 / 远端同步等横切关注点。
-   * 返回反订阅函数。
-   */
-  public onMutation(listener: MutationListener): () => void {
-    this._mutationListeners.add(listener)
-    return () => {
-      this._mutationListeners.delete(listener)
-    }
-  }
-
-  private _emitMutation(event: IMutationEvent) {
-    if (this._mutationListeners.size === 0) return
-    // 拷贝集合再迭代，避免回调中改 listener 集合引发问题
-    for (const listener of Array.from(this._mutationListeners)) {
-      try {
-        listener(event)
-      } catch {
-        /* 订阅者异常不影响突变流程 */
-      }
-    }
-  }
-
-  private _resolveMutationScope(elementList: IElement[]): HistoryScope {
-    if (elementList === this.elementList) return 'main'
-    if (elementList === this.header.getElementList()) return 'header'
-    if (elementList === this.footer.getElementList()) return 'footer'
-    return 'table'
-  }
-
   public spliceElementList(
     elementList: IElement[],
     start: number,
@@ -1042,20 +943,6 @@ export class Draw {
     items?: IElement[],
     options?: ISpliceElementListOption
   ) {
-    // 主列表 / 页眉 / 页脚分别维护 dirty 标志：render() 据此精确决定布局范围
-    if (elementList === this.elementList) {
-      const insertedLen = items?.length ?? 0
-      this.markDirty(start, start + Math.max(deleteCount, insertedLen))
-    } else if (elementList === this.header.getElementList()) {
-      this._headerDirty = true
-    } else if (elementList === this.footer.getElementList()) {
-      this._footerDirty = true
-    }
-    // 事件订阅前先快照「将被删除」切片（splice 后无法访问）。
-    const removedSnapshot =
-      this._mutationListeners.size > 0 && deleteCount > 0
-        ? elementList.slice(start, start + deleteCount)
-        : []
     const { isIgnoreDeletedRule = false } = options || {}
     const { group, modeRule } = this.options
     if (deleteCount > 0) {
@@ -1117,23 +1004,8 @@ export class Draw {
     // 循环添加，避免使用解构影响性能
     if (items?.length) {
       for (let i = 0; i < items.length; i++) {
-        // PERF-PLAN §6.2a：CRDT readiness——为新插入的元素填充稳定 id。
-        // 类型上 `id` 仍为可选，老代码 / fixture 不受影响；但凡通过 Mutator
-        // 进来的元素都会拿到稳定 id，便于后续操作日志按 id 引用而非索引。
-        const item = items[i]
-        if (!item.id) item.id = getUUID()
-        elementList.splice(start + i, 0, item)
+        elementList.splice(start + i, 0, items[i])
       }
-    }
-    // 通知突变事件订阅者（PERF-PLAN §3.1）。仅在有订阅者时才构造 payload。
-    if (this._mutationListeners.size > 0) {
-      this._emitMutation({
-        kind: 'splice',
-        scope: this._resolveMutationScope(elementList),
-        start,
-        removed: removedSnapshot,
-        inserted: items ? items.slice() : []
-      })
     }
   }
 
@@ -1651,24 +1523,6 @@ export class Draw {
     if (footerEven) {
       this.footer.setVariantElementList('even', footerEven)
     }
-    // 整体替换文档：dirty page 缓存与已绘制集合一并失效，下一次 render 强制全量重绘
-    this._invalidatePaintCache()
-  }
-
-  /**
-   * 失效化 dirty-page paint 缓存（PERF-PLAN §2.4）。在 setEditorData / 大批量
-   * 替换文档等无法用 dirty-range 描述的场景由调用方触发。
-   */
-  public invalidatePaintCache() {
-    this._invalidatePaintCache()
-  }
-
-  private _invalidatePaintCache() {
-    this._prevPageRowCounts = null
-    this._drawnPages.clear()
-    this._dirtyRange = null
-    this._headerDirty = false
-    this._footerDirty = false
   }
 
   private _wrapContainer(rootContainer: HTMLElement): HTMLDivElement {
@@ -1689,19 +1543,6 @@ export class Draw {
     pageContainer.classList.add(`${EDITOR_PREFIX}-page-container`)
     this.container.append(pageContainer)
     return pageContainer
-  }
-
-  // 复用一个测量画布上下文（避免 computeRowList 每次创建 canvas）。
-  // 仅用于 measureText/list-style 等纯测量操作；font/baseline 等状态会被
-  // 各调用方在使用前显式覆盖，无需重置。
-  private _getMeasureCtx(): CanvasRenderingContext2D {
-    if (!this._measureCtx) {
-      this._measureCanvas = document.createElement('canvas')
-      this._measureCtx = this._measureCanvas.getContext(
-        '2d'
-      ) as CanvasRenderingContext2D
-    }
-    return this._measureCtx
   }
 
   private _createPage(pageNo: number) {
@@ -1778,7 +1619,8 @@ export class Draw {
       defaultTabWidth
     } = this.options
     const defaultBasicRowMarginHeight = this.getDefaultBasicRowMarginHeight()
-    const ctx = this._getMeasureCtx()
+    const canvas = document.createElement('canvas')
+    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D
     // 计算列表偏移宽度
     const listStyleMap = this.listParticle.computeListStyle(ctx, elementList)
     const rowList: IRow[] = []
@@ -3348,48 +3190,7 @@ export class Draw {
     this.lazyRenderIntersectionObserver?.disconnect()
   }
 
-  /**
-   * 根据上一次渲染的每页 row 数与本次渲染的 dirty 提示，计算需要重绘的 page 集合
-   * （PERF-PLAN §2.4）。返回 null 表示「无法判定，应全量重绘」。
-   *
-   * 触发非全量的条件：
-   *  - 必须有 _prevPageRowCounts（首次渲染或被 invalidatePaintCache() 清空时全量）
-   *  - 必须有 _dirtyRange 提示（无 spliceElementList 等显式信号时全量，保证安全）
-   *
-   * 落在 dirty 集合的 page：
-   *  - 包含 dirty 区间起/止元素的 page（光标插入点所在页）
-   *  - 第一处 row 数与上次不同的 page 及其后所有 page（pagination 漂移）
-   *  - 任何新增的 page
-   */
-  private _computeDirtyPages(): Set<number> | null {
-    if (this._prevPageRowCounts === null) return null
-    if (this._dirtyRange === null) return null
-    const cur = this.pageRowList
-    const curCount = cur.length
-    const prev = this._prevPageRowCounts
-    const dirty = new Set<number>()
-    // 1) row 数差异：从首处差异页起，本帧及之后均视为脏（pagination 下游漂移）
-    let firstShifted = curCount
-    for (let i = 0; i < curCount; i++) {
-      const prevLen = i < prev.length ? prev[i] : -1
-      if (prevLen !== cur[i].length) {
-        firstShifted = i
-        break
-      }
-    }
-    for (let i = firstShifted; i < curCount; i++) dirty.add(i)
-    // 2) dirty 元素区间所在页（即便 row 数不变，单页内容仍需重绘）
-    const positionList = this.position.getOriginalMainPositionList()
-    const startPos =
-      positionList[Math.min(this._dirtyRange.start, positionList.length - 1)]
-    if (startPos) dirty.add(startPos.pageNo)
-    const endPos =
-      positionList[Math.min(this._dirtyRange.end, positionList.length - 1)]
-    if (endPos) dirty.add(endPos.pageNo)
-    return dirty
-  }
-
-  private _lazyRender(dirtyPages: Set<number> | null) {
+  private _lazyRender() {
     const positionList = this.position.getOriginalMainPositionList()
     const elementList = this.getOriginalMainElementList()
     this._disconnectLazyRender()
@@ -3397,16 +3198,12 @@ export class Draw {
       entries.forEach(entry => {
         if (entry.isIntersecting) {
           const index = Number((<HTMLCanvasElement>entry.target).dataset.index)
-          // 已绘制且未被本帧标脏：跳过（PERF-PLAN §2.4）
-          const isDirty = dirtyPages === null || dirtyPages.has(index)
-          if (!isDirty && this._drawnPages.has(index)) return
           this._drawPage({
             elementList,
             positionList,
             rowList: this.pageRowList[index],
             pageNo: index
           })
-          this._drawnPages.add(index)
         }
       })
     })
@@ -3415,140 +3212,20 @@ export class Draw {
     })
   }
 
-  private _immediateRender(dirtyPages: Set<number> | null) {
+  private _immediateRender() {
     const positionList = this.position.getOriginalMainPositionList()
     const elementList = this.getOriginalMainElementList()
     for (let i = 0; i < this.pageRowList.length; i++) {
-      const isDirty = dirtyPages === null || dirtyPages.has(i)
-      // 干净且已绘制：跳过本页 _drawPage 调用
-      if (!isDirty && this._drawnPages.has(i)) continue
       this._drawPage({
         elementList,
         positionList,
         rowList: this.pageRowList[i],
         pageNo: i
       })
-      this._drawnPages.add(i)
     }
-  }
-
-  /**
-   * 合并 payload 后请求一次 rAF 渲染。
-   *
-   * 用于按键密集的入口（input、keydown 等），把同一帧内的多次 keystroke
-   * 合并为单次 layout/paint，避免每个字符触发一次全量回流（详见
-   * PERF-PLAN §1.1）。
-   *
-   * 合并语义：
-   *  - curIndex / isLazy / isInit / isFirstRender / isSourceHistory：取最新值
-   *  - isSubmitHistory / isCompute / isSetCursor：OR 合并（任一调用方需要即生效），
-   *    保证 history、layout、cursor 不会因合并被吞掉
-   *  - remoteDirtyRange：取并集（CRDT 6.2c 占位）
-   *
-   * 同步路径仍可走 {@link render}（首次渲染 / setValue / 打印等）。
-   */
-  public scheduleRender(payload?: IDrawOption) {
-    this._pendingRenderPayload = this._mergeRenderPayload(
-      this._pendingRenderPayload,
-      payload
-    )
-    if (this._pendingRenderFrameId !== null) return
-    const raf =
-      typeof requestAnimationFrame === 'function'
-        ? requestAnimationFrame
-        : (cb: FrameRequestCallback) =>
-            setTimeout(() => cb(performance.now()), 16) as unknown as number
-    this._pendingRenderFrameId = raf(() => this._flushScheduledRender())
-  }
-
-  /** 立即清空 rAF 队列；同步代码路径需要立刻看到最新视图时使用。 */
-  public flushScheduledRender() {
-    if (this._pendingRenderFrameId === null) return
-    const caf =
-      typeof cancelAnimationFrame === 'function'
-        ? cancelAnimationFrame
-        : clearTimeout
-    caf(this._pendingRenderFrameId as number)
-    this._pendingRenderFrameId = null
-    this._flushScheduledRender()
-  }
-
-  private _flushScheduledRender() {
-    const payload = this._pendingRenderPayload
-    this._pendingRenderPayload = null
-    this._pendingRenderFrameId = null
-    if (payload) this.render(payload)
-  }
-
-  private _mergeRenderPayload(
-    a: IDrawOption | null,
-    b: IDrawOption | undefined
-  ): IDrawOption {
-    if (!a) return { ...(b || {}) }
-    if (!b) return a
-    // OR：任一为 true 即取 true（默认 true 的字段缺省视为 true）
-    const orTrue = (
-      x: boolean | undefined,
-      y: boolean | undefined
-    ): boolean | undefined => {
-      // 仅当两者都显式 false 时才保留 false
-      if (x === false && y === false) return false
-      if (x === undefined && y === undefined) return undefined
-      return (x ?? true) || (y ?? true)
-    }
-    const merged: IDrawOption = {
-      // last-write-wins
-      curIndex: b.curIndex !== undefined ? b.curIndex : a.curIndex,
-      isLazy: b.isLazy !== undefined ? b.isLazy : a.isLazy,
-      isInit: b.isInit !== undefined ? b.isInit : a.isInit,
-      isFirstRender:
-        b.isFirstRender !== undefined ? b.isFirstRender : a.isFirstRender,
-      isSourceHistory:
-        b.isSourceHistory !== undefined
-          ? b.isSourceHistory
-          : a.isSourceHistory,
-      // OR 合并
-      isSubmitHistory: orTrue(a.isSubmitHistory, b.isSubmitHistory),
-      isCompute: orTrue(a.isCompute, b.isCompute),
-      isSetCursor: orTrue(a.isSetCursor, b.isSetCursor),
-      // AND：只有当所有合并源都标注 isTextInput 时才视为输入合批；
-      // 任一非输入动作进入本帧即按非输入处理（先 flush 当前 batch、再正常 submit）
-      isTextInput:
-        a.isTextInput === true && b.isTextInput === true ? true : undefined
-    }
-    // remoteDirtyRange：取区间并集
-    if (a.remoteDirtyRange || b.remoteDirtyRange) {
-      const ar = a.remoteDirtyRange
-      const br = b.remoteDirtyRange
-      if (ar && br) {
-        merged.remoteDirtyRange = {
-          start: Math.min(ar.start, br.start),
-          end: Math.max(ar.end, br.end)
-        }
-      } else {
-        merged.remoteDirtyRange = ar || br
-      }
-    }
-    return merged
   }
 
   public render(payload?: IDrawOption) {
-    // 同步 render 进入时若仍有 rAF 队列：合并并取消，确保后续调用看到的视图与
-    // history 是最新的（避免被即将到来的 rAF 回调覆盖）。
-    if (this._pendingRenderPayload || this._pendingRenderFrameId !== null) {
-      if (this._pendingRenderPayload) {
-        payload = this._mergeRenderPayload(this._pendingRenderPayload, payload)
-        this._pendingRenderPayload = null
-      }
-      if (this._pendingRenderFrameId !== null) {
-        const caf =
-          typeof cancelAnimationFrame === 'function'
-            ? cancelAnimationFrame
-            : clearTimeout
-        caf(this._pendingRenderFrameId as number)
-        this._pendingRenderFrameId = null
-      }
-    }
     this.renderCount++
     const { header, footer } = this.options
     const {
@@ -3558,8 +3235,7 @@ export class Draw {
       isLazy = true,
       isInit = false,
       isSourceHistory = false,
-      isFirstRender = false,
-      isTextInput = false
+      isFirstRender = false
     } = payload || {}
     let { curIndex } = payload || {}
     const innerWidth = this.getInnerWidth()
@@ -3568,79 +3244,55 @@ export class Draw {
     const oldPageSize = this.pageRowList.length
     // 计算文档信息
     if (isCompute) {
-      // 主元素列表是否需要重新布局：仅当当前编辑区域为 MAIN 或主列表 dirty
-      // 已经被显式标记时才走全量。换言之，在 4-page 主文档场景下，用户在
-      // 页眉/页脚里输入不会触发主体的 N 元素 computeRowList / computePositionList /
-      // area.compute() —— 这些都依赖主元素，主元素未改时它们的结果是稳定的。
-      const activeZone = this.zone.getZone()
-      const isMainZone = activeZone === EditorZone.MAIN
-      const mainNeedsCompute =
-        isMainZone || this._dirtyRange !== null || this._prevPageRowCounts === null
-      // 清空浮动元素位置信息（仅当本帧确实会重新布局主体时才清空，否则保留上次缓存）
-      if (mainNeedsCompute) {
-        this.position.setFloatPositionList([])
-      }
+      // 清空浮动元素位置信息
+      this.position.setFloatPositionList([])
       if (isPagingMode) {
-        // 页眉信息：当前在页眉区或页眉 dirty 或主体重新布局时计算
-        if (
-          !header.disabled &&
-          (this._headerDirty ||
-            activeZone === EditorZone.HEADER ||
-            mainNeedsCompute)
-        ) {
+        // 页眉信息
+        if (!header.disabled) {
           this.header.compute()
-          this._headerDirty = false
         }
-        // 页脚信息：同上
-        if (
-          !footer.disabled &&
-          (this._footerDirty ||
-            activeZone === EditorZone.FOOTER ||
-            mainNeedsCompute)
-        ) {
+        // 页脚信息
+        if (!footer.disabled) {
           this.footer.compute()
-          this._footerDirty = false
         }
       }
-      if (mainNeedsCompute) {
-        // 行信息
-        const margins = this.getMargins()
-        const pageHeight = this.getHeight()
-        const extraHeight = this.header.getExtraHeight()
-        const mainOuterHeight = this.getMainOuterHeight()
-        // 行布局起点为第一列的左上角；单列时与页面左上一致
-        const startX = this.getColumnStartX(0)
-        const startY = margins[0] + extraHeight
-        const surroundElementList = pickSurroundElementList(this.elementList)
-        this.rowList = this.computeRowList({
-          startX,
-          startY,
-          pageHeight,
-          mainOuterHeight,
-          isPagingMode,
-          innerWidth,
-          surroundElementList,
-          elementList: this.elementList
-        })
-        // 页面信息
-        this.pageRowList = this._computePageList()
-        // 位置信息
-        this.position.computePositionList()
-        // 区域信息
-        this.area.compute()
-        if (!this.isPrintMode()) {
-          // 搜索信息
-          const searchKeyword = this.search.getSearchKeyword()
-          if (searchKeyword) {
-            this.search.compute(searchKeyword)
-          }
-          // 控件关键词高亮
-          this.control.computeHighlightList()
+      // 行信息
+      const margins = this.getMargins()
+      const pageHeight = this.getHeight()
+      const extraHeight = this.header.getExtraHeight()
+      const mainOuterHeight = this.getMainOuterHeight()
+      // 行布局起点为第一列的左上角；单列时与页面左上一致
+      const startX = this.getColumnStartX(0)
+      const startY = margins[0] + extraHeight
+      const surroundElementList = pickSurroundElementList(this.elementList)
+      this.rowList = this.computeRowList({
+        startX,
+        startY,
+        pageHeight,
+        mainOuterHeight,
+        isPagingMode,
+        innerWidth,
+        surroundElementList,
+        elementList: this.elementList
+      })
+      // 页面信息
+      this.pageRowList = this._computePageList()
+      // 位置信息
+      this.position.computePositionList()
+      // 区域信息
+      this.area.compute()
+      if (!this.isPrintMode()) {
+        // 搜索信息
+        const searchKeyword = this.search.getSearchKeyword()
+        if (searchKeyword) {
+          this.search.compute(searchKeyword)
         }
-        // 涂鸦信息
-        if (this.isGraffitiMode()) {
-          this.graffiti.compute()
-        }
+        // 控件关键词高亮
+        this.control.computeHighlightList()
+      }
+      // 涂鸦信息
+      if (this.isGraffitiMode()) {
+        this.graffiti.compute()
       }
     }
     // 清除光标等副作用
@@ -3661,26 +3313,14 @@ export class Draw {
       this.pageList
         .splice(curPageCount, deleteCount)
         .forEach(page => page.remove())
-      // 同步移除已绘制集合中的越界条目
-      for (const idx of Array.from(this._drawnPages)) {
-        if (idx >= curPageCount) this._drawnPages.delete(idx)
-      }
     }
-    // 计算 dirty pages（PERF-PLAN §2.4）。无 dirty 提示 / 首次渲染时返回 null
-    // 表示「全部重绘」，行为与原版完全一致。
-    const dirtyPages = isCompute ? this._computeDirtyPages() : null
-    // 全量重绘时清空已绘制集合，让本次渲染无条件重画所有 page
-    if (dirtyPages === null) this._drawnPages.clear()
     // 绘制元素
     // 连续页因为有高度的变化会导致canvas渲染空白，需立即渲染，否则会出现闪动
     if (isLazy && isPagingMode) {
-      this._lazyRender(dirtyPages)
+      this._lazyRender()
     } else {
-      this._immediateRender(dirtyPages)
+      this._immediateRender()
     }
-    // 落盘本次 row 数与清除 dirty 提示，供下次渲染做差分
-    this._prevPageRowCounts = this.pageRowList.map(rl => rl.length)
-    this.clearDirtyRange()
     // 光标重绘
     if (isSetCursor) {
       curIndex = this.setCursor(curIndex)
@@ -3693,27 +3333,10 @@ export class Draw {
       (isSubmitHistory && !isFirstRender) ||
       (curIndex !== undefined && this.historyManager.isStackEmpty())
     ) {
-      // 输入合批：连续文本输入仅在 idle / 非输入动作 / undo·redo 时落盘单个 snapshot
-      // 非首次（栈非空）且明确为输入路径时启用 batch；否则正常 submit（必要时
-      // 先 flush 已挂起的 typing batch，确保 history 顺序正确）。
-      // historyTypingBatchMs<=0 时关闭合批，保留每键一份 snapshot 的旧语义（默认）。
-      const batchMs = this.options.historyTypingBatchMs
-      const canBatch =
-        isTextInput &&
-        batchMs > 0 &&
-        !this.historyManager.isStackEmpty()
-      if (canBatch) {
-        this._typingBatchActive = true
-        this._typingBatchLastCurIndex = curIndex
-        this._refreshTypingBatchTimer()
-      } else {
-        this.flushTypingBatch()
-        this.submitHistory(curIndex)
-      }
+      this.submitHistory(curIndex)
     }
-    // 信息变动回调（使用微任务，避免一次宏任务排队带来的尾部开销，
-    // 同时让范围样式 / tableTool / contentChange 等回调与本次渲染落在同一帧内）
-    queueMicrotask(() => {
+    // 信息变动回调
+    nextTick(() => {
       // 选区样式
       this.range.setRangeStyle()
       // 重新唤起弹窗类控件
@@ -3792,39 +3415,6 @@ export class Draw {
     return curIndex
   }
 
-  /**
-   * 将连续文本输入合并为单个 history snapshot（PERF-PLAN §1.2）。
-   *
-   * 合批生效后，每次 keystroke 不再支付 9× deepClone 的代价；500ms 闲置或被
-   * 任何非输入动作 / undo / redo 中断时，会调用 {@link flushTypingBatch}
-   * 落盘一次最终的 snapshot。语义上等价于 Office/Google Docs 的「按词撤销」。
-   */
-  public isTypingBatchActive(): boolean {
-    return this._typingBatchActive
-  }
-
-  /** 立即将挂起的输入合批落盘（push 一份 history snapshot）。 */
-  public flushTypingBatch() {
-    if (!this._typingBatchActive) return
-    const curIndex = this._typingBatchLastCurIndex
-    this._typingBatchActive = false
-    this._typingBatchLastCurIndex = undefined
-    if (this._typingBatchTimer !== null) {
-      clearTimeout(this._typingBatchTimer)
-      this._typingBatchTimer = null
-    }
-    this.submitHistory(curIndex)
-  }
-
-  private _refreshTypingBatchTimer() {
-    if (this._typingBatchTimer !== null) clearTimeout(this._typingBatchTimer)
-    const idleMs = Math.max(1, this.options.historyTypingBatchMs)
-    this._typingBatchTimer = setTimeout(() => {
-      this._typingBatchTimer = null
-      this.flushTypingBatch()
-    }, idleMs)
-  }
-
   public submitHistory(curIndex: number | undefined) {
     const positionContext = this.position.getPositionContext()
     const oldElementList = getSlimCloneElementList(this.elementList)
@@ -3855,22 +3445,6 @@ export class Draw {
   }
 
   public destroy() {
-    if (this._pendingRenderFrameId !== null) {
-      const caf =
-        typeof cancelAnimationFrame === 'function'
-          ? cancelAnimationFrame
-          : clearTimeout
-      caf(this._pendingRenderFrameId as number)
-      this._pendingRenderFrameId = null
-      this._pendingRenderPayload = null
-    }
-    if (this._typingBatchTimer !== null) {
-      clearTimeout(this._typingBatchTimer)
-      this._typingBatchTimer = null
-    }
-    this._typingBatchActive = false
-    this._typingBatchLastCurIndex = undefined
-    this._invalidatePaintCache()
     this.container.remove()
     this.globalEvent.removeEvent()
     this.scrollObserver.removeEvent()

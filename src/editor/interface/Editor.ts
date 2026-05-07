@@ -84,10 +84,6 @@ export interface IEditorOption {
   paperDirection?: PaperDirection
   inactiveAlpha?: number
   historyMaxRecordCount?: number
-  // 输入合批的闲置阈值（毫秒）。> 0 时启用：连续按键合并为单个 history snapshot，
-  // 闲置该时长后落盘；遇到非输入动作 / undo / redo 立即落盘。
-  // 0（默认）保留每键一份 snapshot 的旧语义。详见 PERF-PLAN §1.2。
-  historyTypingBatchMs?: number
   printPixelRatio?: number
   maskMargin?: IMargin
   letterClass?: string[]
