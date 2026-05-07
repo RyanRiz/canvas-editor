@@ -148,13 +148,13 @@ export function backspace(evt: KeyboardEvent, host: CanvasEvent) {
   draw.getGlobalEvent().setCanvasEventAbility()
   if (curIndex === null) {
     rangeManager.setRange(startIndex, startIndex)
-    draw.render({
+    draw.scheduleRender({
       curIndex: startIndex,
       isSubmitHistory: false
     })
   } else {
     rangeManager.setRange(curIndex, curIndex)
-    draw.render({
+    draw.scheduleRender({
       curIndex
     })
   }
