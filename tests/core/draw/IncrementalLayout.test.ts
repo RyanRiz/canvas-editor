@@ -259,6 +259,95 @@ describe('Draw - incremental computeRowList (P2.2)', () => {
     computeSpy1.mockRestore()
   })
 
+  it('PERF-PLAN §2.3: 增量 positionList 与全量 positionList 字节相等', () => {
+    // 与 §2.2 平行——构造相同初始文档，分别走全量与增量两条路径，断言
+    // positionList 在 (index / pageNo / coordinate.leftTop) 这些用户可见字段上一致。
+    function snapshot(positions: any[]) {
+      return positions.map(p => ({
+        index: p.index,
+        pageNo: p.pageNo,
+        rowIndex: p.rowIndex,
+        leftTop: p.coordinate.leftTop.slice(),
+        rightBottom: p.coordinate.rightBottom.slice()
+      }))
+    }
+    const data = {
+      header: [],
+      main: makeManyParagraphs(30),
+      footer: []
+    }
+
+    // 全量基线
+    const a = createTestEditor({
+      options: { pageMode: PageMode.CONTINUITY },
+      data: { ...data, main: data.main.slice() } as any
+    })
+    a.editor.draw.render({ isCompute: true, isSubmitHistory: false })
+    a.editor.draw.invalidatePaintCache()
+    a.editor.draw.spliceElementList(
+      a.editor.draw.getOriginalMainElementList(),
+      12,
+      0,
+      [{ value: 'Z' }]
+    )
+    a.editor.draw.invalidatePaintCache() // 强制全量
+    a.editor.draw.markDirty(12, 13)
+    a.editor.draw.render({ isCompute: true, isSubmitHistory: false })
+    const fullSnap = snapshot(
+      a.editor.draw.getPosition().getOriginalMainPositionList()
+    )
+    a.destroy()
+
+    // 增量路径
+    const b = createTestEditor({
+      options: { pageMode: PageMode.CONTINUITY },
+      data: { ...data, main: data.main.slice() } as any
+    })
+    b.editor.draw.render({ isCompute: true, isSubmitHistory: false })
+    b.editor.draw.spliceElementList(
+      b.editor.draw.getOriginalMainElementList(),
+      12,
+      0,
+      [{ value: 'Z' }]
+    )
+    b.editor.draw.render({ isCompute: true, isSubmitHistory: false })
+    const incSnap = snapshot(
+      b.editor.draw.getPosition().getOriginalMainPositionList()
+    )
+    b.destroy()
+
+    expect(incSnap.length).toBe(fullSnap.length)
+    expect(incSnap).toEqual(fullSnap)
+  })
+
+  it('PERF-PLAN §2.3: 增量分支下 positionList 前缀对象引用被复用', () => {
+    ctx = createTestEditor({
+      options: { pageMode: PageMode.CONTINUITY },
+      data: { header: [], main: makeManyParagraphs(40), footer: [] }
+    })
+    const draw = ctx.editor.draw
+    draw.render({ isCompute: true, isSubmitHistory: false })
+    const internal = draw as unknown as DrawInternals
+    expect(internal.rowList.length).toBeGreaterThanOrEqual(3)
+
+    // 拿到当前 positionList 的若干前缀引用
+    const beforePos = draw.getPosition().getOriginalMainPositionList()
+    const baselinePos0 = beforePos[0]
+    const baselinePos1 = beforePos[1]
+
+    // 在第三行之后 splice，迫使增量分支生效
+    const dirtyStart = internal.rowList[2].startIndex + 1
+    draw.spliceElementList(draw.getOriginalMainElementList(), dirtyStart, 0, [
+      { value: 'q' }
+    ])
+    draw.render({ isCompute: true, isSubmitHistory: false })
+
+    const afterPos = draw.getPosition().getOriginalMainPositionList()
+    // 前缀位置对象应保持同一引用——增量靠 positionList.length 截断 + 复用
+    expect(afterPos[0]).toBe(baselinePos0)
+    expect(afterPos[1]).toBe(baselinePos1)
+  })
+
   it('页眉 zone 输入不应误启用主体增量（mainNeedsCompute=false 路径）', () => {
     // 跨 zone 安全：页眉/页脚 zone 输入不动主元素 dirty range，render() 跳过主体
     // 整个 if (mainNeedsCompute) 块——增量决策 / checkpointSink 都不参与。

@@ -416,18 +416,47 @@ Landed (Phase **2B** — incremental layout):
   reduction (`5 → ≤3` recursive `computeRowList` calls on a 2×2
   table after main-only edit).
 
+Landed (Phase **2B** — incremental positions, follow-up pass):
+
+* §2.3 **Incremental `computePositionList`**. New
+  `Position.computePositionListIncremental({ fromRowGlobalIndex,
+  fromElementIndex })` truncates `positionList.length` to
+  `fromElementIndex`, filters `floatPositionList` to entries with
+  `position.index < fromElementIndex`, then walks `pageRowList`
+  skipping pages / rows whose global row index is `< fromRowGlobalIndex`
+  and resumes `computePageRowPosition` from the matching `(pageNo,
+  rowK)`. For 7 441 words / 10 pages this is the next dominant cost
+  after §2.2 (~30 ms of `IElementPosition` allocation per keystroke
+  at the worst position) and was the lever that closes the
+  user-visible delay on docs of that size.
+* **Last-prefix-row mutation detection**. The §2.2 incremental
+  `computeRowList` loop can extend the *last* prefix row in place
+  (`curRow.elementList.push(rowElement)` when the new element fits
+  there, e.g. inserting a small character at a row boundary).
+  `render()` now snapshots
+  `prefixRowList[len-1].elementList.length` before calling
+  `computeRowList`, then compares post-call: if it changed, the
+  position resume point is bumped one row earlier (re-process the
+  mutated prefix row + everything after). This is the safe path that
+  preserves byte-equal output even when the splice element ends up
+  back-flowing into the kept prefix row.
+* Tests: two new cases in
+  [`tests/core/draw/IncrementalLayout.test.ts`](tests/core/draw/IncrementalLayout.test.ts)
+  — (a) byte-equal positionList between full and incremental paths
+  after a mid-doc splice (compares `index / pageNo / rowIndex /
+  coordinate.leftTop / rightBottom` per element), (b) prefix
+  `IElementPosition` references are reused (proves the truncation
+  path actually keeps the prefix array slots, not just structural
+  equality).
+* Wiring: `render()` calls `computePositionListIncremental` only when
+  the §2.2 incremental path is also taken; otherwise full
+  `computePositionList`. `floatPositionList` is no longer
+  unconditionally cleared on `mainNeedsCompute` — the increment path
+  filters by `position.index < fromElementIndex` so prefix surrounds
+  keep their entries. 41 test files / 259 tests pass.
+
 Deferred (Phase **2B follow-ups**, lower-priority):
 
-* §2.3 **Incremental `computePositionList`**. Skipped this pass
-  because `computePositionList` is mostly object construction (~few
-  ms even for a 2 000-element doc) and the §2.2 win covers the
-  dominant cost. The data plumbing (rowList prefix length, the page +
-  page-row split point for the dirty row) is already available on
-  `Draw`, so this is a straightforward follow-up: truncate
-  `Position.positionList` to the index of the first dirty element,
-  remove `floatPositionList` entries with `tdValueIndex >=
-  dirtyStart`, and resume `computePageRowPosition` from the matching
-  page+row.
 * **Multi-page incremental benchmark fixture**. The validation
   harness proves correctness; a wall-clock benchmark over a fixed
   N-page document (say 50) on CI would close the loop on the perf
@@ -435,6 +464,11 @@ Deferred (Phase **2B follow-ups**, lower-priority):
 * **Incremental `_computePageList`**. Currently rebuilt fresh every
   render. Cheap for single-column (just walks rowList accumulating
   page heights) so unlikely to be on the hot path; deferred.
+* **Incremental `area.compute()` / `control.computeHighlightList`**.
+  `area.compute` is one property-check per element so ~free even at
+  37 K elements (measured: <1 ms for 10-page doc).
+  `computeHighlightList` is gated behind a non-empty highlight list
+  and is a no-op for typical docs.
 
 ### Phase 3 — Architectural cleanups (optional, 2-3 weeks)
 

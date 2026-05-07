@@ -3729,8 +3729,11 @@ export class Draw {
       const mainNeedsCompute =
         isMainZone || this._dirtyRange !== null || this._prevPageRowCounts === null
       // 清空浮动元素位置信息（仅当本帧确实会重新布局主体时才清空，否则保留上次缓存）
+      // PERF-PLAN §2.3：增量路径下浮动列表交给 computePositionListIncremental 自行
+      // 按 dirty 边界过滤，因此这里不能无条件清空——延后到 _tryBuildResumeFrom 决定
+      // 之后再处理。
       if (mainNeedsCompute) {
-        this.position.setFloatPositionList([])
+        // 保留：下方 mainNeedsCompute 块里再按是否走增量决定是否清空。
       }
       if (isPagingMode) {
         // 页眉信息：当前在页眉区或页眉 dirty 或主体重新布局时计算
@@ -3771,6 +3774,21 @@ export class Draw {
           isPagingMode,
           innerWidth
         })
+        // 浮动元素列表清空策略：全量路径下按既有逻辑清空；增量路径下交给
+        // computePositionListIncremental 按 dirty 边界过滤，避免误删 prefix 浮动。
+        if (!resumeFrom) {
+          this.position.setFloatPositionList([])
+        }
+        // PERF-PLAN §2.3：incremental computeRowList 的循环在第一次迭代时仍把
+        // curRow 指向「前缀末尾行」（rowList[length-1]），如果新元素 isWrap=false
+        // 就会被 push 进该行——前缀末尾行的 elementList 因此可能被原地扩展。
+        // 我们在 computeRowList 之前先快照其长度，事后比对：长度变了说明这一行
+        // 的位置缓存不再可信，position 增量恢复点必须包含该行。
+        const lastPrefixRow = resumeFrom
+          ? resumeFrom.prefixRowList[resumeFrom.prefixRowList.length - 1]
+          : null
+        const lastPrefixRowOriginalCount =
+          lastPrefixRow?.elementList.length ?? 0
         this.rowList = this.computeRowList({
           startX,
           startY,
@@ -3802,8 +3820,29 @@ export class Draw {
         this._mainLayoutSig = this._buildLayoutSig({ isPagingMode, innerWidth })
         // 页面信息
         this.pageRowList = this._computePageList()
-        // 位置信息
-        this.position.computePositionList()
+        // 位置信息——PERF-PLAN §2.3 增量分支：仅当 §2.2 的增量路径成立时启用，
+        // 与 row prefix 同步保留 positionList prefix，省下 ~O(N) 对象构造。
+        if (resumeFrom && lastPrefixRow) {
+          // 前缀末尾行被原地扩展（curRow.elementList.push）→ 该行的 position
+          // 缓存不再准确，position 恢复点必须前移一行（包含该行的全部元素）。
+          // 否则前缀位置都是稳定的，按 §2.2 给出的 (fromRowGlobalIndex,
+          // fromElementIndex) 直接走。
+          const lastPrefixMutated =
+            lastPrefixRow.elementList.length !== lastPrefixRowOriginalCount
+          if (lastPrefixMutated) {
+            this.position.computePositionListIncremental({
+              fromRowGlobalIndex: resumeFrom.prefixRowList.length - 1,
+              fromElementIndex: lastPrefixRow.startIndex
+            })
+          } else {
+            this.position.computePositionListIncremental({
+              fromRowGlobalIndex: resumeFrom.prefixRowList.length,
+              fromElementIndex: resumeFrom.startElementIndex
+            })
+          }
+        } else {
+          this.position.computePositionList()
+        }
         // 区域信息
         this.area.compute()
         if (!this.isPrintMode()) {
