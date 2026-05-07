@@ -424,6 +424,83 @@ they make Phase 2 invariants enforceable.
    so we can compress consecutive `insert`s, replay deltas, and serialize
    undo state for crash-recovery later.
 
+#### Phase 3 implementation status
+
+Landed (Phase **3A** — seams that unlock the rest):
+
+* §3.2 + §6.2b **Render payload types split**.
+  `IDrawOption` decomposed into `IRenderInput` (curIndex,
+  remoteDirtyRange, isTextInput, anchor) and `IRenderConfig`
+  (isCompute, isLazy, isSubmitHistory, isSetCursor, isInit,
+  isSourceHistory, isFirstRender). `IDrawOption` survives as a
+  deprecated alias `IRenderInput & IRenderConfig` so existing call
+  sites keep working unchanged. Also added
+  [`IAnchorPosition`](src/editor/interface/Draw.ts) (`{ afterId?,
+  beforeId?, offset? }`) as a type-only stub for the CRDT-ready
+  selection anchor — no consumers yet, but every place that touches
+  cursor positions can incrementally migrate without a flag day.
+* §3.4 **`HistoryEntry` tagged union** ([new file](src/editor/interface/History.ts)).
+  Existing `HistoryManager.execute(fn)` is unchanged. New
+  `executeEntry(entry: HistoryEntry)` and `onEntry(listener)` APIs
+  layer a typed entry-stream on top — the entry is still pushed onto
+  the function stack internally (so undo / redo behave identically),
+  but subscribers see structured `{ kind: 'insert' | 'delete' |
+  'replace' | 'snapshot', scope, timestamp, undo, redo, ...payload }`
+  records. This is the hook a CRDT runtime / audit log / crash-recovery
+  persistence subscribes to without touching core code.
+* §3.1 **Mutation event seam (light)**
+  ([`Draw.onMutation`](src/editor/core/draw/Draw.ts),
+  [`IMutationEvent`](src/editor/interface/Mutation.ts)).
+  `spliceElementList` is the de-facto Mutator boundary — every
+  structural mutation goes through it. It now emits an
+  `IMutationEvent { kind: 'splice', scope, start, removed, inserted }`
+  to subscribers. Scope is auto-detected (`main` / `header` / `footer`
+  / `table`) by reference comparison. Subscribers see "what just
+  happened" without re-reading the elementList. Subscriber exceptions
+  are swallowed so the mutation path is never broken by a buggy
+  listener.
+* §6.2a **Auto-id at Mutator boundary**.
+  `spliceElementList` now stamps `item.id = getUUID()` on inserted
+  elements that don't already have one. `IElement.id` stays
+  *typed-as-optional* so existing fixtures and serialized documents
+  keep working, but every element that flows through the Mutator
+  picks up a stable id. This is the precondition for
+  `HistoryEntry` deltas to reference IDs (per §6.2a) and for CRDT
+  ops to address anchors deterministically.
+* Tests:
+  [`tests/core/draw/Phase3Seams.test.ts`](tests/core/draw/Phase3Seams.test.ts)
+  (11 cases) covers the mutation event seam, scope detection, listener
+  isolation from exceptions, removed-slice snapshotting, auto-id
+  assignment with preset-id preservation, and the typed-history-entry
+  flow (executeEntry + onEntry + isCanUndo bookkeeping).
+
+Deferred (Phase **3B**, future work):
+
+* §3.1 **Physical class split** (`Draw.ts` → `LayoutEngine` /
+  `Renderer` / `Mutator` / orchestrator). Mostly mechanical churn
+  touching hundreds of `getDraw().*` call sites across `core/`,
+  `command/`, particle / control / frame subsystems, and tests.
+  Doesn't add behavior — the *load-bearing* parts of the split
+  (mutation events, typed history entries, payload split, auto-id)
+  all landed in 3A and are usable today. Worthwhile as a code-health
+  PR after CRDT integration is up because by then we'll know which
+  exact methods need to be on the Mutator's public face.
+* §3.3 **Element-level `markDirty(elementIndex)`** for in-place
+  mutations of `element.metrics` / `element.style`. Today these go
+  unannounced; Phase 2A's `_dirtyRange` only covers `spliceElementList`.
+  Adding this would let dirty-page paint catch style-only edits too
+  (rare on the typing hot path, so deferred).
+* §6.2b consumer wiring for `IAnchorPosition`. Type stub landed, but
+  `RangeManager.setRange` / `getRange` still take indices. Wiring the
+  index ↔ anchor conversion at the boundary is straightforward once
+  there's a CRDT runtime to anchor against; doing it before that has
+  no observable effect.
+
+**Why 3B is deferred**: 3A's seams are the *integration points* the
+plan really needs. The class split is a code-organization win
+without runtime effects, and is best done together with the work it
+enables (the CRDT integration itself), not as a precondition.
+
 ---
 
 ## 4. Suggested order of work / acceptance criteria

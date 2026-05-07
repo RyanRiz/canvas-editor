@@ -13,6 +13,8 @@ import {
   IGetValueOption,
   IPainterOption
 } from '../../interface/Draw'
+import { HistoryScope } from '../../interface/History'
+import { IMutationEvent, MutationListener } from '../../interface/Mutation'
 import {
   IEditorData,
   IEditorOption,
@@ -152,6 +154,8 @@ export class Draw {
   private _prevPageRowCounts: number[] | null
   // 已绘制（且未被标脏）的 page 索引集合：lazy 渲染时这些页不再重复绘制
   private _drawnPages: Set<number>
+  // PERF-PLAN §3.1：Mutator 边界事件订阅者。spliceElementList 完成后通知。
+  private _mutationListeners: Set<MutationListener>
   private pageNo: number
   private renderCount: number
   private pagePixelRatio: number | null
@@ -248,6 +252,7 @@ export class Draw {
     this._footerDirty = false
     this._prevPageRowCounts = null
     this._drawnPages = new Set()
+    this._mutationListeners = new Set()
     this.pageNo = 0
     this.renderCount = 0
     this.pagePixelRatio = null
@@ -983,6 +988,39 @@ export class Draw {
     this._dirtyRange = null
   }
 
+  /**
+   * 订阅 elementList 突变事件（PERF-PLAN §3.1）。
+   *
+   * 所有结构性变更最终都走 `spliceElementList`。订阅 `onMutation` 即可在
+   * 不修改核心代码的前提下接入 CRDT runtime / 审计 / 远端同步等横切关注点。
+   * 返回反订阅函数。
+   */
+  public onMutation(listener: MutationListener): () => void {
+    this._mutationListeners.add(listener)
+    return () => {
+      this._mutationListeners.delete(listener)
+    }
+  }
+
+  private _emitMutation(event: IMutationEvent) {
+    if (this._mutationListeners.size === 0) return
+    // 拷贝集合再迭代，避免回调中改 listener 集合引发问题
+    for (const listener of Array.from(this._mutationListeners)) {
+      try {
+        listener(event)
+      } catch {
+        /* 订阅者异常不影响突变流程 */
+      }
+    }
+  }
+
+  private _resolveMutationScope(elementList: IElement[]): HistoryScope {
+    if (elementList === this.elementList) return 'main'
+    if (elementList === this.header.getElementList()) return 'header'
+    if (elementList === this.footer.getElementList()) return 'footer'
+    return 'table'
+  }
+
   public spliceElementList(
     elementList: IElement[],
     start: number,
@@ -999,6 +1037,11 @@ export class Draw {
     } else if (elementList === this.footer.getElementList()) {
       this._footerDirty = true
     }
+    // 事件订阅前先快照「将被删除」切片（splice 后无法访问）。
+    const removedSnapshot =
+      this._mutationListeners.size > 0 && deleteCount > 0
+        ? elementList.slice(start, start + deleteCount)
+        : []
     const { isIgnoreDeletedRule = false } = options || {}
     const { group, modeRule } = this.options
     if (deleteCount > 0) {
@@ -1060,8 +1103,23 @@ export class Draw {
     // 循环添加，避免使用解构影响性能
     if (items?.length) {
       for (let i = 0; i < items.length; i++) {
-        elementList.splice(start + i, 0, items[i])
+        // PERF-PLAN §6.2a：CRDT readiness——为新插入的元素填充稳定 id。
+        // 类型上 `id` 仍为可选，老代码 / fixture 不受影响；但凡通过 Mutator
+        // 进来的元素都会拿到稳定 id，便于后续操作日志按 id 引用而非索引。
+        const item = items[i]
+        if (!item.id) item.id = getUUID()
+        elementList.splice(start + i, 0, item)
       }
+    }
+    // 通知突变事件订阅者（PERF-PLAN §3.1）。仅在有订阅者时才构造 payload。
+    if (this._mutationListeners.size > 0) {
+      this._emitMutation({
+        kind: 'splice',
+        scope: this._resolveMutationScope(elementList),
+        start,
+        removed: removedSnapshot,
+        inserted: items ? items.slice() : []
+      })
     }
   }
 
