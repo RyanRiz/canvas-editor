@@ -141,9 +141,12 @@ export class Cursor {
     const preY = curPageNo * (height + pageGap)
     // 默认偏移高度
     const defaultOffsetHeight = CURSOR_AGENT_OFFSET_HEIGHT * scale
-    // 增加1/4字体大小（最小为defaultOffsetHeight即默认偏移高度）
-    const increaseHeight = Math.min(metrics.height / 4, defaultOffsetHeight)
-    const cursorHeight = metrics.height + increaseHeight * 2
+    // Keep the caret close to the glyph box after custom baseline adjustments.
+    const increaseHeight = Math.min(
+      metrics.height / 20,
+      defaultOffsetHeight / 2
+    )
+    const cursorHeight = metrics.height + increaseHeight
     const agentCursorDom = this.cursorAgent.getAgentCursorDom()
     if (isFocus) {
       setTimeout(() => {

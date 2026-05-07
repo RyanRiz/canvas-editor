@@ -157,13 +157,14 @@ export class Position {
           }
         }
         const metrics = element.metrics
+        const rowMargin = this.draw.getElementRowMargin(element)
         const offsetY =
           !element.hide &&
           ((element.imgDisplay !== ImageDisplay.INLINE &&
             element.type === ElementType.IMAGE) ||
             element.type === ElementType.LATEX)
             ? curRow.ascent - metrics.height
-            : curRow.ascent
+            : Math.max(0, curRow.ascent - rowMargin * 1.2)
         // 偏移量（内部计算使用）
         if (element.left) {
           x += element.left
@@ -670,9 +671,9 @@ export class Position {
             position.pageNo !== positionNo ||
             (hasColumnScopedRows && !columnRowNoSet.has(position.rowIndex)) ||
             (hasColumnScopedRows
-              ? position.rowIndex !== currentPageRows.find(row =>
-                  columnRowNoSet.has(row.rowIndex)
-                )?.rowIndex
+              ? position.rowIndex !==
+                currentPageRows.find(row => columnRowNoSet.has(row.rowIndex))
+                  ?.rowIndex
               : position.rowNo !== 0)
           ) {
             continue
