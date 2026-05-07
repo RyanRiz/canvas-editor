@@ -150,20 +150,7 @@ export class Position {
       for (let j = 0; j < curRow.elementList.length; j++) {
         const element = curRow.elementList[j]
         const metrics = element.metrics
-        const { defaultSize, defaultBasicRowMarginHeight, defaultRowMargin } =
-          this.options
-        const fontSize = element.size || defaultSize
-        let rowMarginRatio = 1
-        if (fontSize < 12) {
-          rowMarginRatio = fontSize / 12
-        } else if (fontSize > 30) {
-          rowMarginRatio = 1 + (fontSize - 30) / 30
-        }
-        const rowMargin =
-          defaultBasicRowMarginHeight *
-          rowMarginRatio *
-          (element.rowMargin ?? defaultRowMargin) *
-          scale
+        const rowMargin = this.draw.getElementRowMargin(element)
         const offsetY =
           !element.hide &&
           ((element.imgDisplay !== ImageDisplay.INLINE &&

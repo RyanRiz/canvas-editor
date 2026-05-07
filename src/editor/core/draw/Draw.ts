@@ -1473,26 +1473,11 @@ export class Draw {
   }
 
   public getElementRowMargin(el: IElement) {
-    const {
-      defaultSize,
-      defaultBasicRowMarginHeight,
-      defaultRowMargin,
-      scale
-    } = this.options
-    // 字体在12-30之间，行间距不变，小于12按比例缩小，大于30按比例放大
-    const fontSize = el.size || defaultSize
-    let ratio = 1
-    if (fontSize < 12) {
-      ratio = fontSize / 12
-    } else if (fontSize > 30) {
-      ratio = 1 + (fontSize - 30) / 30
-    }
-    return (
-      defaultBasicRowMarginHeight *
-      ratio *
-      (el.rowMargin ?? defaultRowMargin) *
-      scale
-    )
+    const { defaultSize, defaultRowMargin, scale } = this.options
+    const fontSize = this.getElementSize(el) || defaultSize
+    const lineHeight = el.rowMargin ?? defaultRowMargin
+    const extraLineHeight = Math.max(0, lineHeight - 1) * fontSize
+    return (extraLineHeight / 2) * scale
   }
 
   public computeRowList(payload: IComputeRowListPayload) {
