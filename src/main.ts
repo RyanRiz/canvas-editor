@@ -1823,6 +1823,14 @@ window.onload = function () {
   // Group id format encoding figure/table id and role for tagged inline text
   const figGroupId = (kind: FigureKind, role: FigRole, figId: string): string =>
     `${kind === 'figure' ? 'fig' : 'tab'}-${role}-${figId}`
+  // Block elements (figures/tables) are tagged with groupIds for highlight,
+  // but must not be part of delete/extract ranges for label/caption/desc text.
+  const isFigureBlock = (el: IElement): boolean =>
+    el.type === ElementType.IMAGE || el.type === ElementType.TABLE
+  // canvas-editor rewrites inserted '\n' to ZERO (zero-width space) during formatElementList
+  // so the guard must treat both as paragraph breaks. Otherwise each re-apply sees
+  // ZERO, fails the '\n' check, and inserts another break — accumulating blank rows.
+  const isParagraphBreak = (v: string): boolean => v === '\n' || v === '​'
   const findTaggedRange = (
     list: IElement[],
     groupId: string
@@ -1830,7 +1838,9 @@ window.onload = function () {
     let start = -1
     let end = -1
     for (let i = 0; i < list.length; i++) {
-      if (list[i].groupIds?.includes(groupId)) {
+      const el = list[i]
+      if (isFigureBlock(el)) continue
+      if (el.groupIds?.includes(groupId)) {
         if (start === -1) start = i
         end = i
       }
@@ -1840,6 +1850,7 @@ window.onload = function () {
   const extractTaggedText = (list: IElement[], groupId: string): string => {
     let text = ''
     for (const el of list) {
+      if (isFigureBlock(el)) continue
       if (el.groupIds?.includes(groupId)) {
         text += el.value
       }
@@ -1884,7 +1895,7 @@ window.onload = function () {
     if (idx < 0) return
     // Guard: if previous element is not a newline, insert one so label starts on its own line
     const prevEl = list[idx - 1]
-    if (prevEl && prevEl.value !== '\n') {
+    if (prevEl && !isParagraphBreak(prevEl.value)) {
       instance.command.executeSetRange(idx - 1, idx - 1)
       instance.command.executeInsertElementList([{ value: '\n' }])
       const updated = instance.command.getElementList()
