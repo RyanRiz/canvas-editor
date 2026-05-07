@@ -208,6 +208,11 @@ export class Draw {
   } | null
   // PERF-PLAN §3.1：Mutator 边界事件订阅者。spliceElementList 完成后通知。
   private _mutationListeners: Set<MutationListener>
+  // PERF-PLAN follow-up：主元素列表中带 imgDisplay=SURROUND 的浮动元素计数缓存。
+  // null 表示「未知 / 待重新统计」（会触发一次 O(N) 扫描）；> 0 表示需要构建
+  // surroundElementList，等于 0 时 render 可直接跳过 pickSurroundElementList。
+  // 由 spliceElementList 维护增量；setEditorData 等大批量替换会重置为 null。
+  private _mainSurroundCount: number | null
   // PERF-PLAN §1.2 / Phase 1.2：自上次 submitHistory 以来积累的「主元素列表」突变事件。
   // submitHistory 据此决定是否走 delta 分支：所有事件 scope=main 且没有破坏 delta
   // 不变量的旁路改动时，可避免 9× full deepClone。事件由 spliceElementList 自动
@@ -332,6 +337,7 @@ export class Draw {
     this._deltaHistoryUnsafe = false
     this._preMutationMeta = null
     this._isReplayingHistory = false
+    this._mainSurroundCount = null
     this.pageNo = 0
     this.renderCount = 0
     this.pagePixelRatio = null
@@ -1004,7 +1010,11 @@ export class Draw {
         preElement?.value === ZERO &&
         (!preElement.type || preElement.type === ElementType.TEXT)
       ) {
-        elementList.splice(startIndex, 1)
+        // PERF-PLAN §1.2：直接 splice 会绕开 mutation event 与 _dirtyRange，导致
+        // 1) Phase 1.2 delta history 缺失这条改动→undo 时这个 ZERO 不会回来；
+        // 2) Phase 2A dirty-page paint 不知道改动落在哪里→可能漏画。
+        // 走 spliceElementList 让两条信号同时生效。
+        this.spliceElementList(elementList, startIndex, 1)
         curIndex -= 1
       }
     }
@@ -1028,11 +1038,19 @@ export class Draw {
     })
     let curIndex: number
     const { isPrepend, isSubmitHistory = true } = options
+    // PERF-PLAN §1.2：走 spliceElementList 让 mutation event / _dirtyRange / delta
+    // history 都能感知到这次插入，并复用 Phase 1.2 follow-up 的批量 splice 优化
+    // （否则 push(...elementList) 在长列表上会 O(M × N) 累积。）
     if (isPrepend) {
-      this.elementList.splice(1, 0, ...elementList)
+      this.spliceElementList(this.elementList, 1, 0, elementList)
       curIndex = elementList.length
     } else {
-      this.elementList.push(...elementList)
+      this.spliceElementList(
+        this.elementList,
+        this.elementList.length,
+        0,
+        elementList
+      )
       curIndex = this.elementList.length - 1
     }
     this.range.setRange(curIndex, curIndex)
@@ -1133,6 +1151,27 @@ export class Draw {
     if (scope !== 'main') {
       this._deltaHistoryUnsafe = true
     }
+    // PERF-PLAN follow-up：维护 main 列表中 SURROUND 元素的计数缓存——
+    // pickSurroundElementList 在 render() 每帧扫一次 O(N)，对于绝大多数没有
+    // 浮动图片的文档完全是空载。spliceElementList 是主列表唯一的结构化变更
+    // 入口，这里同步增减 counter，render 据此跳过整次扫描。null 表示「未计算」
+    // —下一次 render 触发的 fast-path 检查会重建。
+    if (scope === 'main' && this._mainSurroundCount !== null) {
+      let delta = 0
+      if (deleteCount > 0) {
+        // removedSnapshot 还没建好，但元素仍在 elementList[start..start+deleteCount)。
+        for (let i = 0; i < deleteCount; i++) {
+          const el = elementList[start + i]
+          if (el?.imgDisplay === ImageDisplay.SURROUND) delta--
+        }
+      }
+      if (items?.length) {
+        for (let i = 0; i < items.length; i++) {
+          if (items[i].imgDisplay === ImageDisplay.SURROUND) delta++
+        }
+      }
+      this._mainSurroundCount = Math.max(0, this._mainSurroundCount + delta)
+    }
     // 事件订阅前先快照「将被删除」切片（splice 后无法访问）。
     // 内部的 delta-history 记录器同样需要这份快照，因此从此版本起即便没有
     // 外部 mutation 订阅者，只要存在 delete 也照常 slice。
@@ -1208,15 +1247,26 @@ export class Draw {
         elementList.splice(start, deleteCount)
       }
     }
-    // 循环添加，避免使用解构影响性能
+    // PERF-PLAN follow-up：批量插入。从历史「逐项 splice 避免解构开销」改为单次
+    // splice 大批插入。前者每次 splice 都是 O(N)，对于一条粘贴 M 个元素的命令
+    // 总成本是 O(M × N)——pasting 长段落 10 次时观测到的滚雪球延迟正是出自这里。
+    // 现在改为一次 splice 完成插入：单次 O(N + M)，同时仍保留 §6.2a 的 CRDT id
+    // 填充。`splice(...items)` 的展开会受到 V8 函数参数上限（~65535）影响，因此
+    // 巨型 paste 自动按 chunk 分次完成，避免 RangeError。
     if (items?.length) {
+      // 1) §6.2a：先一遍循环把缺失的稳定 id 填好——每个元素一次属性写。
       for (let i = 0; i < items.length; i++) {
-        // PERF-PLAN §6.2a：CRDT readiness——为新插入的元素填充稳定 id。
-        // 类型上 `id` 仍为可选，老代码 / fixture 不受影响；但凡通过 Mutator
-        // 进来的元素都会拿到稳定 id，便于后续操作日志按 id 引用而非索引。
-        const item = items[i]
-        if (!item.id) item.id = getUUID()
-        elementList.splice(start + i, 0, item)
+        if (!items[i].id) items[i].id = getUUID()
+      }
+      // 2) 一次（或几次）spread splice 完成结构性插入。
+      const SPREAD_CHUNK = 32768
+      if (items.length <= SPREAD_CHUNK) {
+        elementList.splice(start, 0, ...items)
+      } else {
+        for (let off = 0; off < items.length; off += SPREAD_CHUNK) {
+          const slice = items.slice(off, off + SPREAD_CHUNK)
+          elementList.splice(start + off, 0, ...slice)
+        }
       }
     }
     // PERF-PLAN §1.2 / §3.1：构造 splice 事件，既给 mutation 订阅者也给 history
@@ -1697,6 +1747,8 @@ export class Draw {
     this._pendingHistoryMutations = []
     this._deltaHistoryUnsafe = true
     this._preMutationMeta = null
+    // surround 计数缓存需要重建：新文档可能含/不含浮动元素。
+    this._mainSurroundCount = null
   }
 
   /**
@@ -1762,15 +1814,21 @@ export class Draw {
     if (this._mainRowCheckpoints.length !== this.rowList.length) return null
     if (!this._isLayoutSigCompatible(extra)) return null
     const dirtyStart = this._dirtyRange.start
-    // 找出第一个 startIndex > dirtyStart 的行，则它的前一行就是「dirty 行」。
-    // dirty 行（含起点）必须重排，dirty 行之前的行可以保留。
-    let dirtyRowIndex = this.rowList.length - 1
-    for (let i = 0; i < this.rowList.length; i++) {
-      if (this.rowList[i].startIndex > dirtyStart) {
-        dirtyRowIndex = i - 1
-        break
+    // 二分查找第一个 startIndex > dirtyStart 的行，O(log R) 替代 O(R)。
+    // rowList 的 startIndex 单调非递减——同一 startIndex 出现多次时取最后一个，
+    // 即「最大的 i 使得 rowList[i].startIndex <= dirtyStart」。
+    let lo = 0
+    let hi = this.rowList.length
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (this.rowList[mid].startIndex > dirtyStart) {
+        hi = mid
+      } else {
+        lo = mid + 1
       }
     }
+    // lo 现在指向第一个 startIndex > dirtyStart 的行；前一行包含 dirtyStart。
+    const dirtyRowIndex = lo - 1
     if (dirtyRowIndex <= 0) return null
     const prefixRowList = this.rowList.slice(0, dirtyRowIndex)
     const checkpoint = this._mainRowCheckpoints[dirtyRowIndex]
@@ -3878,7 +3936,19 @@ export class Draw {
         // 行布局起点为第一列的左上角；单列时与页面左上一致
         const startX = this.getColumnStartX(0)
         const startY = margins[0] + extraHeight
-        const surroundElementList = pickSurroundElementList(this.elementList)
+        // PERF-PLAN follow-up：当主列表无 SURROUND 浮动元素时，skip O(N) 扫描——
+        // 维护一个增量计数缓存，spliceElementList 同步更新；首次或失效后重新统计。
+        if (this._mainSurroundCount === null) {
+          let count = 0
+          for (let e = 0; e < this.elementList.length; e++) {
+            if (this.elementList[e].imgDisplay === ImageDisplay.SURROUND) count++
+          }
+          this._mainSurroundCount = count
+        }
+        const surroundElementList =
+          this._mainSurroundCount === 0
+            ? []
+            : pickSurroundElementList(this.elementList)
         // PERF-PLAN §2.2 / Phase 2B：在「上一帧 row checkpoint 仍然有效 + 已有 dirty
         // 区间提示 + 布局签名未变 + 至少存在可保留的前缀行」时启用增量布局，
         // 跳过 dirty 起点之前的 measureText / 包装判定 / surround 计算等 O(N) 工作。

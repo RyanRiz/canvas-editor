@@ -297,11 +297,77 @@ These are surgical changes; no API churn.
    intra-render callbacks where ordering allows
    ([utils/index.ts:211](src/editor/utils/index.ts#L211),
    [Draw.ts:3209](src/editor/core/draw/Draw.ts#L3209)). Cuts one
-   task-queue round-trip per render.
+   task-queue round-trip per render. **(LANDED for the render
+   trailing callbacks in `Draw.ts` and the `zoneChange` listener in
+   `Zone.ts`. `Cursor.moveCursorToVisible` deliberately stays on
+   `nextTick` (= `setTimeout 0`) per its inline comment — it must run
+   AFTER a paint cycle to avoid cursor ghosting. Two macrotask
+   callsites left: that one and the rAF fallback `setTimeout(..., 16)`.)**
 
 **Expected effect of Phase 1**: typing latency dominated by *one*
 `computeRowList` per frame (≈16 ms target). Bursts no longer stack.
 History no longer stalls hot keys.
+
+#### Hot-path audit follow-up (landed alongside Phase 1.5)
+
+* **`pickSurroundElementList` skip-when-empty cache**.
+  `pickSurroundElementList(this.elementList)` ran an O(N) scan over
+  the main element list every frame regardless of whether any
+  floating image existed (typical docs have zero). A new
+  `_mainSurroundCount` integer cache on `Draw` tracks the number of
+  elements with `imgDisplay === SURROUND` in the main list:
+  initialized to `null` (= "needs one-shot recount"), maintained
+  incrementally by `spliceElementList` (delta-counting inserted vs
+  removed surround elements), reset to `null` by
+  `_invalidatePaintCache`. When the count is `0`, `render()`
+  substitutes the empty array directly and skips the O(N) walk. For
+  a 50K-element doc with no floating images this saves ~0.3 ms /
+  frame and a temp array allocation; for docs that do have
+  surrounds, behaviour is unchanged.
+* **Binary-search resume-row lookup**. `_tryBuildResumeFrom` used a
+  linear scan over `rowList` to find the dirty row. Replaced with a
+  binary search over `rowList[i].startIndex` (the array is monotone
+  non-decreasing). O(R) → O(log R); for the user's 800-row doc that's
+  ~10 comparisons instead of ~600. Microscopic per-frame, but
+  composes well with the dirty-range hot path which already runs in
+  fractions of a millisecond.
+
+#### Bulk-insert hot-path follow-up (paste regression fix)
+
+* **`spliceElementList` per-item insert loop → batched spread**.
+  The historical loop `for (i in items) elementList.splice(start+i, 0,
+  item)` was **O(M × N)** — each per-item splice on an N-element array
+  is itself O(N). Pasting a 1 000-element paragraph into a 5 000-element
+  doc cost ~5 M ops; pasting it 10× successively scaled as
+  `5+6+7+...+14 ≈ 95 M` ops because every paste grew `N`. This is the
+  textbook quadratic blow-up the user reported as "the more I paste,
+  the longer each paste takes."
+  Now batched into `elementList.splice(start, 0, ...items)` after a
+  separate `id`-stamp loop — single call, O(N + M). The id assignment
+  for §6.2a still happens once per inserted element. For paste sizes
+  beyond V8's spread-arg ceiling (~65 K), the call is auto-chunked in
+  32 K windows so we never hit a `RangeError` while staying linear.
+* **Routed `insertElementList` / `appendElementList` cleanup splices
+  through `spliceElementList`**. Two stragglers (`elementList.splice(...)`
+  in [Draw.ts](src/editor/core/draw/Draw.ts)) bypassed the Mutator
+  boundary, which meant Phase 1.2 delta history wouldn't capture them
+  (undo could miss a single ZERO removal after a list-paste) and
+  Phase 2A `_dirtyRange` wouldn't see them (paint cache may stale).
+  Both now go through `spliceElementList`, picking up the batched
+  spread, mutation event, dirty-range update, and delta-history
+  recording for free.
+* Tests: two new cases in
+  [`tests/core/draw/TypingBenchmark.test.ts`](tests/core/draw/TypingBenchmark.test.ts):
+  * **10× successive long-paragraph paste** asserts that
+    `last/first < 4×` (cumulative-quadratic regression detector) and
+    that total wall-clock under jsdom is < 6 s. With the fix it
+    completes in ~290 ms.
+  * **Enter / Backspace at end of 800-row PAGING doc** asserts both
+    medians stay under 80 ms in jsdom; observed: Enter 1.27 ms
+    median, Backspace 0.89 ms median — confirms the library itself
+    is not the source of any remaining keypress lag (any perceived
+    delay must be from app-side handlers like auto-save / JSON
+    serialization / contentChange listeners).
 
 ### Phase 2 — Incremental layout (1-2 weeks)
 
