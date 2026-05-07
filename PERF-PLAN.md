@@ -334,6 +334,18 @@ Landed (Phase **2A**):
   cache so off-screen lazy pages and clean pages skip their
   `_drawPage` call. Cache is invalidated by `setEditorData` /
   `invalidatePaintCache()` / `destroy()`.
+* **Zone-aware layout skip** (follow-up after Phase 2A landed). When
+  the user is editing in the header or footer zone and the main
+  element list has not been mutated, `render()` now skips the entire
+  main layout pipeline (`computeRowList(main)`, `_computePageList()`,
+  `position.computePositionList()`, `area.compute()`,
+  `search/control/graffiti.compute()`). `_headerDirty` / `_footerDirty`
+  flags are auto-set by `spliceElementList` for the matching scope so
+  `header.compute()` / `footer.compute()` themselves only run when the
+  zone is active or the corresponding scope has changed. This is the
+  fix for the case where typing in a 4-page document's header would
+  re-flow all main content per keystroke. Tests live in
+  `tests/core/draw/ZoneSkipLayout.test.ts`.
 * New `IEditorOption` field is **not** required — the optimization is
   on by default and degrades cleanly to the original behavior when
   no signal is available.

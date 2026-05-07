@@ -143,6 +143,11 @@ export class Draw {
   // 自动维护或外部通过 markDirty() 显式标记；render() 据此挑选 dirty page，
   // 只重绘被影响的 canvas（§2.4）。提示性而非权威——为 null 时按现有 O(N) 路径处理。
   private _dirtyRange: { start: number; end: number } | null
+  // 页眉 / 页脚 dirty 标志：仅当对应 elementList 通过 spliceElementList 改动时置 true。
+  // render() 据此跳过未变更分区的布局 / 计算，尤其重要——典型场景是用户在 header 中
+  // 输入：避免为了一次按键而把整篇 N-page 主文档重新布局（PERF-PLAN §2 follow-up）。
+  private _headerDirty: boolean
+  private _footerDirty: boolean
   // 上一次渲染各 page 的 row 数，用于检测下游 pagination 是否漂移
   private _prevPageRowCounts: number[] | null
   // 已绘制（且未被标脏）的 page 索引集合：lazy 渲染时这些页不再重复绘制
@@ -239,6 +244,8 @@ export class Draw {
     this._typingBatchTimer = null
     this._typingBatchLastCurIndex = undefined
     this._dirtyRange = null
+    this._headerDirty = false
+    this._footerDirty = false
     this._prevPageRowCounts = null
     this._drawnPages = new Set()
     this.pageNo = 0
@@ -983,10 +990,14 @@ export class Draw {
     items?: IElement[],
     options?: ISpliceElementListOption
   ) {
-    // 仅对主元素列表自动维护 dirty 提示；header/footer/td.value 暂走全量路径
+    // 主列表 / 页眉 / 页脚分别维护 dirty 标志：render() 据此精确决定布局范围
     if (elementList === this.elementList) {
       const insertedLen = items?.length ?? 0
       this.markDirty(start, start + Math.max(deleteCount, insertedLen))
+    } else if (elementList === this.header.getElementList()) {
+      this._headerDirty = true
+    } else if (elementList === this.footer.getElementList()) {
+      this._footerDirty = true
     }
     const { isIgnoreDeletedRule = false } = options || {}
     const { group, modeRule } = this.options
@@ -1479,6 +1490,8 @@ export class Draw {
     this._prevPageRowCounts = null
     this._drawnPages.clear()
     this._dirtyRange = null
+    this._headerDirty = false
+    this._footerDirty = false
   }
 
   private _wrapContainer(rootContainer: HTMLElement): HTMLDivElement {
@@ -3367,55 +3380,79 @@ export class Draw {
     const oldPageSize = this.pageRowList.length
     // 计算文档信息
     if (isCompute) {
-      // 清空浮动元素位置信息
-      this.position.setFloatPositionList([])
+      // 主元素列表是否需要重新布局：仅当当前编辑区域为 MAIN 或主列表 dirty
+      // 已经被显式标记时才走全量。换言之，在 4-page 主文档场景下，用户在
+      // 页眉/页脚里输入不会触发主体的 N 元素 computeRowList / computePositionList /
+      // area.compute() —— 这些都依赖主元素，主元素未改时它们的结果是稳定的。
+      const activeZone = this.zone.getZone()
+      const isMainZone = activeZone === EditorZone.MAIN
+      const mainNeedsCompute =
+        isMainZone || this._dirtyRange !== null || this._prevPageRowCounts === null
+      // 清空浮动元素位置信息（仅当本帧确实会重新布局主体时才清空，否则保留上次缓存）
+      if (mainNeedsCompute) {
+        this.position.setFloatPositionList([])
+      }
       if (isPagingMode) {
-        // 页眉信息
-        if (!header.disabled) {
+        // 页眉信息：当前在页眉区或页眉 dirty 或主体重新布局时计算
+        if (
+          !header.disabled &&
+          (this._headerDirty ||
+            activeZone === EditorZone.HEADER ||
+            mainNeedsCompute)
+        ) {
           this.header.compute()
+          this._headerDirty = false
         }
-        // 页脚信息
-        if (!footer.disabled) {
+        // 页脚信息：同上
+        if (
+          !footer.disabled &&
+          (this._footerDirty ||
+            activeZone === EditorZone.FOOTER ||
+            mainNeedsCompute)
+        ) {
           this.footer.compute()
+          this._footerDirty = false
         }
       }
-      // 行信息
-      const margins = this.getMargins()
-      const pageHeight = this.getHeight()
-      const extraHeight = this.header.getExtraHeight()
-      const mainOuterHeight = this.getMainOuterHeight()
-      // 行布局起点为第一列的左上角；单列时与页面左上一致
-      const startX = this.getColumnStartX(0)
-      const startY = margins[0] + extraHeight
-      const surroundElementList = pickSurroundElementList(this.elementList)
-      this.rowList = this.computeRowList({
-        startX,
-        startY,
-        pageHeight,
-        mainOuterHeight,
-        isPagingMode,
-        innerWidth,
-        surroundElementList,
-        elementList: this.elementList
-      })
-      // 页面信息
-      this.pageRowList = this._computePageList()
-      // 位置信息
-      this.position.computePositionList()
-      // 区域信息
-      this.area.compute()
-      if (!this.isPrintMode()) {
-        // 搜索信息
-        const searchKeyword = this.search.getSearchKeyword()
-        if (searchKeyword) {
-          this.search.compute(searchKeyword)
+      if (mainNeedsCompute) {
+        // 行信息
+        const margins = this.getMargins()
+        const pageHeight = this.getHeight()
+        const extraHeight = this.header.getExtraHeight()
+        const mainOuterHeight = this.getMainOuterHeight()
+        // 行布局起点为第一列的左上角；单列时与页面左上一致
+        const startX = this.getColumnStartX(0)
+        const startY = margins[0] + extraHeight
+        const surroundElementList = pickSurroundElementList(this.elementList)
+        this.rowList = this.computeRowList({
+          startX,
+          startY,
+          pageHeight,
+          mainOuterHeight,
+          isPagingMode,
+          innerWidth,
+          surroundElementList,
+          elementList: this.elementList
+        })
+        // 页面信息
+        this.pageRowList = this._computePageList()
+        // 位置信息
+        this.position.computePositionList()
+        // 区域信息
+        this.area.compute()
+        if (!this.isPrintMode()) {
+          // 搜索信息
+          const searchKeyword = this.search.getSearchKeyword()
+          if (searchKeyword) {
+            this.search.compute(searchKeyword)
+          }
+          // 控件关键词高亮
+          this.control.computeHighlightList()
         }
-        // 控件关键词高亮
-        this.control.computeHighlightList()
-      }
-      // 涂鸦信息
-      if (this.isGraffitiMode()) {
-        this.graffiti.compute()
+        // 涂鸦信息
+        if (this.isGraffitiMode()) {
+          this.graffiti.compute()
+        }
       }
     }
     // 清除光标等副作用
