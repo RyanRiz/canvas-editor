@@ -356,43 +356,85 @@ Landed (Phase **2A**):
   branches in continuous mode (lazy paging skipped because jsdom
   doesn't fire IntersectionObserver).
 
-Deferred (Phase **2B**, future work):
+Landed (Phase **2B** — incremental layout):
 
-* §2.2 **Incremental `computeRowList`**. Requires capturing the full
-  ambient layout state at every row boundary (cumulative `pageHeight`,
-  `pageNo`, current `pageColumns`, `listId/listIndex`, `controlRealWidth`,
-  surround-element accumulator, etc.) so the loop can resume from any
-  row. The 790-line function at
-  [Draw.ts:1483-2274](src/editor/core/draw/Draw.ts#L1483-L2274) needs
-  to be refactored into a `_layoutSegment` body callable mid-list.
-  This is the bulk of the "1-2 week" estimate and is the biggest
-  remaining typing-perf lever for very long documents (currently per
-  keystroke we still walk the entire main element list once per
-  frame, even though we now paint only the dirty page).
-* §2.3 **Incremental `computePositionList`**. Lower priority than 2.2
-  — `computePositionList` is mostly object construction with no
-  `measureText`, so the constant is small. Enabling this is mostly
-  bookkeeping once 2.2 is in place (just truncate `positionList` to
-  the prefix-up-to-stable-row and walk forward).
-* §2.5 **Table-cell-local reflow**. The recursive `computeRowList`
-  call at [Draw.ts:1692](src/editor/core/draw/Draw.ts#L1692) re-flows
-  every cell on every render. When the dirty range lives entirely
-  inside one cell's `td.value`, only that cell needs to recompute.
-  Requires per-table-cell dirty tracking (a `td._dirty` flag set when
-  someone mutates `td.value`).
-* **Validation harness**. A dev-mode `__perfValidateLayout` flag that
-  runs both the full and the incremental paths, diffs the resulting
-  `rowList` / `pageRowList` / `positionList`, and throws on mismatch.
-  Essential before flipping incremental layout on by default. Not
-  needed yet because 2A doesn't change layout output, only paint
-  scope.
+* §2.2 **Incremental `computeRowList`**. The 790-line for-loop now
+  carries a *checkpoint sink* that records the loop-local state
+  (`x / y / pageNo / listId / listIndex / controlRealWidth /
+  currentPageColumns / surroundElementList`) at every row boundary.
+  A new `IComputeRowListPayload.resumeFrom` (typed in
+  [`interface/Draw.ts`](src/editor/interface/Draw.ts) as
+  `IComputeRowListResumePayload`) lets the function rebuild only the
+  tail of `rowList`: it seeds the array with the unchanged prefix,
+  restores the saved loop locals, and re-enters the loop at the row
+  containing the dirty range. The seed-row checkpoint is captured
+  before iteration zero; row checkpoints land at both row-push sites
+  (page-column branch and wrap branch). Memory cost: one shallow
+  object per row (~6 numbers + an empty `[]` when no surrounds), so
+  ~32 KB for a 1 000-row document.
+* §2.5 **Per-table-cell dirty caching**. Each `td.value` now picks up
+  a hidden `_owningTd` back-reference inside the table loop in
+  `computeRowList`. `spliceElementList` checks for this back-reference
+  on any non-main / non-header / non-footer mutation and flips
+  `td._dirty = true` on the owning cell. The next time
+  `computeRowList` reaches that cell it skips the recursive call when
+  `(td.rowList && !td._dirty && cacheKey matches)` and reuses
+  `td.rowList` verbatim. The cache key tracks
+  `(innerWidth, scale, isPagingMode)` so a paper-size or scale change
+  forces recomputation. Concrete win: in a doc whose main list
+  changes but tables don't, every cell turns into one `Object.assign`
+  + `td.rowList` reference reuse instead of a full inner
+  `computeRowList`.
+* **§2.2 wiring in `render()`**. A new `_tryBuildResumeFrom()` decides
+  per-frame whether to take the incremental path. Safety conditions
+  (all must hold or we fall back to full): a non-null `_dirtyRange`,
+  a populated `_mainRowCheckpoints`, `_mainLayoutSig` matches current
+  `(scale, innerWidth, isPagingMode, defaultSize, defaultRowMargin,
+  defaultTabWidth)`, and `dirtyStart` is at or after row 1 (so we
+  have at least one row to keep). `_invalidatePaintCache()` clears
+  both `_mainRowCheckpoints` and `_mainLayoutSig`, so any path that
+  invalidates the page-paint cache also forces a full recompute next
+  frame.
+* **Validation harness**. The hidden `__perfValidateLayout` editor
+  option, when truthy, makes `render()` run the full
+  `computeRowList` again on the same input after the incremental
+  path completes and `console.error`s on any per-row mismatch
+  (`startIndex / rowIndex / elementList.length / width / height /
+  isPageBreak / isColumnBreak`). Off in production; one of the new
+  tests asserts that turning it on for a typical edit produces no
+  mismatches. The harness is what makes the §2.2 refactor reviewable
+  — Phase 2B's risk is mismatched layout output, and the harness
+  surfaces a mismatch on the first render that would have produced
+  one.
+* Tests:
+  [`tests/core/draw/IncrementalLayout.test.ts`](tests/core/draw/IncrementalLayout.test.ts)
+  (9 cases) covers checkpoint capture / sink alignment, resume-row
+  selection, prefix-row reuse by reference, the `R = 0` early-return
+  fallback, `setEditorData` invalidation, byte-equal output with the
+  validation harness on, header-zone safety (does not over-invalidate
+  main checkpoints), and the §2.5 table-cell cache hit-count
+  reduction (`5 → ≤3` recursive `computeRowList` calls on a 2×2
+  table after main-only edit).
 
-**Why 2B is deferred from this implementation pass**: the risk of an
-incremental layout that misses one cross-row invariant (and silently
-produces wrong rendering) outweighs the perf benefit at typical
-document sizes — Phase 1's rAF coalescing already removes the lag the
-user reported. 2B should land alongside the validation harness and a
-multi-page benchmark fixture, in a dedicated PR with a soak period.
+Deferred (Phase **2B follow-ups**, lower-priority):
+
+* §2.3 **Incremental `computePositionList`**. Skipped this pass
+  because `computePositionList` is mostly object construction (~few
+  ms even for a 2 000-element doc) and the §2.2 win covers the
+  dominant cost. The data plumbing (rowList prefix length, the page +
+  page-row split point for the dirty row) is already available on
+  `Draw`, so this is a straightforward follow-up: truncate
+  `Position.positionList` to the index of the first dirty element,
+  remove `floatPositionList` entries with `tdValueIndex >=
+  dirtyStart`, and resume `computePageRowPosition` from the matching
+  page+row.
+* **Multi-page incremental benchmark fixture**. The validation
+  harness proves correctness; a wall-clock benchmark over a fixed
+  N-page document (say 50) on CI would close the loop on the perf
+  target ("typing in page 50 of 100 has same latency as page 1").
+* **Incremental `_computePageList`**. Currently rebuilt fresh every
+  render. Cheap for single-column (just walks rowList accumulating
+  page heights) so unlikely to be on the hot path; deferred.
 
 ### Phase 3 — Architectural cleanups (optional, 2-3 weeks)
 

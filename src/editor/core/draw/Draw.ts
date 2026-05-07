@@ -11,6 +11,7 @@ import {
   IGetImageOption,
   IGetOriginValueOption,
   IGetValueOption,
+  ILayoutCheckpoint,
   IPainterOption
 } from '../../interface/Draw'
 import { HistoryScope } from '../../interface/History'
@@ -154,6 +155,22 @@ export class Draw {
   private _prevPageRowCounts: number[] | null
   // 已绘制（且未被标脏）的 page 索引集合：lazy 渲染时这些页不再重复绘制
   private _drawnPages: Set<number>
+  // PERF-PLAN §2.2 / Phase 2B：主元素列表 computeRowList 的行边界 checkpoint。
+  // 与 this.rowList 平行索引——_mainRowCheckpoints[R] 描述「即将进入行 R 的第一个
+  // 元素的迭代」时的循环局部状态。仅当主体进行 full / 增量布局后才有值；
+  // 任何能让前缀行内容失效的事件（setEditorData / 跨字号字距的设置变更）必须
+  // 通过 _invalidatePaintCache() 一并清空。
+  private _mainRowCheckpoints: ILayoutCheckpoint[]
+  // 上一帧主布局的「输入签名」。option.scale / innerWidth / pagingMode 等会改变
+  // 任意 row 的几何形状的字段都纳入；不一致时禁用增量布局，回退到全量。
+  private _mainLayoutSig: {
+    scale: number
+    innerWidth: number
+    isPagingMode: boolean
+    defaultSize: number
+    defaultRowMargin: number
+    defaultTabWidth: number
+  } | null
   // PERF-PLAN §3.1：Mutator 边界事件订阅者。spliceElementList 完成后通知。
   private _mutationListeners: Set<MutationListener>
   private pageNo: number
@@ -252,6 +269,8 @@ export class Draw {
     this._footerDirty = false
     this._prevPageRowCounts = null
     this._drawnPages = new Set()
+    this._mainRowCheckpoints = []
+    this._mainLayoutSig = null
     this._mutationListeners = new Set()
     this.pageNo = 0
     this.renderCount = 0
@@ -1036,6 +1055,18 @@ export class Draw {
       this._headerDirty = true
     } else if (elementList === this.footer.getElementList()) {
       this._footerDirty = true
+    } else {
+      // PERF-PLAN §2.5 / Phase 2B：如果该 elementList 是某个 td.value（由上一次
+      // computeRowList 在表格分支里挂上 _owningTd 反向引用），把那个 td 标 dirty。
+      // 主体下次 computeRowList 抵达该单元格时会按 cacheKey + _dirty 决定是否
+      // 复用 td.rowList。任何主体外的 elementList（自由文本、控件值等）都没有
+      // _owningTd，本分支静默跳过。
+      const owningTd = (
+        elementList as unknown as { _owningTd?: { _dirty?: boolean } }
+      )._owningTd
+      if (owningTd) {
+        owningTd._dirty = true
+      }
     }
     // 事件订阅前先快照「将被删除」切片（splice 后无法访问）。
     const removedSnapshot =
@@ -1550,6 +1581,149 @@ export class Draw {
     this._dirtyRange = null
     this._headerDirty = false
     this._footerDirty = false
+    // Phase 2B：增量布局所依赖的 row checkpoint 也一并失效，避免 setEditorData
+    // 等大批量替换文档后还沿用上一份文档的恢复点（PERF-PLAN §2.2）。
+    this._mainRowCheckpoints = []
+    this._mainLayoutSig = null
+  }
+
+  /**
+   * PERF-PLAN §2.2 / Phase 2B：构建本帧的「布局输入签名」。
+   *
+   * 任何会让任意一行的几何形状（width / height / x / y / page break 时机）改变的
+   * 选项必须列入。签名变了 → 上一帧的 _mainRowCheckpoints 不再可信，必须全量。
+   */
+  private _buildLayoutSig(extra: { isPagingMode: boolean; innerWidth: number }) {
+    const { scale, defaultSize, defaultRowMargin, defaultTabWidth } =
+      this.options
+    return {
+      scale,
+      innerWidth: extra.innerWidth,
+      isPagingMode: extra.isPagingMode,
+      defaultSize,
+      defaultRowMargin,
+      defaultTabWidth
+    }
+  }
+
+  private _isLayoutSigCompatible(extra: {
+    isPagingMode: boolean
+    innerWidth: number
+  }): boolean {
+    if (!this._mainLayoutSig) return false
+    const cur = this._buildLayoutSig(extra)
+    const old = this._mainLayoutSig
+    return (
+      cur.scale === old.scale &&
+      cur.innerWidth === old.innerWidth &&
+      cur.isPagingMode === old.isPagingMode &&
+      cur.defaultSize === old.defaultSize &&
+      cur.defaultRowMargin === old.defaultRowMargin &&
+      cur.defaultTabWidth === old.defaultTabWidth
+    )
+  }
+
+  /**
+   * PERF-PLAN §2.2 / Phase 2B：根据 _dirtyRange 找出 dirty 起点所在的行，
+   * 并构建一个 IComputeRowListResumePayload 指示 computeRowList 从哪里继续。
+   *
+   * 返回 null 表示「不要走增量分支」——调用方应回落到全量布局。安全条件：
+   *  1) 上一帧已经至少跑过一次主体布局（_mainRowCheckpoints / rowList 非空）。
+   *  2) _dirtyRange 已被显式标记。
+   *  3) 布局签名（scale / innerWidth / pagingMode / defaultSize / ...）与上一帧一致。
+   *  4) dirty 起点之前至少存在一个完整的、未受影响的行可以保留——dirty 落在
+   *     第一行时（R = 0）回退到全量；前缀长度 0 没有省下任何工作。
+   *  5) 所有 prefix 行的元素引用必须仍可信（即没有 setEditorData / 跨文档替换）。
+   *     由 _invalidatePaintCache() 在那些路径上同步失效 _mainRowCheckpoints 来保证。
+   */
+  private _tryBuildResumeFrom(extra: {
+    isPagingMode: boolean
+    innerWidth: number
+  }): {
+    startElementIndex: number
+    prefixRowList: IRow[]
+    checkpoint: ILayoutCheckpoint
+  } | null {
+    if (!this._dirtyRange) return null
+    if (!this._mainRowCheckpoints.length) return null
+    if (this.rowList.length <= 1) return null
+    if (this._mainRowCheckpoints.length !== this.rowList.length) return null
+    if (!this._isLayoutSigCompatible(extra)) return null
+    const dirtyStart = this._dirtyRange.start
+    // 找出第一个 startIndex > dirtyStart 的行，则它的前一行就是「dirty 行」。
+    // dirty 行（含起点）必须重排，dirty 行之前的行可以保留。
+    let dirtyRowIndex = this.rowList.length - 1
+    for (let i = 0; i < this.rowList.length; i++) {
+      if (this.rowList[i].startIndex > dirtyStart) {
+        dirtyRowIndex = i - 1
+        break
+      }
+    }
+    if (dirtyRowIndex <= 0) return null
+    const prefixRowList = this.rowList.slice(0, dirtyRowIndex)
+    const checkpoint = this._mainRowCheckpoints[dirtyRowIndex]
+    if (!checkpoint) return null
+    // dirty 行的第一个元素索引：从该行开始重排
+    const startElementIndex = this.rowList[dirtyRowIndex].startIndex
+    return {
+      startElementIndex,
+      prefixRowList,
+      checkpoint
+    }
+  }
+
+  /**
+   * PERF-PLAN §2.2 / Phase 2B：是否启用增量布局校验桩。
+   *
+   * 通过 editorOption 上的 `__perfValidateLayout` 隐藏字段开启——非生产路径，
+   * 仅用于本地 / CI 回归确认增量分支与全量分支输出字节相等。开启时每帧多跑
+   * 一次完整布局，性能直接腰斩，请勿用于真实场景。
+   */
+  private _isPerfValidateLayoutEnabled(): boolean {
+    const sentinel = (this.options as unknown as Record<string, unknown>)
+      .__perfValidateLayout
+    return sentinel === true
+  }
+
+  /**
+   * PERF-PLAN §2.2 / Phase 2B：把当前 this.rowList（增量结果）与一遍全量
+   * computeRowList 的输出按行 diff，不一致时 `console.error`。仅在
+   * _isPerfValidateLayoutEnabled() 为真时调用。
+   */
+  private _validateIncrementalLayout(payload: IComputeRowListPayload) {
+    // 全量重新跑一遍——独立 surroundElementList / 不写 sink，避免污染主路径
+    const fullRowList = this.computeRowList({
+      ...payload,
+      surroundElementList: payload.surroundElementList?.slice() ?? [],
+      checkpointSink: undefined,
+      resumeFrom: undefined
+    })
+    const inc = this.rowList
+    if (fullRowList.length !== inc.length) {
+      console.error(
+        `[Phase2B/validate] row count mismatch: full=${fullRowList.length} incremental=${inc.length}`
+      )
+      return
+    }
+    for (let r = 0; r < fullRowList.length; r++) {
+      const a = fullRowList[r]
+      const b = inc[r]
+      if (
+        a.startIndex !== b.startIndex ||
+        a.elementList.length !== b.elementList.length ||
+        Math.abs(a.width - b.width) > 0.01 ||
+        Math.abs(a.height - b.height) > 0.01 ||
+        a.rowIndex !== b.rowIndex ||
+        !!a.isPageBreak !== !!b.isPageBreak ||
+        !!a.isColumnBreak !== !!b.isColumnBreak
+      ) {
+        console.error(
+          `[Phase2B/validate] row ${r} mismatch`,
+          { full: a, incremental: b }
+        )
+        return
+      }
+    }
   }
 
   private _wrapContainer(rootContainer: HTMLElement): HTMLDivElement {
@@ -1649,8 +1823,13 @@ export class Draw {
       startY = 0,
       pageHeight = 0,
       mainOuterHeight = 0,
-      surroundElementList = []
+      checkpointSink,
+      resumeFrom
     } = payload
+    // surroundElementList 在循环里会就地裁剪（deleteSurroundElementList），
+    // 因此在 resumeFrom 路径下不能继续沿用调用方传入的引用——
+    // 必须从 checkpoint 快照恢复一份独立拷贝。
+    let surroundElementList = payload.surroundElementList ?? []
     const {
       defaultSize,
       scale,
@@ -1662,35 +1841,109 @@ export class Draw {
     const ctx = this._getMeasureCtx()
     // 计算列表偏移宽度
     const listStyleMap = this.listParticle.computeListStyle(ctx, elementList)
-    const rowList: IRow[] = []
-    let currentPageColumns = this.normalizePageColumns(
-      isFromTable
-        ? { columnCount: 1, columnGap: 0 }
-        : elementList[0]?.pageColumns
-    )
-    if (elementList.length) {
-      rowList.push({
-        width: 0,
-        height: 0,
-        ascent: 0,
-        elementList: [],
-        startIndex: 0,
-        rowIndex: 0,
-        rowFlex: elementList?.[0]?.rowFlex || elementList?.[1]?.rowFlex,
-        pageColumns: currentPageColumns,
-        innerWidth: this.getColumnInnerWidth(currentPageColumns)
-      })
-    }
-    // 起始位置及页码计算
-    let x = startX
-    let y = startY
-    let pageNo = 0
-    // 列表位置
+    let rowList: IRow[]
+    let currentPageColumns: Required<IPageColumns>
+    let x: number
+    let y: number
+    let pageNo: number
     let listId: string | undefined
-    let listIndex = 0
-    // 控件最小宽度
-    let controlRealWidth = 0
-    for (let i = 0; i < elementList.length; i++) {
+    let listIndex: number
+    let controlRealWidth: number
+    let i: number
+
+    if (resumeFrom) {
+      // PERF-PLAN §2.2 / Phase 2B：从已捕获的 checkpoint 恢复布局。
+      // 跳过 prefix 元素的 measureText / 包装判定 / surround 计算等 O(N) 工作，
+      // 直接在 dirty range 起点之前的「最近一行边界」继续。
+      rowList = resumeFrom.prefixRowList.slice()
+      const ckpt = resumeFrom.checkpoint
+      x = ckpt.x
+      y = ckpt.y
+      pageNo = ckpt.pageNo
+      listId = ckpt.listId
+      listIndex = ckpt.listIndex
+      controlRealWidth = ckpt.controlRealWidth
+      currentPageColumns = ckpt.currentPageColumns
+      // surround 列表使用 checkpoint 快照的副本——后续循环里 deleteSurroundElementList
+      // 会就地裁剪，不能直接绑回原数组。
+      surroundElementList = ckpt.surroundElementList.slice()
+      i = resumeFrom.startElementIndex
+      if (checkpointSink) {
+        // checkpointSink 与 rowList 平行索引——保留 prefix 部分，截断尾部，
+        // 后续循环按 push 时机继续追加。
+        if (checkpointSink.length > rowList.length) {
+          checkpointSink.length = rowList.length
+        }
+      }
+    } else {
+      rowList = []
+      currentPageColumns = this.normalizePageColumns(
+        isFromTable
+          ? { columnCount: 1, columnGap: 0 }
+          : elementList[0]?.pageColumns
+      )
+      if (elementList.length) {
+        rowList.push({
+          width: 0,
+          height: 0,
+          ascent: 0,
+          elementList: [],
+          startIndex: 0,
+          rowIndex: 0,
+          rowFlex: elementList?.[0]?.rowFlex || elementList?.[1]?.rowFlex,
+          pageColumns: currentPageColumns,
+          innerWidth: this.getColumnInnerWidth(currentPageColumns)
+        })
+      }
+      // 起始位置及页码计算
+      x = startX
+      y = startY
+      pageNo = 0
+      // 列表位置
+      listId = undefined
+      listIndex = 0
+      // 控件最小宽度
+      controlRealWidth = 0
+      i = 0
+      // 种子行 checkpoint：等价于「未进入 i=0 之前」的循环局部状态。
+      // 注意：必须在 `i = 0` / `pageNo = 0` 等本地变量初始化之后捕获，确保数值一致。
+      if (checkpointSink) {
+        checkpointSink.length = 0
+        if (rowList.length) {
+          checkpointSink.push({
+            x,
+            y,
+            pageNo,
+            listId,
+            listIndex,
+            controlRealWidth,
+            currentPageColumns,
+            surroundElementList: surroundElementList.length
+              ? surroundElementList.slice()
+              : []
+          })
+        }
+      }
+    }
+    for (; i < elementList.length; i++) {
+      // PERF-PLAN §2.2 / Phase 2B：在循环顶部（即「iter (i-1) END / iter i TOP」）
+      // 捕获一份 checkpoint 候选；若本次迭代实际创建了新行（page-column 分支或
+      // wrap 分支），就把它写入 sink；否则丢弃。仅当调用方传入 checkpointSink
+      // 时才付出该成本。
+      const iterStartCkpt: ILayoutCheckpoint | null = checkpointSink
+        ? {
+            x,
+            y,
+            pageNo,
+            listId,
+            listIndex,
+            controlRealWidth,
+            currentPageColumns,
+            surroundElementList: surroundElementList.length
+              ? surroundElementList.slice()
+              : []
+          }
+        : null
       let curRow: IRow = rowList[rowList.length - 1]
       const element = elementList[i]
       if (!isFromTable && element.pageColumns) {
@@ -1710,6 +1963,10 @@ export class Draw {
               pageColumns: currentPageColumns,
               innerWidth: this.getColumnInnerWidth(currentPageColumns)
             })
+            // 新行 checkpoint 落盘：与 rowList 长度保持平行
+            if (checkpointSink && iterStartCkpt) {
+              checkpointSink.push(iterStartCkpt)
+            }
             curRow = rowList[rowList.length - 1]
             x = startX
             y += rowList[rowList.length - 2].height
@@ -1847,14 +2104,33 @@ export class Draw {
           const tr = trList[t]
           for (let d = 0; d < tr.tdList.length; d++) {
             const td = tr.tdList[d]
-            const rowList = this.computeRowList({
-              innerWidth: (td.width! - tdPaddingWidth) * scale,
-              elementList: td.value,
-              isFromTable: true,
-              isPagingMode
-            })
+            // PERF-PLAN §2.5 / Phase 2B：在 Mutator 边界（spliceElementList）能找到
+            // 「这条 elementList 属于哪个 td」的能力靠 td.value 上的隐藏 _owningTd
+            // 反向引用——这里保证每次 render 都重新设置一次（td 引用可能在表格
+            // 重排时变化，因此 writable + 重写）。
+            ;(td.value as unknown as { _owningTd: typeof td })._owningTd = td
+            const tdInnerWidth = (td.width! - tdPaddingWidth) * scale
+            // 缓存命中条件：td 未被 dirty 标记，且缓存键完全一致。
+            const canReuseCell =
+              !!td.rowList &&
+              !td._dirty &&
+              td._cacheInnerWidth === tdInnerWidth &&
+              td._cacheScale === scale &&
+              td._cacheIsPagingMode === isPagingMode
+            const rowList = canReuseCell
+              ? td.rowList!
+              : this.computeRowList({
+                  innerWidth: tdInnerWidth,
+                  elementList: td.value,
+                  isFromTable: true,
+                  isPagingMode
+                })
             const rowHeight = rowList.reduce((pre, cur) => pre + cur.height, 0)
             td.rowList = rowList
+            td._dirty = false
+            td._cacheInnerWidth = tdInnerWidth
+            td._cacheScale = scale
+            td._cacheIsPagingMode = isPagingMode
             // 移除缩放导致的行高变化-渲染时会进行缩放调整
             const curTdHeight = rowHeight / scale + tdPaddingHeight
             // 内容高度大于当前单元格高度需增加
@@ -2324,6 +2600,12 @@ export class Draw {
             ? element.area.top * scale
             : 0
         rowList.push(row)
+        // PERF-PLAN §2.2 / Phase 2B：wrap 分支创建新行——同步落盘 checkpoint。
+        // iterStartCkpt 描述「即将进入元素 i 的迭代」之前的循环局部状态，
+        // 也就是「重新执行 iter i 来重建该 wrap 行」所需的全部 carry 信息。
+        if (checkpointSink && iterStartCkpt) {
+          checkpointSink.push(iterStartCkpt)
+        }
       } else {
         curRow.width += metrics.width
         // 减小块元素前第一行空行行高
@@ -3482,6 +3764,13 @@ export class Draw {
         const startX = this.getColumnStartX(0)
         const startY = margins[0] + extraHeight
         const surroundElementList = pickSurroundElementList(this.elementList)
+        // PERF-PLAN §2.2 / Phase 2B：在「上一帧 row checkpoint 仍然有效 + 已有 dirty
+        // 区间提示 + 布局签名未变 + 至少存在可保留的前缀行」时启用增量布局，
+        // 跳过 dirty 起点之前的 measureText / 包装判定 / surround 计算等 O(N) 工作。
+        const resumeFrom = this._tryBuildResumeFrom({
+          isPagingMode,
+          innerWidth
+        })
         this.rowList = this.computeRowList({
           startX,
           startY,
@@ -3490,8 +3779,27 @@ export class Draw {
           isPagingMode,
           innerWidth,
           surroundElementList,
-          elementList: this.elementList
+          elementList: this.elementList,
+          checkpointSink: this._mainRowCheckpoints,
+          resumeFrom: resumeFrom ?? undefined
         })
+        // 验证桩（PERF-PLAN §2.2 「validation harness」）：若启用，则同时跑一遍
+        // 全量布局并按 IRow 关键字段 diff，发现增量分支结果与全量不一致时立刻
+        // 上报错误。仅供 dev / 回归验证使用，正常生产路径请保持关闭。
+        if (resumeFrom && this._isPerfValidateLayoutEnabled()) {
+          this._validateIncrementalLayout({
+            startX,
+            startY,
+            pageHeight,
+            mainOuterHeight,
+            isPagingMode,
+            innerWidth,
+            surroundElementList: pickSurroundElementList(this.elementList),
+            elementList: this.elementList
+          })
+        }
+        // 落盘本次布局签名，供下一帧增量决策使用
+        this._mainLayoutSig = this._buildLayoutSig({ isPagingMode, innerWidth })
         // 页面信息
         this.pageRowList = this._computePageList()
         // 位置信息

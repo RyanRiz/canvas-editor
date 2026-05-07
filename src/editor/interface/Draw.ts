@@ -1,6 +1,7 @@
 import { ImageDisplay } from '../dataset/enum/Common'
 import { EditorMode, EditorZone } from '../dataset/enum/Editor'
 import { IElement, IElementPosition } from './Element'
+import { IPageColumns } from './PageColumns'
 import { IRow } from './Row'
 
 /**
@@ -123,4 +124,53 @@ export interface IComputeRowListPayload {
   pageHeight?: number
   mainOuterHeight?: number
   surroundElementList?: IElement[]
+  // PERF-PLAN §2.2 — Phase 2B: 增量布局
+  // checkpointSink：当提供时，computeRowList 会在每个行边界写入一个 checkpoint，
+  // 与 rowList 平行索引（checkpointSink[R] 描述「重新进入行 R 之前」的循环局部状态）。
+  // resumeFrom：从已捕获的 checkpoint 恢复，跳过 prefix 的元素遍历。两者通常配对使用：
+  // 仅在确认 dirty range 起点之前的所有行都未受影响时才安全。
+  checkpointSink?: ILayoutCheckpoint[]
+  resumeFrom?: IComputeRowListResumePayload
+}
+
+/**
+ * PERF-PLAN §2.2 / Phase 2B: 行边界处的循环局部状态快照。
+ *
+ * computeRowList 顶层 for-loop 在元素之间维护若干 carry 状态：
+ *   x / y / pageNo / listId / listIndex / controlRealWidth / currentPageColumns /
+ *   surroundElementList。
+ *
+ * 一个 ILayoutCheckpoint 描述「即将进入第 i 次迭代」时的这些值——也就是说，
+ * 给定 rowList 的前缀和 checkpoint，computeRowList 可以从对应元素继续布局，
+ * 并产出与「从 0 开始重新布局」字节相等的 IRow[]（前提：前缀元素未被改动）。
+ *
+ * surroundElementList 必须是浅拷贝快照，因为原始数组在循环中会被
+ * deleteSurroundElementList 就地裁剪——直接引用会被后续迭代污染。
+ */
+export interface ILayoutCheckpoint {
+  x: number
+  y: number
+  pageNo: number
+  listId: string | undefined
+  listIndex: number
+  controlRealWidth: number
+  currentPageColumns: Required<IPageColumns>
+  // 浮动元素表的浅快照——在恢复时由 computeRowList 复制回工作数组。
+  surroundElementList: IElement[]
+}
+
+/**
+ * PERF-PLAN §2.2 / Phase 2B: 增量布局恢复点。
+ *
+ * - prefixRowList：保留的、未受 dirty range 影响的行（rowList[0..rowIndex-1]）。
+ *   computeRowList 会以此为起点继续追加。前缀行内的元素引用应当保持不变，
+ *   以便复用 element.metrics / element.style / element.left 等已计算字段。
+ * - startElementIndex：恢复时 for-loop 的起始元素索引——一般等同于
+ *   originalRowList[rowIndex].startIndex（即「我们丢弃的第一行」的起始元素）。
+ * - checkpoint：与 rowIndex 对应的 ILayoutCheckpoint。
+ */
+export interface IComputeRowListResumePayload {
+  startElementIndex: number
+  prefixRowList: IRow[]
+  checkpoint: ILayoutCheckpoint
 }
