@@ -13,6 +13,7 @@ import {
   LocationPosition
 } from './dataset/enum/Common'
 import { ElementType } from './dataset/enum/Element'
+import { SectionBreakType } from './dataset/enum/SectionBreak'
 import { formatElementList } from './utils/element'
 import { Register } from './core/register/Register'
 import { ContextMenu } from './core/contextmenu/ContextMenu'
@@ -77,6 +78,7 @@ import { mergeOption } from './utils/option'
 import { LineNumberType } from './dataset/enum/LineNumber'
 import { AreaMode } from './dataset/enum/Area'
 import { IBadge } from './interface/Badge'
+import { ISectionBreak } from './interface/SectionBreak'
 import { WatermarkType, WatermarkLayer } from './dataset/enum/Watermark'
 import { INTERNAL_SHORTCUT_KEY } from './dataset/constant/Shortcut'
 import { IGraffitiData } from './interface/Graffiti'
@@ -205,6 +207,7 @@ export {
   ImageDisplay,
   Command,
   KeyMap,
+  SectionBreakType,
   BlockType,
   PaperDirection,
   TableBorder,
@@ -248,6 +251,7 @@ export type {
   ICatalogItem,
   IRange,
   IRangeStyle,
+  ISectionBreak,
   IBadge,
   IGetElementListByHTMLOption
 }

@@ -15,6 +15,7 @@ import { defaultPageNumberOption } from '../dataset/constant/PageNumber'
 import { defaultPlaceholderOption } from '../dataset/constant/Placeholder'
 import { defaultRadioOption } from '../dataset/constant/Radio'
 import { defaultSeparatorOption } from '../dataset/constant/Separator'
+import { defaultSectionBreakOption } from '../dataset/constant/SectionBreak'
 import { defaultTableOption } from '../dataset/constant/Table'
 import { defaultTitleOption } from '../dataset/constant/Title'
 import { defaultWatermarkOption } from '../dataset/constant/Watermark'
@@ -40,6 +41,7 @@ import { IPageColumns } from '../interface/PageColumns'
 import { IPageNumber } from '../interface/PageNumber'
 import { IPlaceholder } from '../interface/Placeholder'
 import { IRadioOption } from '../interface/Radio'
+import { ISectionBreak } from '../interface/SectionBreak'
 import { ISeparatorOption } from '../interface/Separator'
 import { ITableOption } from '../interface/table/Table'
 import { ITitleOption } from '../interface/Title'
@@ -117,6 +119,10 @@ export function mergeOption(
   const pageBreakOptions: Required<IPageBreak> = {
     ...defaultPageBreakOption,
     ...options.pageBreak
+  }
+  const sectionBreakOptions: Required<ISectionBreak> = {
+    ...defaultSectionBreakOption,
+    ...options.sectionBreak
   }
   const pageColumnsOptions: Required<IPageColumns> = {
     ...defaultPageColumnsOption,
@@ -248,6 +254,7 @@ export function mergeOption(
     placeholder: placeholderOptions,
     group: groupOptions,
     pageBreak: pageBreakOptions,
+    sectionBreak: sectionBreakOptions,
     pageColumns: pageColumnsOptions,
     zone: zoneOptions,
     background: backgroundOptions,

@@ -1,4 +1,5 @@
 import { RowFlex } from '../dataset/enum/Row'
+import { SectionBreakType } from '../dataset/enum/SectionBreak'
 import { IElement, IElementMetrics } from './Element'
 import { IPageColumns } from './PageColumns'
 
@@ -16,6 +17,8 @@ export interface IRow {
   startIndex: number
   isPageBreak?: boolean
   isColumnBreak?: boolean
+  isSectionBreak?: boolean
+  sectionBreakType?: SectionBreakType
   columnIndex?: number
   isList?: boolean
   listIndex?: number

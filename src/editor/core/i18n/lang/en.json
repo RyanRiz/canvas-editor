@@ -7,6 +7,12 @@
       "selectAll": "Select all",
       "print": "Print"
     },
+    "sectionBreak": {
+      "nextPage": "Next Page",
+      "continuous": "Continuous",
+      "evenPage": "Even Page",
+      "oddPage": "Odd Page"
+    },
     "control": {
       "delete": "Delete control"
     },
@@ -84,6 +90,12 @@
   },
   "pageBreak": {
     "displayName": "Page Break"
+  },
+  "sectionBreak": {
+    "nextPage": "Section Break (Next Page)",
+    "continuous": "Section Break (Continuous)",
+    "evenPage": "Section Break (Even Page)",
+    "oddPage": "Section Break (Odd Page)"
   },
   "zone": {
     "headerTip": "Double click to edit header",

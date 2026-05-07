@@ -10,6 +10,12 @@ export const INTERNAL_CONTEXT_MENU_KEY = {
     SELECT_ALL: 'globalSelectAll',
     PRINT: 'globalPrint'
   },
+  SECTION_BREAK: {
+    NEXT_PAGE: 'sectionBreakNextPage',
+    CONTINUOUS: 'sectionBreakContinuous',
+    EVEN_PAGE: 'sectionBreakEvenPage',
+    ODD_PAGE: 'sectionBreakOddPage'
+  },
   CONTROL: {
     DELETE: 'controlDelete'
   },

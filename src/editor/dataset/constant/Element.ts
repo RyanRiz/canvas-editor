@@ -162,6 +162,7 @@ export const BLOCK_ELEMENT_TYPE: ElementType[] = [
   ElementType.BLOCK,
   ElementType.PAGE_BREAK,
   ElementType.COLUMN_BREAK,
+  ElementType.SECTION_BREAK,
   ElementType.SEPARATOR,
   ElementType.TABLE
 ]

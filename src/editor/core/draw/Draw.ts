@@ -43,6 +43,7 @@ import { Search } from './interactive/Search'
 import { Strikeout } from './richtext/Strikeout'
 import { Underline } from './richtext/Underline'
 import { ElementType } from '../../dataset/enum/Element'
+import { SectionBreakType } from '../../dataset/enum/SectionBreak'
 import { ImageParticle } from './particle/ImageParticle'
 import { LaTexParticle } from './particle/latex/LaTexParticle'
 import { TextParticle } from './particle/TextParticle'
@@ -58,6 +59,7 @@ import { SuperscriptParticle } from './particle/SuperscriptParticle'
 import { SubscriptParticle } from './particle/SubscriptParticle'
 import { SeparatorParticle } from './particle/SeparatorParticle'
 import { PageBreakParticle } from './particle/PageBreakParticle'
+import { SectionBreakParticle } from './particle/SectionBreakParticle'
 import { Watermark } from './frame/Watermark'
 import { WatermarkLayer } from '../../dataset/enum/Watermark'
 import {
@@ -174,6 +176,7 @@ export class Draw {
   private dateParticle: DateParticle
   private separatorParticle: SeparatorParticle
   private pageBreakParticle: PageBreakParticle
+  private sectionBreakParticle: SectionBreakParticle
   private superscriptParticle: SuperscriptParticle
   private subscriptParticle: SubscriptParticle
   private checkboxParticle: CheckboxParticle
@@ -194,6 +197,16 @@ export class Draw {
   private WORD_LIKE_REG: RegExp
   private rowList: IRow[]
   private pageRowList: IRow[][]
+  private sectionProperties: {
+    fromIndex: number
+    paperDirection: PaperDirection
+    width: number
+    height: number
+  }[]
+  private pageDimensionsMap: Map<
+    number,
+    { width: number; height: number; paperDirection: PaperDirection }
+  >
   private painterStyle: IElementStyle | null
   private painterOptions: IPainterOption | null
   private visiblePageNoList: number[]
@@ -221,6 +234,8 @@ export class Draw {
     this.listener = listener
     this.eventBus = eventBus
     this.override = override
+    this.pageDimensionsMap = new Map()
+    this.sectionProperties = []
 
     this._formatContainer()
     this.pageContainer = this._createPageContainer()
@@ -265,6 +280,7 @@ export class Draw {
     this.dateParticle = new DateParticle(this)
     this.separatorParticle = new SeparatorParticle(this)
     this.pageBreakParticle = new PageBreakParticle(this)
+    this.sectionBreakParticle = new SectionBreakParticle(this)
     this.superscriptParticle = new SuperscriptParticle()
     this.subscriptParticle = new SubscriptParticle()
     this.checkboxParticle = new CheckboxParticle(this)
@@ -532,6 +548,81 @@ export class Draw {
       }
     }
     return pageColumns
+  }
+
+  public computeSectionProperties() {
+    const { paperDirection, width, height } = this.options
+    this.sectionProperties = [
+      {
+        fromIndex: 0,
+        paperDirection,
+        width,
+        height
+      }
+    ]
+    for (let i = 0; i < this.elementList.length; i++) {
+      const el = this.elementList[i]
+      if (el.type === ElementType.SECTION_BREAK && el.sectionPage) {
+        const prev =
+          this.sectionProperties[this.sectionProperties.length - 1]
+        this.sectionProperties.push({
+          fromIndex: i + 1,
+          paperDirection:
+            el.sectionPage.paperDirection ?? prev.paperDirection,
+          width: el.sectionPage.width ?? prev.width,
+          height: el.sectionPage.height ?? prev.height
+        })
+      }
+    }
+  }
+
+  public getSectionDimensions(forIndex: number): {
+    paperDirection: PaperDirection
+    width: number
+    height: number
+  } {
+    let section = this.sectionProperties[0]
+    for (let i = 1; i < this.sectionProperties.length; i++) {
+      if (this.sectionProperties[i].fromIndex > forIndex) break
+      section = this.sectionProperties[i]
+    }
+    return section
+  }
+
+  public getEffectivePageDimensions(forIndex: number): {
+    height: number
+    margins: number[]
+  } {
+    const dims = this.getSectionDimensions(forIndex)
+    const { scale } = this.options
+    const isVertical = dims.paperDirection === PaperDirection.VERTICAL
+    const pageHeight = Math.floor(
+      (isVertical ? dims.height : dims.width) * scale
+    )
+    const { margins } = this.options
+    const pageMargins = (isVertical
+      ? margins
+      : [margins[1], margins[2], margins[3], margins[0]]) as number[]
+    return {
+      height: pageHeight,
+      margins: pageMargins.map(m => m * scale) as unknown as number[]
+    }
+  }
+
+  public getEffectiveWidthHeight(): { width: number; height: number } {
+    const { paperDirection, width, height, scale } = this.options
+    const isVertical = paperDirection === PaperDirection.VERTICAL
+    return {
+      width: Math.floor((isVertical ? width : height) * scale),
+      height: Math.floor((isVertical ? height : width) * scale)
+    }
+  }
+
+  private _sectionChangesDimensions(prevRow: IRow): boolean {
+    const el = this.elementList[prevRow.startIndex]
+    if (!el || el.type !== ElementType.SECTION_BREAK) return false
+    const sp = el.sectionPage
+    return !!(sp?.paperDirection || sp?.width || sp?.height)
   }
 
   public getColumnCount(pageColumns?: IPageColumns | null): number {
@@ -1339,18 +1430,39 @@ export class Draw {
   }
 
   public setPaperDirection(payload: PaperDirection) {
+    const { startIndex } = this.range.getRange()
+    // Find the nearest preceding section break element
+    let sectionBreakEl: IElement | null = null
+    if (~startIndex) {
+      for (let i = Math.min(startIndex, this.elementList.length - 1); i >= 0; i--) {
+        if (this.elementList[i].type === ElementType.SECTION_BREAK) {
+          sectionBreakEl = this.elementList[i]
+          break
+        }
+      }
+    }
+    if (sectionBreakEl) {
+      if (!sectionBreakEl.sectionPage) {
+        sectionBreakEl.sectionPage = {}
+      }
+      sectionBreakEl.sectionPage.paperDirection = payload
+    } else {
+      this.options.paperDirection = payload
+    }
     const dpr = this.getPagePixelRatio()
-    this.options.paperDirection = payload
-    const width = this.getWidth()
-    const height = this.getHeight()
-    this.container.style.width = `${width}px`
     this.pageList.forEach((p, i) => {
-      p.width = width * dpr
-      p.height = height * dpr
-      p.style.width = `${width}px`
-      p.style.height = `${height}px`
+      const dims = this.pageDimensionsMap.get(i) ?? {
+        width: this.getWidth(),
+        height: this.getHeight()
+      }
+      p.width = dims.width * dpr
+      p.height = dims.height * dpr
+      p.style.width = `${dims.width}px`
+      p.style.height = `${dims.height}px`
       this._initPageContext(this.ctxList[i])
     })
+    const globalWidth = this.getWidth()
+    this.container.style.width = `${globalWidth}px`
     this.render({
       isSubmitHistory: false,
       isSetCursor: false
@@ -1546,8 +1658,9 @@ export class Draw {
   }
 
   private _createPage(pageNo: number) {
-    const width = this.getWidth()
-    const height = this.getHeight()
+    const dims = this.pageDimensionsMap.get(pageNo)
+    const width = dims?.width ?? this.getWidth()
+    const height = dims?.height ?? this.getHeight()
     const canvas = document.createElement('canvas')
     canvas.style.width = `${width}px`
     canvas.style.height = `${height}px`
@@ -1925,7 +2038,8 @@ export class Draw {
           if (
             curPagePreHeight + firstTrHeight + rowMarginHeight > height ||
             (element.pagingIndex !== 0 && element.trList![0].pagingRepeat) ||
-            elementList[i - 1]?.type === ElementType.PAGE_BREAK
+            elementList[i - 1]?.type === ElementType.PAGE_BREAK ||
+            elementList[i - 1]?.type === ElementType.SECTION_BREAK
           ) {
             // 无可拆分行则切换至新页
             curPagePreHeight = marginHeight
@@ -2034,6 +2148,10 @@ export class Draw {
         metrics.width = availableWidth
         metrics.height = defaultSize
       } else if (element.type === ElementType.COLUMN_BREAK) {
+        element.width = availableWidth / scale
+        metrics.width = availableWidth
+        metrics.height = defaultSize
+      } else if (element.type === ElementType.SECTION_BREAK) {
         element.width = availableWidth / scale
         metrics.width = availableWidth
         metrics.height = defaultSize
@@ -2247,7 +2365,9 @@ export class Draw {
           pageColumns: currentPageColumns,
           innerWidth: this.getColumnInnerWidth(currentPageColumns),
           isPageBreak: element.type === ElementType.PAGE_BREAK,
-          isColumnBreak: element.type === ElementType.COLUMN_BREAK
+          isColumnBreak: element.type === ElementType.COLUMN_BREAK,
+          isSectionBreak: element.type === ElementType.SECTION_BREAK,
+          sectionBreakType: element.sectionBreakType
         }
         // 控件缩进
         if (
@@ -2362,7 +2482,8 @@ export class Draw {
           !isFromTable &&
           pageHeight &&
           (y - startY + mainOuterHeight + height > pageHeight ||
-            element.type === ElementType.PAGE_BREAK)
+            element.type === ElementType.PAGE_BREAK ||
+            element.type === ElementType.SECTION_BREAK)
         ) {
           y = startY
           // 删除多余四周环绕型元素
@@ -2393,26 +2514,47 @@ export class Draw {
   }
 
   private _computePageList(): IRow[][] {
+    this.computeSectionProperties()
     const pageRowList: IRow[][] = [[]]
     const {
       pageMode,
       pageNumber: { maxPageNo }
     } = this.options
-    const height = this.getHeight()
-    const margins = this.getMargins()
+    const initialDims = this.getEffectivePageDimensions(0)
+    let height = initialDims.height
+    let margins = initialDims.margins
     // marginHeight / contentStartY / trailingOuterHeight / contentBottomY are
     // recomputed per page so header/footer variants of different heights
     // (e.g. "Different first page") produce per-page-correct body bounds.
     let headerExtraHeight = this.header.getExtraHeight(0)
-    let marginHeight = this.getMainOuterHeight(0)
+    let marginHeight =
+      margins[0] + margins[2] + headerExtraHeight + this.footer.getExtraHeight(0)
     let contentStartY = margins[0] + headerExtraHeight
     let trailingOuterHeight = marginHeight - contentStartY
     let contentBottomY = height - trailingOuterHeight
     let pageNo = 0
     let pageHeight = marginHeight
+    const applySectionDims = (startIndex: number) => {
+      const dims = this.getEffectivePageDimensions(startIndex)
+      height = dims.height
+      margins = dims.margins
+    }
+    // Store dimensions for page 0
+    {
+      const dims0 = this.getSectionDimensions(0)
+      const { scale } = this.options
+      const isV0 = dims0.paperDirection === PaperDirection.VERTICAL
+      this.pageDimensionsMap.set(0, {
+        width: Math.floor((isV0 ? dims0.width : dims0.height) * scale),
+        height: Math.floor((isV0 ? dims0.height : dims0.width) * scale),
+        paperDirection: dims0.paperDirection
+      })
+    }
     const recomputePageBounds = () => {
       headerExtraHeight = this.header.getExtraHeight(pageNo)
-      marginHeight = this.getMainOuterHeight(pageNo)
+      const footerExtraHeight = this.footer.getExtraHeight(pageNo)
+      marginHeight =
+        margins[0] + margins[2] + headerExtraHeight + footerExtraHeight
       contentStartY = margins[0] + headerExtraHeight
       trailingOuterHeight = marginHeight - contentStartY
       contentBottomY = height - trailingOuterHeight
@@ -2429,6 +2571,14 @@ export class Draw {
         return false
       }
       pageNo++
+      const dims = this.getSectionDimensions(cutIndex)
+      const { scale } = this.options
+      const isVertical = dims.paperDirection === PaperDirection.VERTICAL
+      this.pageDimensionsMap.set(pageNo, {
+        width: Math.floor((isVertical ? dims.width : dims.height) * scale),
+        height: Math.floor((isVertical ? dims.height : dims.width) * scale),
+        paperDirection: dims.paperDirection
+      })
       recomputePageBounds()
       pageHeight = marginHeight
       if (!pageRowList[pageNo]) {
@@ -2485,10 +2635,39 @@ export class Draw {
             const rowOffsetY = row.offsetY || 0
             const prev = this.rowList[row.rowIndex - 1]
             const forcePageBreak = !!prev?.isPageBreak
+            const forceSectionBreak = !!prev?.isSectionBreak
+            const sectionBreakType = prev?.sectionBreakType
+            const isSectionPageBreak =
+              forceSectionBreak &&
+              (sectionBreakType !== SectionBreakType.CONTINUOUS ||
+                this._sectionChangesDimensions(prev!))
             const overflow = row.height + rowOffsetY + pageHeight > height
-            if (forcePageBreak || (overflow && pageHeight > marginHeight)) {
+            if (
+              forcePageBreak ||
+              isSectionPageBreak ||
+              (overflow && pageHeight > marginHeight)
+            ) {
               if (!nextPage(row.startIndex)) {
                 return pageRowList
+              }
+              if (
+                sectionBreakType === SectionBreakType.EVEN_PAGE &&
+                pageNo % 2 === 0
+              ) {
+                if (!nextPage(row.startIndex)) {
+                  return pageRowList
+                }
+              } else if (
+                sectionBreakType === SectionBreakType.ODD_PAGE &&
+                pageNo % 2 === 1
+              ) {
+                if (!nextPage(row.startIndex)) {
+                  return pageRowList
+                }
+              }
+              if (isSectionPageBreak) {
+                applySectionDims(row.startIndex)
+                recomputePageBounds()
               }
             }
             row.columnIndex = 0
@@ -2533,10 +2712,45 @@ export class Draw {
           const prev = this.rowList[row.rowIndex - 1]
           const forcePageBreak = !!prev?.isPageBreak
           const forceColumnBreak = !!prev?.isColumnBreak
+          const forceSectionBreak = !!prev?.isSectionBreak
+          const sectionBreakType = prev?.sectionBreakType
+          const isSectionPageBreak =
+            forceSectionBreak &&
+            (sectionBreakType !== SectionBreakType.CONTINUOUS ||
+              this._sectionChangesDimensions(prev!))
           if (forcePageBreak) {
             if (!nextPage(row.startIndex)) {
               return pageRowList
             }
+            sectionTop = pageHeight - trailingOuterHeight
+            columnIndex = 0
+            columnHeightList = new Array(columnCount).fill(sectionTop)
+            columnHasContentList = new Array(columnCount).fill(false)
+            balanceThreshold = computeBalanceThreshold(
+              sectionTop,
+              remainingSectionHeight
+            )
+          } else if (isSectionPageBreak) {
+            if (!nextPage(row.startIndex)) {
+              return pageRowList
+            }
+            if (
+              sectionBreakType === SectionBreakType.EVEN_PAGE &&
+              pageNo % 2 === 0
+            ) {
+              if (!nextPage(row.startIndex)) {
+                return pageRowList
+              }
+            } else if (
+              sectionBreakType === SectionBreakType.ODD_PAGE &&
+              pageNo % 2 === 1
+            ) {
+              if (!nextPage(row.startIndex)) {
+                return pageRowList
+              }
+            }
+            applySectionDims(row.startIndex)
+            recomputePageBounds()
             sectionTop = pageHeight - trailingOuterHeight
             columnIndex = 0
             columnHeightList = new Array(columnCount).fill(sectionTop)
@@ -2769,6 +2983,10 @@ export class Draw {
         } else if (element.type === ElementType.COLUMN_BREAK) {
           if (this.mode !== EditorMode.CLEAN && !isPrintMode) {
             this.pageBreakParticle.render(ctx, element, x, y)
+          }
+        } else if (element.type === ElementType.SECTION_BREAK) {
+          if (this.mode !== EditorMode.CLEAN && !isPrintMode) {
+            this.sectionBreakParticle.render(ctx, element, x, y)
           }
         } else if (
           element.type === ElementType.CHECKBOX ||
@@ -3298,10 +3516,28 @@ export class Draw {
     // 清除光标等副作用
     this.imageObserver.clearAll()
     this.cursor.recoveryCursor()
-    // 创建纸张
+    // 创建/调整纸张
+    const dpr = this.getPagePixelRatio()
     for (let i = 0; i < this.pageRowList.length; i++) {
       if (!this.pageList[i]) {
         this._createPage(i)
+      } else {
+        const dims = this.pageDimensionsMap.get(i)
+        if (dims) {
+          const page = this.pageList[i]
+          const expectedWidth = dims.width
+          const expectedHeight = dims.height
+          if (
+            page.width !== expectedWidth * dpr ||
+            page.height !== expectedHeight * dpr
+          ) {
+            page.width = expectedWidth * dpr
+            page.height = expectedHeight * dpr
+            page.style.width = `${expectedWidth}px`
+            page.style.height = `${expectedHeight}px`
+            this._initPageContext(this.ctxList[i])
+          }
+        }
       }
     }
     // 移除多余页

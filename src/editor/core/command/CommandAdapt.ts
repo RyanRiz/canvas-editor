@@ -21,6 +21,7 @@ import {
   PaperDirection
 } from '../../dataset/enum/Editor'
 import { ElementType } from '../../dataset/enum/Element'
+import { SectionBreakType } from '../../dataset/enum/SectionBreak'
 import { ElementStyleKey } from '../../dataset/enum/ElementStyle'
 import { ListStyle, ListType } from '../../dataset/enum/List'
 import { MoveDirection } from '../../dataset/enum/Observer'
@@ -1338,6 +1339,20 @@ export class CommandAdapt {
       {
         type: ElementType.COLUMN_BREAK,
         value: WRAP
+      }
+    ])
+  }
+
+  public insertSectionBreak(sectionBreakType: SectionBreakType) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const activeControl = this.control.getActiveControl()
+    if (activeControl) return
+    this.insertElementList([
+      {
+        type: ElementType.SECTION_BREAK,
+        value: WRAP,
+        sectionBreakType
       }
     ])
   }

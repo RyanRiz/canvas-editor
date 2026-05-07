@@ -19,6 +19,7 @@ import Editor, {
   PageMode,
   PaperDirection,
   RowFlex,
+  SectionBreakType,
   TableBorder,
   TableBorderStyle,
   TdBorder,
@@ -735,6 +736,24 @@ window.onload = function () {
   pageBreakDom.onclick = function () {
     console.log('pageBreak')
     instance.command.executePageBreak()
+  }
+
+  const sectionBreakDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__section-break'
+  )!
+  const sectionBreakOptionDom =
+    sectionBreakDom.querySelector<HTMLDivElement>('.options')!
+  sectionBreakDom.onclick = function () {
+    console.log('sectionBreak')
+    sectionBreakOptionDom.classList.toggle('visible')
+  }
+  sectionBreakOptionDom.onmousedown = function (evt) {
+    const li = evt.target as HTMLLIElement
+    const type = li.dataset.sectionBreak as SectionBreakType
+    if (type) {
+      instance.command.executeInsertSectionBreak(type)
+      sectionBreakOptionDom.classList.remove('visible')
+    }
   }
 
   const watermarkDom = document.querySelector<HTMLDivElement>(

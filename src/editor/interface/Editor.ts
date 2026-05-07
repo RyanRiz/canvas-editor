@@ -24,6 +24,7 @@ import { IPlaceholder } from './Placeholder'
 import { ITitleOption } from './Title'
 import { IWatermark } from './Watermark'
 import { IZoneOption } from './Zone'
+import { ISectionBreak } from './SectionBreak'
 import { ISeparatorOption } from './Separator'
 import { ITableOption } from './table/Table'
 import { ILineNumberOption } from './LineNumber'
@@ -106,6 +107,7 @@ export interface IEditorOption {
   group?: IGroup
   pageBreak?: IPageBreak
   pageColumns?: IPageColumns
+  sectionBreak?: ISectionBreak
   zone?: IZoneOption
   background?: IBackgroundOption
   lineBreak?: ILineBreakOption

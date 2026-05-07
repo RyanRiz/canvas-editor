@@ -7,6 +7,12 @@
       "selectAll": "全选",
       "print": "打印"
     },
+    "sectionBreak": {
+      "nextPage": "下一页",
+      "continuous": "连续",
+      "evenPage": "偶数页",
+      "oddPage": "奇数页"
+    },
     "control": {
       "delete": "删除控件"
     },
@@ -84,6 +90,12 @@
   },
   "pageBreak": {
     "displayName": "分页符"
+  },
+  "sectionBreak": {
+    "nextPage": "分节符(下一页)",
+    "continuous": "分节符(连续)",
+    "evenPage": "分节符(偶数页)",
+    "oddPage": "分节符(奇数页)"
   },
   "zone": {
     "headerTip": "双击编辑页眉",

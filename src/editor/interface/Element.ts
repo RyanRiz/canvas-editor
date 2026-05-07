@@ -12,6 +12,7 @@ import { IPadding } from './Common'
 import { IControl } from './Control'
 import { IPageColumns } from './PageColumns'
 import { IRadio } from './Radio'
+import { ISectionBreakElement } from './SectionBreak'
 import { ITextDecoration } from './Text'
 import { ITitle } from './Title'
 import { IColgroup } from './table/Colgroup'
@@ -229,7 +230,8 @@ export type IElement = IElementBasic &
   IListElement &
   IAreaElement &
   ILabelElement &
-  IPageNumberElement
+  IPageNumberElement &
+  ISectionBreakElement
 
 export interface IElementMetrics {
   width: number

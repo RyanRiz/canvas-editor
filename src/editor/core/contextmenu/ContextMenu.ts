@@ -19,6 +19,7 @@ import { controlMenus } from './menus/controlMenus'
 import { globalMenus } from './menus/globalMenus'
 import { hyperlinkMenus } from './menus/hyperlinkMenus'
 import { imageMenus } from './menus/imageMenus'
+import { sectionBreakMenus } from './menus/sectionBreakMenus'
 import { tableMenus } from './menus/tableMenus'
 
 interface IRenderPayload {
@@ -56,7 +57,15 @@ export class ContextMenu {
       ...tableMenus,
       ...imageMenus,
       ...controlMenus,
-      ...hyperlinkMenus
+      ...hyperlinkMenus,
+      {
+        isDivider: true
+      },
+      {
+        i18nPath: 'contextmenu.sectionBreak.nextPage',
+        when: payload => !payload.isReadonly,
+        childMenus: sectionBreakMenus
+      }
     ]
     this.contextMenuContainerList = []
     this.contextMenuRelationShip = new Map()
