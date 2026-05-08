@@ -359,6 +359,82 @@ describe('Draw - incremental computeRowList (P2.2)', () => {
     30000
   )
 
+  it('PERF-PLAN §2.2: 收敛检测命中 — 中段插入 1 字符仅重排受影响段落', () => {
+    // 构造一个足够大的文档（多段 + 多 wrap），在中段插入一个字符。
+    // 增量布局应在跨过 dirty.end 后命中收敛、立即停止；后续行通过
+    // oldRowsAfterCut 接驳，不再走 measureText / wrap 判定。
+    ctx = createTestEditor({
+      options: {
+        pageMode: PageMode.CONTINUITY,
+        // 同时打开校验桩——增量与全量必须字节相等，否则 console.error 会被监控到。
+        __perfValidateLayout: true
+      } as any,
+      data: { header: [], main: makeManyParagraphs(40), footer: [] }
+    })
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const draw = ctx.editor.draw
+    draw.render({ isCompute: true, isSubmitHistory: false })
+    const internal = draw as unknown as DrawInternals & {
+      _tryBuildResumeFrom: (extra: {
+        isPagingMode: boolean
+        innerWidth: number
+      }) => {
+        startElementIndex: number
+        prefixRowList: IRow[]
+        checkpoint: ILayoutCheckpoint
+        convergenceTarget: {
+          oldRowsAfterCut: IRow[]
+          oldCheckpointsAfterCut: ILayoutCheckpoint[]
+          dirtyEndAbs: number
+          matched: { atOldIdx: number } | null
+        }
+      } | null
+    }
+
+    // 在文档中段（足够远离开头让收敛能跳过显著前缀）切一个字
+    const midRowIdx = Math.floor(internal.rowList.length / 2)
+    const dirtyStart = internal.rowList[midRowIdx].startIndex + 1
+    const before = draw.getOriginalMainElementList().length
+    draw.spliceElementList(
+      draw.getOriginalMainElementList(),
+      dirtyStart,
+      0,
+      [{ value: 'Z' }]
+    )
+
+    // 拦截 _tryBuildResumeFrom 拿到本次构造出的 convergenceTarget——render
+    // 之后我们能看到 matched 是否被写入。
+    let observedTarget:
+      | {
+          matched: { atOldIdx: number } | null
+        }
+      | null = null
+    const orig = internal._tryBuildResumeFrom.bind(internal)
+    ;(internal as unknown as Record<string, unknown>)._tryBuildResumeFrom = (
+      extra: { isPagingMode: boolean; innerWidth: number }
+    ): unknown => {
+      const result = orig(extra) as {
+        convergenceTarget?: { matched: { atOldIdx: number } | null }
+      } | null
+      if (result?.convergenceTarget) observedTarget = result.convergenceTarget
+      return result
+    }
+
+    draw.render({ isCompute: true, isSubmitHistory: false })
+
+    // 元素数加 1
+    expect(draw.getOriginalMainElementList().length).toBe(before + 1)
+    // 收敛必须命中：增量布局只重排到 dirty 段落末尾，旧尾部直接接驳。
+    expect(observedTarget).not.toBeNull()
+    expect(observedTarget!.matched).not.toBeNull()
+    // 校验桩没报错——增量结果与全量字节相等
+    const layoutMismatch = errSpy.mock.calls.some(args =>
+      String(args[0] ?? '').includes('[Phase2B/validate]')
+    )
+    expect(layoutMismatch).toBe(false)
+    errSpy.mockRestore()
+  })
+
   it('页眉 zone 输入不应误启用主体增量（mainNeedsCompute=false 路径）', () => {
     // 跨 zone 安全：页眉/页脚 zone 输入不动主元素 dirty range，render() 跳过主体
     // 整个 if (mainNeedsCompute) 块——增量决策 / checkpointSink 都不参与。

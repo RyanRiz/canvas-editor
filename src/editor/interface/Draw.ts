@@ -168,9 +168,35 @@ export interface ILayoutCheckpoint {
  * - startElementIndex：恢复时 for-loop 的起始元素索引——一般等同于
  *   originalRowList[rowIndex].startIndex（即「我们丢弃的第一行」的起始元素）。
  * - checkpoint：与 rowIndex 对应的 ILayoutCheckpoint。
+ * - convergenceTarget：可选的收敛目标。提供时 computeRowList 会在每个新行
+ *   完成（rowList.push）后比较该行与 oldRowsAfterCut 中的某行——一旦命中
+ *   完整匹配（元素引用、长度、宽高均相等）且越过 dirtyEndAbs，则提前终止
+ *   循环，由调用方拼接旧尾部。这是把「在第 1 页改一个字」的工作量从 O(N) 压
+ *   缩到 O(affected paragraph) 的关键。
  */
 export interface IComputeRowListResumePayload {
   startElementIndex: number
   prefixRowList: IRow[]
   checkpoint: ILayoutCheckpoint
+  convergenceTarget?: IConvergenceTarget
+}
+
+/**
+ * PERF-PLAN §2.2 / Phase 2B: 收敛检测目标。
+ *
+ * 增量布局把 prefix 之后的所有行重排，但实际上当 dirty 影响被吸收后（典型场
+ * 景：用户在段中插入一字符，影响只到该段末尾），后续行的布局必然与旧行
+ * 完全相同——没必要继续重排。computeRowList 在每个新行 push 后做一次便宜的
+ * 比对：若与 oldRowsAfterCut 里某行的元素 / 尺寸全等，且当前位置已越过
+ * dirtyEndAbs，就把刚 push 的（继任）行丢弃、写下匹配点、跳出循环。
+ *
+ * 调用方据 `matched.atOldIdx` 把 oldRowsAfterCut[match+1..] 调整 startIndex /
+ * rowIndex 后续接到 rowList，得到与全量布局字节相等的最终结果。
+ */
+export interface IConvergenceTarget {
+  oldRowsAfterCut: IRow[]
+  oldCheckpointsAfterCut: ILayoutCheckpoint[]
+  dirtyEndAbs: number
+  // 输出：computeRowList 命中收敛时写入；初始为 null。
+  matched: { atOldIdx: number } | null
 }

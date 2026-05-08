@@ -11,6 +11,7 @@ import {
   IGetImageOption,
   IGetOriginValueOption,
   IGetValueOption,
+  IConvergenceTarget,
   ILayoutCheckpoint,
   IPainterOption
 } from '../../interface/Draw'
@@ -1964,6 +1965,7 @@ export class Draw {
     startElementIndex: number
     prefixRowList: IRow[]
     checkpoint: ILayoutCheckpoint
+    convergenceTarget: IConvergenceTarget
   } | null {
     if (!this._dirtyRange) return null
     if (!this._mainRowCheckpoints.length) return null
@@ -1992,10 +1994,20 @@ export class Draw {
     if (!checkpoint) return null
     // dirty 行的第一个元素索引：从该行开始重排
     const startElementIndex = this.rowList[dirtyRowIndex].startIndex
+    // 收敛目标：从 dirty 行起的旧行序列 + 对应 checkpoint。computeRowList 跑到
+    // 与某个旧行完全一致时立即停止；调用方把剩余旧行（适当位移后）接到尾部。
+    // 仅当 _dirtyRange 存在时构造（_tryBuildResumeFrom 上方已断言非空）。
+    const convergenceTarget: IConvergenceTarget = {
+      oldRowsAfterCut: this.rowList.slice(dirtyRowIndex),
+      oldCheckpointsAfterCut: this._mainRowCheckpoints.slice(dirtyRowIndex),
+      dirtyEndAbs: this._dirtyRange!.end,
+      matched: null
+    }
     return {
       startElementIndex,
       prefixRowList,
-      checkpoint
+      checkpoint,
+      convergenceTarget
     }
   }
 
@@ -3036,8 +3048,87 @@ export class Draw {
         x = surroundPosition.x
         x += metrics.width
       }
+      // PERF-PLAN §2.2 / Phase 2B：收敛检测——仅当本帧走增量恢复路径、且本次
+      // 迭代实际完成了一行（isWrap）时检查。命中收敛则丢弃刚 push 的下一行
+      // 种子，break 出循环，由调用方拼接旧尾部。
+      // 这是把「在 25 页文档第 1 页改字」的工作量从 O(后续 N 元素) 收敛回
+      // 「受影响段落」量级的关键步骤。
+      if (
+        isWrap &&
+        resumeFrom?.convergenceTarget &&
+        resumeFrom.convergenceTarget.matched === null
+      ) {
+        if (
+          this._tryConvergeIncrementalRowList(
+            rowList,
+            checkpointSink,
+            resumeFrom.convergenceTarget
+          )
+        ) {
+          break
+        }
+      }
     }
     return rowList
+  }
+
+  /**
+   * 尝试把刚完成的行（rowList[length-2]）匹配到 oldRowsAfterCut 中的某个旧
+   * 行——元素引用 / 长度 / 宽高 / ascent 全部一致，且当前位置已越过 dirtyEnd
+   * 时认定收敛。命中后：
+   *   - 写入 convergenceTarget.matched
+   *   - 丢弃 rowList 末尾刚 push 的下一行种子（避免与即将接驳的旧尾部首行重复）
+   *   - 同步丢弃 checkpointSink 的最末尾条目
+   *   - 返回 true：调用方应 break 出 for-loop
+   *
+   * 不命中时返回 false——调用方继续下一次迭代。
+   */
+  private _tryConvergeIncrementalRowList(
+    rowList: IRow[],
+    checkpointSink: ILayoutCheckpoint[] | undefined,
+    target: IConvergenceTarget
+  ): boolean {
+    if (rowList.length < 2) return false
+    const completed = rowList[rowList.length - 2]
+    const completedAbsEnd =
+      completed.startIndex + completed.elementList.length
+    // 必须越过 dirty 末端——否则可能匹配到 dirty 区间内的旧行（误收敛会丢
+    // 掉本应重排的行）。
+    if (completedAbsEnd <= target.dirtyEndAbs) return false
+    const oldRows = target.oldRowsAfterCut
+    const len = completed.elementList.length
+    const last = len - 1
+    const firstEl = completed.elementList[0]
+    const lastEl = last >= 0 ? completed.elementList[last] : firstEl
+    for (let oj = 0; oj < oldRows.length; oj++) {
+      const old = oldRows[oj]
+      if (old.elementList.length !== len) continue
+      // 廉价的早期剔除：首尾元素引用必须相等（refs 经过 splice 也保留）。
+      if (old.elementList[0] !== firstEl) continue
+      if (old.elementList[last] !== lastEl) continue
+      // 行布局必须全等——任何漂移都意味着后续行也会不同。
+      if (old.height !== completed.height) continue
+      if (old.width !== completed.width) continue
+      if (old.ascent !== completed.ascent) continue
+      // 完整 ref 比对——保险起见，避免首尾相同但中间被改的极端情形。
+      let allMatch = true
+      for (let k = 1; k < last; k++) {
+        if (old.elementList[k] !== completed.elementList[k]) {
+          allMatch = false
+          break
+        }
+      }
+      if (!allMatch) continue
+      target.matched = { atOldIdx: oj }
+      // 丢弃刚 push 的下一行种子——调用方会从 oldRowsAfterCut[oj+1] 接驳，
+      // 那里已经包含 element[i]，避免双重计入。
+      rowList.pop()
+      if (checkpointSink && checkpointSink.length > rowList.length) {
+        checkpointSink.pop()
+      }
+      return true
+    }
+    return false
   }
 
   private _computePageList(): IRow[][] {
@@ -4171,6 +4262,53 @@ export class Draw {
           checkpointSink: this._mainRowCheckpoints,
           resumeFrom: resumeFrom ?? undefined
         })
+        // PERF-PLAN §2.2 / Phase 2B：收敛接驳——computeRowList 命中收敛后只
+        // 重排到匹配点。把 oldRowsAfterCut[match+1..] 作为尾部接回（按 dirty
+        // 处的元素索引漂移调整 startIndex），并把对应的旧 checkpoints 也接回，
+        // 与 _mainRowCheckpoints 保持平行索引。
+        if (
+          resumeFrom &&
+          resumeFrom.convergenceTarget.matched !== null
+        ) {
+          const target = resumeFrom.convergenceTarget
+          const matchedIdx = target.matched!.atOldIdx
+          const reusedRows = target.oldRowsAfterCut.slice(matchedIdx + 1)
+          const reusedCkpts = target.oldCheckpointsAfterCut.slice(
+            matchedIdx + 1
+          )
+          if (reusedRows.length) {
+            // deltaElems：dirty 处实际位移量。匹配的旧行 vs 增量产出的同 logical
+            // 行——后者的 startIndex 已是 NEW 坐标，前者是 OLD。
+            const matchedOldRow = target.oldRowsAfterCut[matchedIdx]
+            const matchedNewRow = this.rowList[this.rowList.length - 1]
+            const deltaElems =
+              matchedNewRow.startIndex - matchedOldRow.startIndex
+            const baseRowIdx = this.rowList.length
+            for (let r = 0; r < reusedRows.length; r++) {
+              const old = reusedRows[r]
+              // 浅克隆——保留行内元素引用 / metrics，但改写 startIndex / rowIndex
+              // 到新坐标，避免污染上一帧 rowList 引用。
+              this.rowList.push({
+                ...old,
+                startIndex: old.startIndex + deltaElems,
+                rowIndex: baseRowIdx + r
+              })
+            }
+            // checkpoints 也要并行扩展——下一帧的 _tryBuildResumeFrom 会要求
+            // checkpointSink.length === rowList.length。旧 checkpoints 在收敛
+            // 后仍然有效（state 仅依赖 dirty 之前的元素，未变）。
+            if (this._mainRowCheckpoints.length < this.rowList.length) {
+              for (
+                let r = 0;
+                r < reusedCkpts.length &&
+                this._mainRowCheckpoints.length < this.rowList.length;
+                r++
+              ) {
+                this._mainRowCheckpoints.push(reusedCkpts[r])
+              }
+            }
+          }
+        }
         // 验证桩（PERF-PLAN §2.2 「validation harness」）：若启用，则同时跑一遍
         // 全量布局并按 IRow 关键字段 diff，发现增量分支结果与全量不一致时立刻
         // 上报错误。仅供 dev / 回归验证使用，正常生产路径请保持关闭。
