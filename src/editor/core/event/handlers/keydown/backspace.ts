@@ -1,4 +1,5 @@
 import { ZERO } from '../../../../dataset/constant/Common'
+import { isApple } from '../../../../utils/ua'
 import { CanvasEvent } from '../../CanvasEvent'
 
 // 删除光标前隐藏元素
@@ -140,10 +141,41 @@ export function backspace(evt: KeyboardEvent, host: CanvasEvent) {
     }
     if (!isCollapsed) {
       draw.spliceElementList(elementList, startIndex + 1, endIndex - startIndex)
+      curIndex = startIndex
+    } else if (isApple ? evt.altKey : evt.ctrlKey) {
+      const LETTER_REG = draw.getLetterReg()
+      let scanPos = index
+      if (LETTER_REG.test(elementList[scanPos]?.value)) {
+        while (scanPos >= 0 && LETTER_REG.test(elementList[scanPos]?.value)) {
+          scanPos--
+        }
+      } else {
+        while (scanPos >= 0) {
+          const val = elementList[scanPos]?.value
+          if (!val || val === ZERO || LETTER_REG.test(val)) break
+          scanPos--
+        }
+        while (scanPos >= 0 && LETTER_REG.test(elementList[scanPos]?.value)) {
+          scanPos--
+        }
+      }
+      const wordStart = scanPos + 1
+      const deleteCount = index - wordStart + 1
+      if (deleteCount > 0) {
+        if (elementList[wordStart]?.value === ZERO) {
+          draw.spliceElementList(elementList, wordStart + 1, deleteCount - 1)
+          curIndex = wordStart
+        } else {
+          draw.spliceElementList(elementList, wordStart, deleteCount)
+          curIndex = wordStart - 1
+        }
+      } else {
+        curIndex = index - 1
+      }
     } else {
       draw.spliceElementList(elementList, index, 1)
+      curIndex = index - 1
     }
-    curIndex = isCollapsed ? index - 1 : startIndex
   }
   draw.getGlobalEvent().setCanvasEventAbility()
   if (curIndex === null) {
