@@ -234,6 +234,13 @@ export class Draw {
   // spliceElementList 不应再次把事件推回 _pendingHistoryMutations，否则形成
   // 自相干循环：当前撤销动作会被自己再记录一次。
   private _isReplayingHistory: boolean
+  // 「scale-only」快路径标志位。setPageScale 在确认仅缩放发生改动时已就地把
+  // rowList / element.metrics / table cache 等 scale-相关字段乘以 ratio，因此
+  // 下一帧 render() 不必再跑 O(N) 的 computeRowList——只需重做 _computePageList /
+  // computePositionList / area.compute 等纯算术依赖。25 页文档的 Fit-to-Page →
+  // Fit-to-Width 在此路径下省下数百毫秒主线程时间。仅 setPageScale 内部使用，
+  // render() 完成后立即清零；不应跨多次 render 持续。
+  private _skipMainRowCompute: boolean
   private pageNo: number
   private renderCount: number
   private pagePixelRatio: number | null
@@ -338,6 +345,7 @@ export class Draw {
     this._preMutationMeta = null
     this._isReplayingHistory = false
     this._mainSurroundCount = null
+    this._skipMainRowCompute = false
     this.pageNo = 0
     this.renderCount = 0
     this.pagePixelRatio = null
@@ -1523,6 +1531,26 @@ export class Draw {
   }
 
   public setPageScale(payload: number) {
+    const oldScale = this.options.scale
+    // Decide whether the scale-only fast path applies. computeRowList over
+    // the entire document is the dominant cost on large docs (25-page +)
+    // when only `scale` changed — wrapping decisions are essentially
+    // scale-invariant in this renderer because measureText is cached
+    // against unscaled fonts (TextParticle.measureText sets `ctx.font` via
+    // `getElementFont(element)` with the default scale=1) and widths are
+    // multiplied by `scale` only at the use site. We therefore can scale
+    // the existing rowList / element.metrics / table caches in-place and
+    // let the cheap O(N) arithmetic dependents (pageRowList, positionList,
+    // area, search highlights) re-derive from the scaled rowList.
+    const ratio = oldScale > 0 ? payload / oldScale : 0
+    const canFastPath =
+      payload !== oldScale &&
+      Number.isFinite(ratio) &&
+      ratio > 0 &&
+      this.rowList.length > 0 &&
+      this._dirtyRange === null &&
+      this._prevPageRowCounts !== null &&
+      !this.isPrintMode()
     const dpr = this.getPagePixelRatio()
     this.options.scale = payload
     const width = this.getWidth()
@@ -1536,17 +1564,146 @@ export class Draw {
       p.style.marginBottom = `${this.getPageGap()}px`
       this._initPageContext(this.ctxList[i])
     })
+    if (canFastPath) {
+      this._scaleLayoutInPlace(this.rowList, ratio, payload)
+      // Row checkpoints carry scale-dependent carry state (x / y /
+      // controlRealWidth — see ILayoutCheckpoint). Scaling them in place
+      // matches what the in-place rowList scaling did, so the next typing
+      // event can still resume incremental layout from the appropriate
+      // prefix and stays fast (PERF-PLAN §2.2). Without this, the first
+      // keystroke after a fit-to-X click would pay a full computeRowList
+      // on the entire document while incremental rebuilt its checkpoints.
+      this._scaleCheckpointsInPlace(this._mainRowCheckpoints, ratio)
+      // Canvas backing stores were just resized → all bitmaps cleared.
+      this._drawnPages.clear()
+      this._skipMainRowCompute = true
+    }
     const cursorPosition = this.position.getCursorPosition()
-    this.render({
-      isSubmitHistory: false,
-      isSetCursor: !!cursorPosition,
-      curIndex: cursorPosition?.index
-    })
+    try {
+      this.render({
+        isSubmitHistory: false,
+        isSetCursor: !!cursorPosition,
+        curIndex: cursorPosition?.index
+      })
+    } finally {
+      this._skipMainRowCompute = false
+    }
     if (this.listener.pageScaleChange) {
       this.listener.pageScaleChange(payload)
     }
     if (this.eventBus.isSubscribe('pageScaleChange')) {
       this.eventBus.emit('pageScaleChange', payload)
+    }
+  }
+
+  /**
+   * Apply a uniform scale ratio to a rowList (and any nested table
+   * rowLists) in place, without re-running computeRowList. Used by
+   * {@link setPageScale} as the scale-only fast path.
+   *
+   * Why this is correct: every scale-dependent geometry value in this
+   * renderer is computed as `unscaled * options.scale`, and measureText
+   * is cached against the unscaled font (see Draw.ts:2564 / 2582 — the
+   * default `getElementFont(el)` argument is scale=1; line widths are
+   * multiplied by `scale` only at the use site, e.g. lines 2541, 2553,
+   * 2567, 2584). Therefore a uniform multiply of every cached pixel
+   * value reproduces what computeRowList would have produced at the new
+   * scale, modulo sub-pixel rounding noise that's already below the
+   * detection threshold of the existing layout invariants.
+   *
+   * Touches:
+   *  - row.{width,height,ascent,offsetX,offsetY,innerWidth,pageStartX,pageStartY}
+   *  - row.elementList[*].metrics — the per-element pixel dimensions
+   *    drawn by drawRow / TextParticle / ImageParticle / etc.
+   *  - row.elementList[*].style — the canvas font string (`getElementFont`
+   *    with the new scale baked in) used at draw time
+   *  - row.elementList[*].left — manual left offset, scale-dependent
+   *  - For TABLE elements: recurse into td.rowList (per-cell layouts)
+   *    and refresh td._cacheScale / td._cacheInnerWidth so the next
+   *    full computeRowList pass can reuse the cell.
+   *
+   * Does NOT touch: tr.height / td.{width,height} — those are stored
+   * in *unscaled* units in this codebase (line 2282 multiplies td.width
+   * by scale at use; lines 2267, 2409 likewise for tr.height).
+   */
+  /**
+   * Scale a parallel-indexed checkpoint sink by `ratio` in place. Pairs
+   * with {@link _scaleLayoutInPlace} for the scale-only fast path: row
+   * checkpoints capture the loop carry state (x / y / controlRealWidth)
+   * at row boundaries, all of which are scale-dependent. Scaling them
+   * keeps incremental layout viable on the next render — without this,
+   * the first keystroke after a fit-to-X would resume against stale
+   * pre-scale x / y values, fail the layout-sig compatibility check,
+   * and fall back to full computeRowList over the whole document.
+   *
+   * Other fields (pageNo / listId / listIndex / currentPageColumns /
+   * surroundElementList element refs) are scale-invariant; the element
+   * references inside surroundElementList still point at the same IElement
+   * objects whose metrics were already scaled by _scaleLayoutInPlace.
+   */
+  private _scaleCheckpointsInPlace(
+    checkpoints: ILayoutCheckpoint[],
+    ratio: number
+  ) {
+    for (let i = 0; i < checkpoints.length; i++) {
+      const ckpt = checkpoints[i]
+      ckpt.x *= ratio
+      ckpt.y *= ratio
+      ckpt.controlRealWidth *= ratio
+    }
+  }
+
+  private _scaleLayoutInPlace(
+    rowList: IRow[],
+    ratio: number,
+    newScale: number
+  ) {
+    for (let r = 0; r < rowList.length; r++) {
+      const row = rowList[r]
+      row.width *= ratio
+      row.height *= ratio
+      row.ascent *= ratio
+      if (row.offsetX !== undefined) row.offsetX *= ratio
+      if (row.offsetY !== undefined) row.offsetY *= ratio
+      if (row.innerWidth !== undefined) row.innerWidth *= ratio
+      if (row.pageStartX !== undefined) row.pageStartX *= ratio
+      if (row.pageStartY !== undefined) row.pageStartY *= ratio
+      const elementList = row.elementList
+      for (let e = 0; e < elementList.length; e++) {
+        const el = elementList[e]
+        const m = el.metrics
+        if (m) {
+          m.width *= ratio
+          m.height *= ratio
+          m.boundingBoxAscent *= ratio
+          m.boundingBoxDescent *= ratio
+        }
+        if (el.left !== undefined) el.left *= ratio
+        // The drawn font string has the (old) scale baked in via
+        // getElementFont(el, oldScale). Refresh it for the new scale.
+        el.style = this.getElementFont(el, newScale)
+        if (el.type === ElementType.TABLE && el.trList) {
+          for (let t = 0; t < el.trList.length; t++) {
+            const tr = el.trList[t]
+            for (let d = 0; d < tr.tdList.length; d++) {
+              const td = tr.tdList[d]
+              if (td.rowList) {
+                this._scaleLayoutInPlace(td.rowList, ratio, newScale)
+              }
+              // Keep the per-cell cache key consistent with the new scale
+              // so the next full computeRowList pass can reuse this td
+              // (canReuseCell at Draw.ts:2284 requires _cacheScale ===
+              // current scale).
+              if (td._cacheScale !== undefined) {
+                td._cacheScale = newScale
+                if (td._cacheInnerWidth !== undefined) {
+                  td._cacheInnerWidth *= ratio
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 
@@ -3896,8 +4053,14 @@ export class Draw {
       // area.compute() —— 这些都依赖主元素，主元素未改时它们的结果是稳定的。
       const activeZone = this.zone.getZone()
       const isMainZone = activeZone === EditorZone.MAIN
+      // _skipMainRowCompute 由 setPageScale 在已就地缩放 rowList 后设置——此时
+      // 即便用户在 HEADER/FOOTER 区也必须刷新主体的 pageRowList / positionList，
+      // 否则光标位置会停留在旧 scale 下、与已缩放的 rowList 出现 ½× 错位。
       const mainNeedsCompute =
-        isMainZone || this._dirtyRange !== null || this._prevPageRowCounts === null
+        isMainZone ||
+        this._dirtyRange !== null ||
+        this._prevPageRowCounts === null ||
+        this._skipMainRowCompute
       // 清空浮动元素位置信息（仅当本帧确实会重新布局主体时才清空，否则保留上次缓存）
       // PERF-PLAN §2.3：增量路径下浮动列表交给 computePositionListIncremental 自行
       // 按 dirty 边界过滤，因此这里不能无条件清空——延后到 _tryBuildResumeFrom 决定
@@ -3927,7 +4090,32 @@ export class Draw {
           this._footerDirty = false
         }
       }
-      if (mainNeedsCompute) {
+      if (mainNeedsCompute && this._skipMainRowCompute) {
+        // setPageScale 已在外层把 rowList / element.metrics / table cache 等
+        // scale-相关字段就地乘以 ratio。computeRowList 在 25 页文档上是
+        // setPageScale 的主要耗时来源（O(N) 元素遍历 + 类型分支 + measureText
+        // 缓存命中开销 + listStyle / surround / 分页判定），但实际产生的输出
+        // 等价于「按 ratio 缩放上一帧 rowList」——直接跳过，让下面 O(N) 算术
+        // 依赖（pageRowList / positionList / area）从已就地缩放的 rowList 重派生。
+        this._mainLayoutSig = this._buildLayoutSig({ isPagingMode, innerWidth })
+        // 浮动元素 list 中存的是按旧 scale 算出的像素坐标——清空后由
+        // computePositionList 从元素重新挑出 SURROUND/FLOAT_TOP/FLOAT_BOTTOM
+        // 在新 scale 下重建。
+        this.position.setFloatPositionList([])
+        this.pageRowList = this._computePageList()
+        this.position.computePositionList()
+        this.area.compute()
+        if (!this.isPrintMode()) {
+          const searchKeyword = this.search.getSearchKeyword()
+          if (searchKeyword) {
+            this.search.compute(searchKeyword)
+          }
+          this.control.computeHighlightList()
+        }
+        if (this.isGraffitiMode()) {
+          this.graffiti.compute()
+        }
+      } else if (mainNeedsCompute) {
         // 行信息
         const margins = this.getMargins()
         const pageHeight = this.getHeight()
