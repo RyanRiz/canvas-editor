@@ -214,6 +214,10 @@ export class Draw {
   // surroundElementList，等于 0 时 render 可直接跳过 pickSurroundElementList。
   // 由 spliceElementList 维护增量；setEditorData 等大批量替换会重置为 null。
   private _mainSurroundCount: number | null
+  // PERF-PLAN follow-up：主元素列表中带 areaId 的元素计数缓存——同 SURROUND，
+  // 当 0 时 area.compute 可直接跳过 O(N) 扫描。绝大多数文档（不使用 area）每
+  // 帧因此省下 ~30k 次属性访问。
+  private _mainAreaCount: number | null
   // PERF-PLAN §1.2 / Phase 1.2：自上次 submitHistory 以来积累的「主元素列表」突变事件。
   // submitHistory 据此决定是否走 delta 分支：所有事件 scope=main 且没有破坏 delta
   // 不变量的旁路改动时，可避免 9× full deepClone。事件由 spliceElementList 自动
@@ -346,6 +350,7 @@ export class Draw {
     this._preMutationMeta = null
     this._isReplayingHistory = false
     this._mainSurroundCount = null
+    this._mainAreaCount = null
     this._skipMainRowCompute = false
     this.pageNo = 0
     this.renderCount = 0
@@ -601,6 +606,22 @@ export class Draw {
     const width = this.getWidth()
     const margins = this.getMargins()
     return width - margins[1] - margins[3]
+  }
+
+  /**
+   * 主元素列表中携带 areaId 的元素数量。返回 0 时调用方（如 area.compute）
+   * 可直接跳过 O(N) 扫描。null 缓存表示「未统计」——首次调用 / 失效后会
+   * 在这里 lazy-rebuild 一次，后续命中 spliceElementList 维护的增量计数。
+   */
+  public getMainAreaCount(): number {
+    if (this._mainAreaCount === null) {
+      let count = 0
+      for (let i = 0; i < this.elementList.length; i++) {
+        if (this.elementList[i].areaId) count++
+      }
+      this._mainAreaCount = count
+    }
+    return this._mainAreaCount
   }
 
   public getOriginalInnerWidth(): number {
@@ -1180,6 +1201,22 @@ export class Draw {
         }
       }
       this._mainSurroundCount = Math.max(0, this._mainSurroundCount + delta)
+    }
+    // 同样维护 area 计数缓存——area.compute 据此跳过整次扫描。
+    if (scope === 'main' && this._mainAreaCount !== null) {
+      let delta = 0
+      if (deleteCount > 0) {
+        for (let i = 0; i < deleteCount; i++) {
+          const el = elementList[start + i]
+          if (el?.areaId) delta--
+        }
+      }
+      if (items?.length) {
+        for (let i = 0; i < items.length; i++) {
+          if (items[i].areaId) delta++
+        }
+      }
+      this._mainAreaCount = Math.max(0, this._mainAreaCount + delta)
     }
     // 事件订阅前先快照「将被删除」切片（splice 后无法访问）。
     // 内部的 delta-history 记录器同样需要这份快照，因此从此版本起即便没有
@@ -1905,8 +1942,9 @@ export class Draw {
     this._pendingHistoryMutations = []
     this._deltaHistoryUnsafe = true
     this._preMutationMeta = null
-    // surround 计数缓存需要重建：新文档可能含/不含浮动元素。
+    // surround / area 计数缓存需要重建：新文档可能含/不含这些特殊元素。
     this._mainSurroundCount = null
+    this._mainAreaCount = null
   }
 
   /**
@@ -2022,6 +2060,54 @@ export class Draw {
     const sentinel = (this.options as unknown as Record<string, unknown>)
       .__perfValidateLayout
     return sentinel === true
+  }
+
+  /**
+   * 是否启用渲染阶段计时日志（PERF-PLAN follow-up）。
+   *
+   * 通过 editorOption 上的 `__perfTraceRender` 隐藏字段开启——给用户一个
+   * 显式工具看到「这一帧 layout / paint / area / submitHistory 各花了多少
+   * ms」，便于诊断剩余卡顿来源。仅供 dev 使用，开启时会向 console 打印
+   * 一条 group。生产路径请保持关闭。
+   */
+  private _isPerfTraceRenderEnabled(): boolean {
+    const sentinel = (this.options as unknown as Record<string, unknown>)
+      .__perfTraceRender
+    return sentinel === true
+  }
+
+  /**
+   * 构造一个一次性的渲染阶段计时器（PERF-PLAN follow-up）。
+   *
+   * 用法：在 render() 入口构造一次（仅 __perfTraceRender 启用时），在每个
+   * 关键阶段调用 mark('label')，最后 flush() 把所有 phase 时间打印到
+   * console。便于用户在自己的内容上看到「这一帧 layout / paint / area /
+   * submitHistory 各占多少 ms」，定位剩余卡顿来源。
+   */
+  private _createRenderTrace() {
+    const t0 =
+      typeof performance !== 'undefined' ? performance.now() : Date.now()
+    let last = t0
+    const phases: { label: string; ms: number }[] = []
+    const now = () =>
+      typeof performance !== 'undefined' ? performance.now() : Date.now()
+    return {
+      mark: (label: string) => {
+        const cur = now()
+        phases.push({ label, ms: +(cur - last).toFixed(2) })
+        last = cur
+      },
+      flush: () => {
+        const total = +(now() - t0).toFixed(2)
+        console.log(
+          `[PerfTrace] render #${this.renderCount} total=${total}ms`,
+          phases
+            .map(p => `${p.label}=${p.ms}ms`)
+            .join('  '),
+          phases
+        )
+      }
+    }
   }
 
   /**
@@ -4120,6 +4206,11 @@ export class Draw {
       }
     }
     this.renderCount++
+    // PERF-PLAN follow-up：渲染阶段计时桩（__perfTraceRender 隐藏选项开启）。
+    // 仅在标志位开时构造，正常路径完全无开销（trace.mark / trace.flush 都是 no-op）。
+    const trace = this._isPerfTraceRenderEnabled()
+      ? this._createRenderTrace()
+      : null
     const { header, footer } = this.options
     const {
       isSubmitHistory = true,
@@ -4262,6 +4353,13 @@ export class Draw {
           checkpointSink: this._mainRowCheckpoints,
           resumeFrom: resumeFrom ?? undefined
         })
+        trace?.mark(
+          resumeFrom?.convergenceTarget?.matched
+            ? 'computeRowList(incr+converged)'
+            : resumeFrom
+              ? 'computeRowList(incr)'
+              : 'computeRowList(full)'
+        )
         // PERF-PLAN §2.2 / Phase 2B：收敛接驳——computeRowList 命中收敛后只
         // 重排到匹配点。把 oldRowsAfterCut[match+1..] 作为尾部接回（按 dirty
         // 处的元素索引漂移调整 startIndex），并把对应的旧 checkpoints 也接回，
@@ -4328,6 +4426,7 @@ export class Draw {
         this._mainLayoutSig = this._buildLayoutSig({ isPagingMode, innerWidth })
         // 页面信息
         this.pageRowList = this._computePageList()
+        trace?.mark('_computePageList')
         // 位置信息——PERF-PLAN §2.3 增量分支：仅当 §2.2 的增量路径成立时启用，
         // 与 row prefix 同步保留 positionList prefix，省下 ~O(N) 对象构造。
         if (resumeFrom && lastPrefixRow) {
@@ -4351,8 +4450,12 @@ export class Draw {
         } else {
           this.position.computePositionList()
         }
+        trace?.mark(
+          resumeFrom ? 'computePositionList(incr)' : 'computePositionList(full)'
+        )
         // 区域信息
         this.area.compute()
+        trace?.mark('area.compute')
         if (!this.isPrintMode()) {
           // 搜索信息
           const searchKeyword = this.search.getSearchKeyword()
@@ -4366,6 +4469,7 @@ export class Draw {
         if (this.isGraffitiMode()) {
           this.graffiti.compute()
         }
+        trace?.mark('search+control+graffiti')
       }
     }
     // 清除光标等副作用
@@ -4398,11 +4502,13 @@ export class Draw {
     if (dirtyPages === null) this._drawnPages.clear()
     // 绘制元素
     // 连续页因为有高度的变化会导致canvas渲染空白，需立即渲染，否则会出现闪动
+    trace?.mark('pre-paint')
     if (isLazy && isPagingMode) {
       this._lazyRender(dirtyPages)
     } else {
       this._immediateRender(dirtyPages)
     }
+    trace?.mark('paint')
     // 落盘本次 row 数与清除 dirty 提示，供下次渲染做差分
     this._prevPageRowCounts = this.pageRowList.map(rl => rl.length)
     this.clearDirtyRange()
@@ -4436,6 +4542,8 @@ export class Draw {
         this.submitHistory(curIndex)
       }
     }
+    trace?.mark('history')
+    trace?.flush()
     // 信息变动回调（使用微任务，避免一次宏任务排队带来的尾部开销，
     // 同时让范围样式 / tableTool / contentChange 等回调与本次渲染落在同一帧内）
     queueMicrotask(() => {
