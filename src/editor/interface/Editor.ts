@@ -35,6 +35,7 @@ import { IRange } from './Range'
 import { IGraffitiData, IGraffitiOption } from './Graffiti'
 import { IWhiteSpaceOption } from './WhiteSpace'
 import { IMagnifierOption } from './Magnifier'
+import { IPageLayeredOption } from './PageLayered'
 
 export interface IEditorData {
   header?: IElement[]
@@ -120,6 +121,9 @@ export interface IEditorOption {
   imgCaption?: IImgCaptionOption
   list?: IListOption
   magnifier?: IMagnifierOption
+  // PERF-PLAN — Strategy B：分层 canvas + 装饰层独立重绘。
+  // 默认开启；selection drag / search-next 等高频交互省去全量 base 重绘。
+  pageLayered?: IPageLayeredOption
 }
 
 export interface IEditorResult {

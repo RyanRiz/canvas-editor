@@ -33,6 +33,13 @@ export interface IRenderConfig {
   isInit?: boolean
   isSourceHistory?: boolean
   isFirstRender?: boolean
+  // PERF-PLAN — Strategy B：装饰层独立重绘的快路径开关。
+  // true 时 render() 跳过 computeRowList / computePositionList / base 重绘
+  // 等所有「基础层」工作，仅清空并重绘 decoration canvas（选区矩形 / 搜索高亮
+  // / 表格跨行/列范围）。适用于 selection drag / search-next 等高频交互。
+  // 调用方需保证主元素列表未变更——否则视觉将停留在上一帧 base 文本。
+  // 仅在 options.pageLayered.enable=true 且未设置 isCompute=true 时生效。
+  isDecorationOnly?: boolean
 }
 
 /**

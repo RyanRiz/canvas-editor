@@ -1487,7 +1487,10 @@ export class CommandAdapt {
       isSetCursor: false,
       isSubmitHistory: false,
       isCompute: false,
-      isLazy: false
+      isLazy: false,
+      // PERF-PLAN — Strategy B：搜索导航只更新当前匹配的高亮颜色——典型的
+      // decoration-only 操作。
+      isDecorationOnly: true
     })
   }
 
@@ -1498,7 +1501,10 @@ export class CommandAdapt {
       isSetCursor: false,
       isSubmitHistory: false,
       isCompute: false,
-      isLazy: false
+      isLazy: false,
+      // PERF-PLAN — Strategy B：搜索导航只更新当前匹配的高亮颜色——典型的
+      // decoration-only 操作。
+      isDecorationOnly: true
     })
   }
 

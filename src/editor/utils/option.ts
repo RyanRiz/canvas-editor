@@ -62,6 +62,8 @@ import { IGraffitiOption } from '../interface/Graffiti'
 import { defaultGraffitiOption } from '../dataset/constant/Graffiti'
 import { IWhiteSpaceOption } from '../interface/WhiteSpace'
 import { defaultWhiteSpaceOption } from '../dataset/constant/WhiteSpace'
+import { IPageLayeredOption } from '../interface/PageLayered'
+import { defaultPageLayeredOption } from '../dataset/constant/PageLayered'
 
 export function mergeOption(
   options: IEditorOption = {}
@@ -174,6 +176,10 @@ export function mergeOption(
     ...defaultMagnifierOption,
     ...options.magnifier
   }
+  const pageLayeredOptions: Required<IPageLayeredOption> = {
+    ...defaultPageLayeredOption,
+    ...options.pageLayered
+  }
   const modeRuleOption: DeepRequired<IModeRule> = {
     print: {
       ...defaultModeRuleOption.print,
@@ -263,6 +269,7 @@ export function mergeOption(
     label: labelOptions,
     imgCaption: imgCaptionOptions,
     list: listOptions,
-    magnifier: magnifierOptions
+    magnifier: magnifierOptions,
+    pageLayered: pageLayeredOptions
   }
 }

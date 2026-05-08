@@ -123,10 +123,13 @@ export function mousemove(evt: MouseEvent, host: CanvasEvent) {
     }
     rangeManager.setRange(start, end)
   }
-  // 绘制
+  // 绘制——PERF-PLAN — Strategy B：选区拖拽是装饰层独立重绘的典型场景。
+  // isDecorationOnly=true 让 render 跳过 _drawPage 全套，只擦写 decoration
+  // canvas 上的选区矩形，主体文本完全不动。当前缩放 / 主元素未变更时安全。
   draw.render({
     isSubmitHistory: false,
     isSetCursor: false,
-    isCompute: false
+    isCompute: false,
+    isDecorationOnly: true
   })
 }

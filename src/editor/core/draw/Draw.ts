@@ -167,6 +167,22 @@ export class Draw {
   private pageContainer: HTMLDivElement
   private pageList: HTMLCanvasElement[]
   private ctxList: CanvasRenderingContext2D[]
+  // PERF-PLAN — Strategy B：分层 canvas。每页结构 = wrapper div > [base canvas + decoration canvas]。
+  // pageList / ctxList 仍然是「base」canvas + ctx，对外接口零变化（mouse 事件、scroll
+  // observer、PDF 导出等都基于 base）。decorationCanvasList / decorationCtxList 是
+  // 与之平行的「decoration」层；当 options.pageLayered.enable=false 时这两个数组中的
+  // 条目直接 alias 到 base，所有 paint 代码无差别地写到一个 ctx——零回归。
+  private decorationCanvasList: HTMLCanvasElement[]
+  private decorationCtxList: CanvasRenderingContext2D[]
+  private pageWrapperList: HTMLDivElement[]
+  // 装饰层 dirty page 集合：与 _drawnPages 平行——「这一页的 decoration 已是最新」。
+  // 装饰层只跟踪：选区 / 搜索高亮 / 表格跨行/列。base 重绘时同时清空 decoration
+  // 缓存（base 改 → row 几何变 → 选区位置可能变）。
+  private _decorationDrawnPages: Set<number>
+  // drawRow 内部 range / table-cross-row paint 时使用的目标 ctx——_drawPage 在
+  // 调用 drawRow 前置位为 decoration ctx，drawRow 完成后清零。
+  // 为 null 时（包括非分层模式 / 单元格递归外层）走原 ctx——零回归。
+  private _currentDecorationCtx: CanvasRenderingContext2D | null
   // 复用的测量画布上下文（避免 computeRowList 每次创建 canvas）
   private _measureCanvas: HTMLCanvasElement | null
   private _measureCtx: CanvasRenderingContext2D | null
@@ -330,6 +346,11 @@ export class Draw {
     this.container = this._wrapContainer(rootContainer)
     this.pageList = []
     this.ctxList = []
+    this.decorationCanvasList = []
+    this.decorationCtxList = []
+    this.pageWrapperList = []
+    this._decorationDrawnPages = new Set()
+    this._currentDecorationCtx = null
     this._measureCanvas = null
     this._measureCtx = null
     this._pendingRenderPayload = null
@@ -1594,14 +1615,9 @@ export class Draw {
     const width = this.getWidth()
     const height = this.getHeight()
     this.container.style.width = `${width}px`
-    this.pageList.forEach((p, i) => {
-      p.width = width * dpr
-      p.height = height * dpr
-      p.style.width = `${width}px`
-      p.style.height = `${height}px`
-      p.style.marginBottom = `${this.getPageGap()}px`
-      this._initPageContext(this.ctxList[i])
-    })
+    for (let i = 0; i < this.pageList.length; i++) {
+      this._resizePageBacking(i, width, height, dpr)
+    }
     if (canFastPath) {
       this._scaleLayoutInPlace(this.rowList, ratio, payload)
       // Row checkpoints carry scale-dependent carry state (x / y /
@@ -1764,11 +1780,9 @@ export class Draw {
     const dpr = this.getPagePixelRatio()
     const width = this.getWidth()
     const height = this.getHeight()
-    this.pageList.forEach((p, i) => {
-      p.width = width * dpr
-      p.height = height * dpr
-      this._initPageContext(this.ctxList[i])
-    })
+    for (let i = 0; i < this.pageList.length; i++) {
+      this._resizePageBacking(i, width, height, dpr)
+    }
     this.render({
       isSubmitHistory: false,
       isSetCursor: false
@@ -1782,13 +1796,9 @@ export class Draw {
     const realWidth = this.getWidth()
     const realHeight = this.getHeight()
     this.container.style.width = `${realWidth}px`
-    this.pageList.forEach((p, i) => {
-      p.width = realWidth * dpr
-      p.height = realHeight * dpr
-      p.style.width = `${realWidth}px`
-      p.style.height = `${realHeight}px`
-      this._initPageContext(this.ctxList[i])
-    })
+    for (let i = 0; i < this.pageList.length; i++) {
+      this._resizePageBacking(i, realWidth, realHeight, dpr)
+    }
     this.render({
       isSubmitHistory: false,
       isSetCursor: false
@@ -1801,13 +1811,9 @@ export class Draw {
     const width = this.getWidth()
     const height = this.getHeight()
     this.container.style.width = `${width}px`
-    this.pageList.forEach((p, i) => {
-      p.width = width * dpr
-      p.height = height * dpr
-      p.style.width = `${width}px`
-      p.style.height = `${height}px`
-      this._initPageContext(this.ctxList[i])
-    })
+    for (let i = 0; i < this.pageList.length; i++) {
+      this._resizePageBacking(i, width, height, dpr)
+    }
     this.render({
       isSubmitHistory: false,
       isSetCursor: false
@@ -2187,25 +2193,120 @@ export class Draw {
   private _createPage(pageNo: number) {
     const width = this.getWidth()
     const height = this.getHeight()
-    const canvas = document.createElement('canvas')
-    canvas.style.width = `${width}px`
-    canvas.style.height = `${height}px`
-    canvas.style.display = 'block'
-    canvas.style.backgroundColor = '#ffffff'
-    canvas.style.marginBottom = `${this.getPageGap()}px`
-    canvas.setAttribute('data-index', String(pageNo))
-    this.pageContainer.append(canvas)
-    // 调整分辨率
     const dpr = this.getPagePixelRatio()
-    canvas.width = width * dpr
-    canvas.height = height * dpr
-    canvas.style.cursor = 'text'
-    const ctx = canvas.getContext('2d')!
-    // 初始化上下文配置
+    const isLayered = this._isPageLayered()
+
+    // base canvas——getPageList() 仍然返回这个 canvas，对外行为不变。
+    const base = document.createElement('canvas')
+    base.style.width = `${width}px`
+    base.style.height = `${height}px`
+    base.style.display = 'block'
+    base.style.backgroundColor = '#ffffff'
+    base.style.cursor = 'text'
+    base.setAttribute('data-index', String(pageNo))
+    base.width = width * dpr
+    base.height = height * dpr
+    const ctx = base.getContext('2d')!
     this._initPageContext(ctx)
-    // 缓存上下文
-    this.pageList.push(canvas)
+
+    if (isLayered) {
+      // wrapper 是 pageContainer 的直接子节点——继承原 base canvas 在 flex/block
+      // 流中的位置（间距由 wrapper 的 marginBottom 提供）；base + decoration 都
+      // 用 absolute 位于 wrapper 内部叠放。
+      const wrapper = document.createElement('div')
+      wrapper.classList.add(`${EDITOR_PREFIX}-page-wrapper`)
+      wrapper.setAttribute('data-index', String(pageNo))
+      wrapper.style.position = 'relative'
+      wrapper.style.width = `${width}px`
+      wrapper.style.height = `${height}px`
+      wrapper.style.display = 'block'
+      wrapper.style.marginBottom = `${this.getPageGap()}px`
+      base.classList.add(`${EDITOR_PREFIX}-page-base`)
+      base.style.position = 'absolute'
+      base.style.left = '0'
+      base.style.top = '0'
+      base.style.marginBottom = '0'
+      wrapper.appendChild(base)
+
+      const decoration = document.createElement('canvas')
+      decoration.classList.add(`${EDITOR_PREFIX}-page-decoration`)
+      decoration.setAttribute('data-index', String(pageNo))
+      decoration.style.position = 'absolute'
+      decoration.style.left = '0'
+      decoration.style.top = '0'
+      decoration.style.width = `${width}px`
+      decoration.style.height = `${height}px`
+      decoration.style.pointerEvents = 'none'
+      decoration.width = width * dpr
+      decoration.height = height * dpr
+      const decoCtx = decoration.getContext('2d')!
+      this._initPageContext(decoCtx)
+      wrapper.appendChild(decoration)
+
+      this.pageContainer.append(wrapper)
+      this.pageWrapperList.push(wrapper)
+      this.decorationCanvasList.push(decoration)
+      this.decorationCtxList.push(decoCtx)
+    } else {
+      // 单层 fallback——保留旧 DOM 结构。decoration 数组条目 alias base，paint
+      // 代码无差别地写到一个 ctx。
+      base.style.marginBottom = `${this.getPageGap()}px`
+      this.pageContainer.append(base)
+      this.pageWrapperList.push(base as unknown as HTMLDivElement)
+      this.decorationCanvasList.push(base)
+      this.decorationCtxList.push(ctx)
+    }
+    this.pageList.push(base)
     this.ctxList.push(ctx)
+  }
+
+  /**
+   * 是否启用分层 canvas。
+   *   - options.pageLayered.enable=true（默认）→ 每页 wrapper + base + decoration
+   *   - 否则单层 base canvas（旧行为，零回归）
+   */
+  private _isPageLayered(): boolean {
+    return this.options.pageLayered.enable === true
+  }
+
+  /** 拿到第 pageNo 页的 decoration ctx；分层关时与 base ctx 同一个。 */
+  public getDecorationCtx(pageNo: number): CanvasRenderingContext2D {
+    return this.decorationCtxList[pageNo] ?? this.ctxList[pageNo]
+  }
+
+  /**
+   * 同步重设第 pageNo 页的 base + decoration + wrapper 的物理尺寸 / DPR。
+   * setPageScale / setPaperSize / setPaperDirection / setPageDevicePixel 共用——
+   * 替换原来散落在各 setter 里的 `pageList.forEach((p, i) => { p.width = ... })`
+   * 块，确保两层 canvas 永远不会出现尺寸漂移（否则 decoration 上的选区矩形会
+   * 偏离 base 上的文字）。
+   */
+  private _resizePageBacking(pageNo: number, w: number, h: number, dpr: number) {
+    const base = this.pageList[pageNo]
+    base.width = w * dpr
+    base.height = h * dpr
+    base.style.width = `${w}px`
+    base.style.height = `${h}px`
+    this._initPageContext(this.ctxList[pageNo])
+    const wrapper = this.pageWrapperList[pageNo]
+    if (wrapper && wrapper !== (base as unknown as HTMLDivElement)) {
+      wrapper.style.width = `${w}px`
+      wrapper.style.height = `${h}px`
+      wrapper.style.marginBottom = `${this.getPageGap()}px`
+      // 分层模式下 base 的 marginBottom 由 wrapper 提供——保留 base 自身为 0
+      base.style.marginBottom = '0'
+    } else {
+      // 单层模式，间距挂在 base 自己身上（与旧行为一致）
+      base.style.marginBottom = `${this.getPageGap()}px`
+    }
+    const deco = this.decorationCanvasList[pageNo]
+    if (deco && deco !== base) {
+      deco.width = w * dpr
+      deco.height = h * dpr
+      deco.style.width = `${w}px`
+      deco.style.height = `${h}px`
+      this._initPageContext(this.decorationCtxList[pageNo])
+    }
   }
 
   private _initPageContext(ctx: CanvasRenderingContext2D) {
@@ -3266,15 +3367,16 @@ export class Draw {
       const dpr = this.getPagePixelRatio()
       const pageDom = this.pageList[0]
       const pageDomHeight = Number(pageDom.style.height.replace('px', ''))
-      if (pageHeight > pageDomHeight) {
-        pageDom.style.height = `${pageHeight}px`
-        pageDom.height = pageHeight * dpr
-      } else {
-        const reduceHeight = pageHeight < height ? height : pageHeight
-        pageDom.style.height = `${reduceHeight}px`
-        pageDom.height = reduceHeight * dpr
-      }
-      this._initPageContext(this.ctxList[0])
+      const targetHeight =
+        pageHeight > pageDomHeight
+          ? pageHeight
+          : pageHeight < height
+            ? height
+            : pageHeight
+      // PERF-PLAN — Strategy B：连续模式动态高度调整也必须同步 wrapper /
+      // decoration——否则 decoration canvas 会保持创建时的初始高度，下方
+      // 内容画到 base 上 decoration 会被裁掉。
+      this._resizePageBacking(0, this.getWidth(), targetHeight, dpr)
     } else {
       let rowIndex = 0
       while (rowIndex < this.rowList.length) {
@@ -3825,11 +3927,13 @@ export class Draw {
       this.strikeout.render(ctx)
       // 绘制批注样式
       this.group.render(ctx)
-      // 绘制选区
+      // 绘制选区——PERF-PLAN — Strategy B：当 _currentDecorationCtx 非空（_drawPage
+      // 设置）时写到 decoration 层；否则保持旧行为（写到 base ctx，用于打印 / 单层）。
+      const decorationCtx = this._currentDecorationCtx ?? ctx
       if (!isPrintMode && !isGraffitiMode) {
         if (rangeRecord.width && rangeRecord.height) {
           const { x, y, width, height } = rangeRecord
-          this.range.render(ctx, x, y, width, height)
+          this.range.render(decorationCtx, x, y, width, height)
         }
         if (
           isCrossRowCol &&
@@ -3841,7 +3945,7 @@ export class Draw {
               leftTop: [x, y]
             }
           } = positionList[curRow.startIndex]
-          this.tableParticle.drawRange(ctx, tableRangeElement, x, y)
+          this.tableParticle.drawRange(decorationCtx, tableRangeElement, x, y)
         }
       }
     }
@@ -3879,12 +3983,22 @@ export class Draw {
   private _clearPage(pageNo: number) {
     const ctx = this.ctxList[pageNo]
     const pageDom = this.pageList[pageNo]
-    ctx.clearRect(
-      0,
-      0,
-      Math.max(pageDom.width, this.getWidth()),
-      Math.max(pageDom.height, this.getHeight())
-    )
+    const w = Math.max(pageDom.width, this.getWidth())
+    const h = Math.max(pageDom.height, this.getHeight())
+    ctx.clearRect(0, 0, w, h)
+    // PERF-PLAN — Strategy B：分层模式下 decoration 是独立 canvas，必须同步
+    // 清——否则上一帧的选区矩形会挂在新文本上。单层模式 decoCtx === ctx，
+    // 第二次 clearRect 是 no-op。
+    const decoCtx = this.decorationCtxList[pageNo]
+    if (decoCtx && decoCtx !== ctx) {
+      const deco = this.decorationCanvasList[pageNo]
+      decoCtx.clearRect(
+        0,
+        0,
+        Math.max(deco.width, this.getWidth()),
+        Math.max(deco.height, this.getHeight())
+      )
+    }
     this.blockParticle.clear()
   }
 
@@ -3903,8 +4017,14 @@ export class Draw {
     const isContinuityMode = pageMode === PageMode.CONTINUITY
     const innerWidth = this.getInnerWidth()
     const ctx = this.ctxList[pageNo]
+    // PERF-PLAN — Strategy B：drawRow 内部 range / table-cross-row paint 时
+    // 取这个 ctx 作为目标。打印模式不需要选区——保留 null，落到 base ctx 上
+    // 保持原行为（实际打印模式下 startIndex===endIndex，不会画选区）。
+    const decoCtx = this.decorationCtxList[pageNo]
+    this._currentDecorationCtx = !isPrintMode ? decoCtx : null
     // 判断当前激活区域-非正文区域时元素透明度降低
     ctx.globalAlpha = !this.zone.isMainActive() ? inactiveAlpha : 1
+    if (decoCtx && decoCtx !== ctx) decoCtx.globalAlpha = ctx.globalAlpha
     this._clearPage(pageNo)
     // 绘制背景
     if (
@@ -3968,9 +4088,11 @@ export class Draw {
       pageNo,
       imgDisplays: [ImageDisplay.FLOAT_TOP, ImageDisplay.SURROUND]
     })
-    // 搜索匹配绘制
+    // 搜索匹配绘制——PERF-PLAN — Strategy B：装饰层。打印模式没有搜索高亮，
+    // 走原 ctx 是 no-op；其它情况落到 decoration canvas 上，便于 search-next
+    // 触发的快路径重绘只擦除 decoration、不动 base 文字。
     if (!isPrintMode && this.search.getSearchKeyword()) {
-      this.search.render(ctx, pageNo)
+      this.search.render(this._currentDecorationCtx ?? ctx, pageNo)
     }
     // 绘制空白占位符
     if (this.elementList.length <= 1 && !this.elementList[0]?.listId) {
@@ -3997,6 +4119,187 @@ export class Draw {
       this.options.watermark.layer === WatermarkLayer.TOP
     ) {
       this.waterMark.render(ctx, pageNo)
+    }
+    // PERF-PLAN — Strategy B：完成本页后 decoration 视为最新；后续若仅
+    // selection / search 改动则可走快路径只重绘装饰层。
+    this._decorationDrawnPages.add(pageNo)
+    this._currentDecorationCtx = null
+  }
+
+  /**
+   * PERF-PLAN — Strategy B：装饰层独立重绘。
+   *
+   * 调用前提：base layer 完全干净（主元素列表 / 行布局 / 位置都未变）。仅清空
+   * 并重绘 decoration canvas——选区矩形、搜索匹配高亮、表格跨行 / 列范围。
+   * 通过 _walkDecorationRow 复用 drawRow 里的 rangeRecord 计算逻辑，但跳过
+   * 全部文字 / 控件 / 下划线 / 删除线 / 列表标记 / 表格内文字 / 浮动元素的
+   * 实际 paint——典型用例下成本约为 drawRow 的 5–10%。
+   *
+   * 当 _isPageLayered() 为 false 时直接退化到 _drawPage——单层 canvas 没法
+   * 「只擦装饰」，必须重画整页。
+   */
+  private _drawDecorationOnly(payload: IDrawPagePayload) {
+    if (!this._isPageLayered()) {
+      this._drawPage(payload)
+      return
+    }
+    const { pageNo, elementList, positionList, rowList } = payload
+    const isPrintMode = this.mode === EditorMode.PRINT
+    if (isPrintMode) {
+      this._drawPage(payload)
+      return
+    }
+    const decoCtx = this.decorationCtxList[pageNo]
+    const baseCtx = this.ctxList[pageNo]
+    if (!decoCtx || decoCtx === baseCtx) {
+      this._drawPage(payload)
+      return
+    }
+    const deco = this.decorationCanvasList[pageNo]
+    decoCtx.globalAlpha = !this.zone.isMainActive()
+      ? this.options.inactiveAlpha
+      : 1
+    decoCtx.clearRect(
+      0,
+      0,
+      Math.max(deco.width, this.getWidth()),
+      Math.max(deco.height, this.getHeight())
+    )
+    // 走 row 仅跑 rangeRecord 逻辑，不做任何文字 / 几何 paint。
+    this._walkDecorationRow(decoCtx, {
+      elementList,
+      positionList,
+      rowList,
+      pageNo,
+      startIndex: rowList[0]?.startIndex ?? 0,
+      innerWidth: this.getInnerWidth(),
+      zone: EditorZone.MAIN
+    })
+    // 搜索高亮——Search.render 只走 matchList，本身就很轻
+    if (this.search.getSearchKeyword()) {
+      this.search.render(decoCtx, pageNo)
+    }
+    this._decorationDrawnPages.add(pageNo)
+  }
+
+  /**
+   * 仅遍历 rowList 计算 + 绘制选区矩形 + 表格跨行/列范围；与 drawRow 中选区
+   * 段落（lines 3846-3900 + 3930-3948）的逻辑完全等价，但跳过其他全部 paint。
+   * 递归处理表格内单元格（嵌套选区）。
+   */
+  private _walkDecorationRow(
+    decoCtx: CanvasRenderingContext2D,
+    payload: IDrawRowPayload
+  ) {
+    const {
+      rowList,
+      elementList,
+      positionList,
+      startIndex,
+      pageNo,
+      zone = EditorZone.MAIN
+    } = payload
+    const {
+      isCrossRowCol,
+      tableId,
+      zone: currentZone,
+      startIndex: rs,
+      endIndex: re
+    } = this.range.getRange()
+    const positionContext = this.position.getPositionContext()
+    let index = startIndex
+    for (let i = 0; i < rowList.length; i++) {
+      const curRow = rowList[i]
+      const rangeRecord: IElementFillRect = {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0
+      }
+      let tableRangeElement: IElement | null = null
+      for (let j = 0; j < curRow.elementList.length; j++) {
+        const element = curRow.elementList[j]
+        const metrics = element.metrics
+        const {
+          coordinate: {
+            leftTop: [x, y]
+          }
+        } = positionList[curRow.startIndex + j]
+        if (
+          element.type === ElementType.TABLE &&
+          isCrossRowCol &&
+          !tableRangeElement
+        ) {
+          rangeRecord.x = x
+          rangeRecord.y = y
+          tableRangeElement = element
+        }
+        if (
+          currentZone === zone &&
+          rs !== re &&
+          rs <= index &&
+          index <= re &&
+          ((!positionContext.isTable && !element.tdId) ||
+            positionContext.tdId === element.tdId)
+        ) {
+          if (rs === index) {
+            const nextElement = elementList[rs + 1]
+            if (nextElement && nextElement.value === ZERO) {
+              rangeRecord.x = x + metrics.width
+              rangeRecord.y = y
+              rangeRecord.height = curRow.height
+              rangeRecord.width += this.options.rangeMinWidth
+            }
+          } else {
+            let rangeWidth = metrics.width
+            if (rangeWidth === 0 && curRow.elementList.length === 1) {
+              rangeWidth = this.options.rangeMinWidth
+            }
+            if (!rangeRecord.width) {
+              rangeRecord.x = x
+              rangeRecord.y = y
+              rangeRecord.height = curRow.height
+            }
+            rangeRecord.width += rangeWidth
+          }
+        }
+        // 嵌套表格——处理单元格内选区。打印模式与外层一致跳过。
+        if (element.type === ElementType.TABLE && !element.hide && element.trList) {
+          for (let t = 0; t < element.trList.length; t++) {
+            const tr = element.trList[t]
+            for (let d = 0; d < tr.tdList.length; d++) {
+              const td = tr.tdList[d]
+              if (!td.rowList || !td.positionList) continue
+              this._walkDecorationRow(decoCtx, {
+                elementList: td.value,
+                positionList: td.positionList,
+                rowList: td.rowList,
+                pageNo,
+                startIndex: 0,
+                innerWidth: payload.innerWidth,
+                zone
+              })
+            }
+          }
+        }
+        index++
+      }
+      if (rangeRecord.width && rangeRecord.height) {
+        const { x, y, width, height } = rangeRecord
+        this.range.render(decoCtx, x, y, width, height)
+      }
+      if (
+        isCrossRowCol &&
+        tableRangeElement &&
+        tableRangeElement.id === tableId
+      ) {
+        const {
+          coordinate: {
+            leftTop: [x, y]
+          }
+        } = positionList[curRow.startIndex]
+        this.tableParticle.drawRange(decoCtx, tableRangeElement, x, y)
+      }
     }
   }
 
@@ -4170,7 +4473,14 @@ export class Draw {
       // AND：只有当所有合并源都标注 isTextInput 时才视为输入合批；
       // 任一非输入动作进入本帧即按非输入处理（先 flush 当前 batch、再正常 submit）
       isTextInput:
-        a.isTextInput === true && b.isTextInput === true ? true : undefined
+        a.isTextInput === true && b.isTextInput === true ? true : undefined,
+      // PERF-PLAN — Strategy B：装饰层快路径同样用 AND 合并——只要一个 caller
+      // 是「全量重绘」级别的请求（typing / 缩放 / 字体改动），本帧必须走完整
+      // render；将 isDecorationOnly 收敛到 false 是安全降级。
+      isDecorationOnly:
+        a.isDecorationOnly === true && b.isDecorationOnly === true
+          ? true
+          : undefined
     }
     // remoteDirtyRange：取区间并集
     if (a.remoteDirtyRange || b.remoteDirtyRange) {
@@ -4220,13 +4530,49 @@ export class Draw {
       isInit = false,
       isSourceHistory = false,
       isFirstRender = false,
-      isTextInput = false
+      isTextInput = false,
+      isDecorationOnly = false
     } = payload || {}
     let { curIndex } = payload || {}
     const innerWidth = this.getInnerWidth()
     const isPagingMode = this.getIsPagingMode()
     // 缓存当前页数信息
     const oldPageSize = this.pageRowList.length
+
+    // PERF-PLAN — Strategy B：装饰层独立重绘快路径。
+    // 调用方显式标注 isDecorationOnly 时——典型来自 selection drag (mousemove) /
+    // search-next/pre——若条件满足则走极简路径：只擦除 decoration canvas + 重画
+    // 选区矩形 + 搜索高亮。完全跳过 computeRowList / computePositionList /
+    // _drawPage 全套——成本约为 base 重绘的 5–10%。
+    //
+    // 安全条件：必须分层、非首次渲染、有有效 pageRowList、无未消化的 dirty 文本
+    // 改动、非打印模式。任一不满足则降级为常规 render（行为不变）。
+    if (
+      isDecorationOnly &&
+      !isCompute &&
+      this._isPageLayered() &&
+      !isInit &&
+      !isFirstRender &&
+      this.pageRowList.length > 0 &&
+      this._dirtyRange === null &&
+      this.mode !== EditorMode.PRINT
+    ) {
+      const positionList = this.position.getOriginalMainPositionList()
+      const elementList = this.getOriginalMainElementList()
+      for (let i = 0; i < this.pageRowList.length; i++) {
+        if (!this.pageRowList[i] || !this.pageList[i]) continue
+        this._drawDecorationOnly({
+          elementList,
+          positionList,
+          rowList: this.pageRowList[i],
+          pageNo: i
+        })
+      }
+      // setCursor / history 都不应在 decoration-only 路径上跑——decoration 不
+      // 改变光标位置（光标位置由 selection drag 期间另行 setRange 触发）。
+      // history 同理——选区拖拽不需要进入 undo stack。
+      return
+    }
     // 计算文档信息
     if (isCompute) {
       // 主元素列表是否需要重新布局：仅当当前编辑区域为 MAIN 或主列表 dirty
@@ -4512,12 +4858,30 @@ export class Draw {
     if (prePageCount > curPageCount) {
       const deleteCount = prePageCount - curPageCount
       this.ctxList.splice(curPageCount, deleteCount)
-      this.pageList
-        .splice(curPageCount, deleteCount)
-        .forEach(page => page.remove())
+      const removedBases = this.pageList.splice(curPageCount, deleteCount)
+      this.decorationCtxList.splice(curPageCount, deleteCount)
+      this.decorationCanvasList.splice(curPageCount, deleteCount)
+      const removedWrappers = this.pageWrapperList.splice(
+        curPageCount,
+        deleteCount
+      )
+      // 优先移除 wrapper（带走 base + decoration）；单层模式 wrapper === base
+      // 直接移除 base 即可——为兼容旧引用关系两条路径都 try。
+      for (let i = 0; i < removedBases.length; i++) {
+        const base = removedBases[i]
+        const wrapper = removedWrappers[i]
+        if (wrapper && wrapper !== (base as unknown as HTMLDivElement)) {
+          wrapper.remove()
+        } else {
+          base.remove()
+        }
+      }
       // 同步移除已绘制集合中的越界条目
       for (const idx of Array.from(this._drawnPages)) {
         if (idx >= curPageCount) this._drawnPages.delete(idx)
+      }
+      for (const idx of Array.from(this._decorationDrawnPages)) {
+        if (idx >= curPageCount) this._decorationDrawnPages.delete(idx)
       }
     }
     // 计算 dirty pages（PERF-PLAN §2.4）。无 dirty 提示 / 首次渲染时返回 null
