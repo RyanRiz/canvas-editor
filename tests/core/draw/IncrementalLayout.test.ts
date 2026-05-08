@@ -435,6 +435,66 @@ describe('Draw - incremental computeRowList (P2.2)', () => {
     errSpy.mockRestore()
   })
 
+  it('PERF-PLAN follow-up: 收敛 + pagination 稳定时，positionList 与全量字节相等', () => {
+    // 平行场景：A 走增量 + 收敛尾部复用；B 强制全量。比较 positionList 关键
+    // 字段（pageNo / index / coordinate.leftTop[0..1]）必须字节相等。
+    function snapshot(positions: { pageNo: number; index: number; coordinate: { leftTop: number[] } }[]) {
+      return positions.map(p => ({
+        pageNo: p.pageNo,
+        index: p.index,
+        x: p.coordinate.leftTop[0],
+        y: p.coordinate.leftTop[1]
+      }))
+    }
+    const data = {
+      header: [],
+      main: makeManyParagraphs(40),
+      footer: []
+    }
+    const a = createTestEditor({
+      options: { pageMode: PageMode.CONTINUITY },
+      data: { ...data, main: data.main.slice() } as any
+    })
+    a.editor.draw.render({ isCompute: true, isSubmitHistory: false })
+    const internalA = a.editor.draw as unknown as DrawInternals
+    const midRowIdx = Math.floor(internalA.rowList.length / 2)
+    const dirtyStart = internalA.rowList[midRowIdx].startIndex + 1
+    a.editor.draw.spliceElementList(
+      a.editor.draw.getOriginalMainElementList(),
+      dirtyStart,
+      0,
+      [{ value: 'Z' }]
+    )
+    a.editor.draw.render({ isCompute: true, isSubmitHistory: false })
+    const incSnap = snapshot(
+      a.editor.draw.getPosition().getOriginalMainPositionList()
+    )
+    a.destroy()
+
+    const b = createTestEditor({
+      options: { pageMode: PageMode.CONTINUITY },
+      data: { ...data, main: data.main.slice() } as any
+    })
+    b.editor.draw.render({ isCompute: true, isSubmitHistory: false })
+    b.editor.draw.spliceElementList(
+      b.editor.draw.getOriginalMainElementList(),
+      dirtyStart,
+      0,
+      [{ value: 'Z' }]
+    )
+    b.editor.draw.invalidatePaintCache() // 强制全量
+    b.editor.draw.render({ isCompute: true, isSubmitHistory: false })
+    const fullSnap = snapshot(
+      b.editor.draw.getPosition().getOriginalMainPositionList()
+    )
+    b.destroy()
+
+    expect(incSnap.length).toBe(fullSnap.length)
+    for (let i = 0; i < incSnap.length; i++) {
+      expect(incSnap[i]).toEqual(fullSnap[i])
+    }
+  })
+
   it('页眉 zone 输入不应误启用主体增量（mainNeedsCompute=false 路径）', () => {
     // 跨 zone 安全：页眉/页脚 zone 输入不动主元素 dirty range，render() 跳过主体
     // 整个 if (mainNeedsCompute) 块——增量决策 / checkpointSink 都不参与。

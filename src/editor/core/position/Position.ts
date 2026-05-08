@@ -348,13 +348,38 @@ export class Position {
   public computePositionListIncremental(payload: {
     fromRowGlobalIndex: number
     fromElementIndex: number
+    /**
+     * 收敛尾部复用提示（PERF-PLAN follow-up）。
+     *
+     * 当 §2.2 的 row-list 收敛命中、且 pagination 稳定时调用方传入：
+     *   - fromNewRowGlobalIndex：NEW pageRowList 中第一个「来自旧 rowList 的
+     *     被复用行」的全局索引——之前的行（含 matched 新行）需要 fresh 计算。
+     *   - deltaElems：dirty 处的元素索引漂移（newTotalElems - oldTotalElems）。
+     *
+     * 命中后：fresh 计算到 fromNewRowGlobalIndex 之前为止；剩余位置直接复用
+     * 上一帧的 IElementPosition 对象（仅修改 `index` 字段为 NEW 坐标）——这
+     * 跳过 ~95% 的对象构造，是 25 页文档 typing 时本函数从 ~25-130ms 降回
+     * 1-3ms 的关键。
+     *
+     * 安全：调用方负责验证「pagination 稳定 + 行布局未漂」——典型场景是
+     * 不引发换行的字符插入。两侧 row 数 / 高度有任何变化都不应传入。
+     */
+    convergedReuse?: {
+      fromNewRowGlobalIndex: number
+      deltaElems: number
+    }
   }) {
-    const { fromRowGlobalIndex, fromElementIndex } = payload
+    const { fromRowGlobalIndex, fromElementIndex, convergedReuse } = payload
     if (fromElementIndex <= 0 || fromRowGlobalIndex <= 0) {
       // 没有可保留的前缀——退化成全量
       this.computePositionList()
       return
     }
+    // PERF-PLAN follow-up：在截断前快照旧 positionList，供后段「收敛尾部复用」使用。
+    // 仅当 convergedReuse 存在时拷贝，正常路径无开销。
+    const oldPositionSnapshot = convergedReuse
+      ? this.positionList.slice()
+      : null
     // 1) 截断 positionList——前缀部分继续沿用上一帧
     if (this.positionList.length > fromElementIndex) {
       this.positionList.length = fromElementIndex
@@ -373,7 +398,8 @@ export class Position {
     const extraHeight = header.getExtraHeight()
     const startY = margins[0] + extraHeight
     let startRowIndex = 0
-    for (let i = 0; i < pageRowList.length; i++) {
+    let reuseHit = false
+    outer: for (let i = 0; i < pageRowList.length; i++) {
       const rowList = pageRowList[i]
       if (!rowList?.length) continue
       // 整页都在 fromRowGlobalIndex 之前——直接跳过
@@ -385,6 +411,14 @@ export class Position {
       for (let k = 0; k < rowList.length; k++) {
         const globalRowIndex = startRowIndex + k
         if (globalRowIndex < fromRowGlobalIndex) continue
+        // 收敛尾部复用：到达 reuse 起点行——停止 fresh 计算，下面统一接驳。
+        if (
+          convergedReuse &&
+          globalRowIndex >= convergedReuse.fromNewRowGlobalIndex
+        ) {
+          reuseHit = true
+          break outer
+        }
         const row = rowList[k]
         this.computePageRowPosition({
           positionList: this.positionList,
@@ -399,6 +433,28 @@ export class Position {
         })
       }
       startRowIndex += rowList.length
+    }
+    // 收敛尾部复用：fresh 计算结束位置 = 当前 positionList.length。其后所有元素
+    // 都来自旧 rowList（同对象引用 + 同 layout），仅 absolute index 漂了 deltaElems。
+    //
+    // 性能要点：直接「就地修改 .index」并 push 旧对象——避免每条 IElementPosition
+    // 的 spread {...old} 分配（13 字段 × 28k 元素 = ~360k 拷贝，spread 占了
+    // computePositionList 时间里相当大的一块）。安全性：
+    //   - 老 positionList 已经被 truncate 截断，外部从此处看不到那些旧对象。
+    //   - oldPositionSnapshot 是浅拷贝数组，引用同一组对象——我们仍持有它，
+    //     但本帧用完即丢；不会被外部观察到「中间态 index 旧值」。
+    //   - cursorPosition / floatPositionList 的相关引用都在本 render 后续步骤里
+    //     被重新填充（setCursor / area.compute / 重新 push 浮动），不依赖旧 .index。
+    if (convergedReuse && reuseHit && oldPositionSnapshot) {
+      const newReuseStart = this.positionList.length
+      const oldReuseStart = newReuseStart - convergedReuse.deltaElems
+      const delta = convergedReuse.deltaElems
+      for (let t = oldReuseStart; t < oldPositionSnapshot.length; t++) {
+        const old = oldPositionSnapshot[t]
+        if (!old) continue
+        old.index += delta
+        this.positionList.push(old)
+      }
     }
   }
 
