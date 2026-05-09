@@ -1394,12 +1394,14 @@ export class Draw {
     // delta 记录器使用。仅在 replay history（撤销/重做）期间不做记录，避免
     // 自相干循环（applyBackward 调用 splice 还原时会再次进来）。
     if (!this._isReplayingHistory) {
+      const clonedRemoved = getSlimCloneElementList(removedSnapshot)
+      const clonedInserted = items ? getSlimCloneElementList(items) : []
       const event: IMutationEvent = {
         kind: 'splice',
         scope,
         start,
-        removed: removedSnapshot,
-        inserted: items ? items.slice() : []
+        removed: clonedRemoved,
+        inserted: clonedInserted
       }
       // 第一笔 mutation 入队前先锁住 BEFORE 状态——delta 入栈时携带，作为
       // applyBackward 的「目的地」元数据。
@@ -1422,12 +1424,14 @@ export class Draw {
         this._emitMutation(event)
       }
     } else if (this._mutationListeners.size > 0) {
+      const clonedRemoved = getSlimCloneElementList(removedSnapshot)
+      const clonedInserted = items ? getSlimCloneElementList(items) : []
       this._emitMutation({
         kind: 'splice',
         scope,
         start,
-        removed: removedSnapshot,
-        inserted: items ? items.slice() : []
+        removed: clonedRemoved,
+        inserted: clonedInserted
       })
     }
   }
@@ -5556,6 +5560,17 @@ export class Draw {
       this._preMutationMeta !== null &&
       !this.historyManager.isStackEmpty() &&
       this._pendingHistoryMutations.every(m => m.scope === 'main')
+    if (this.options.debugHistory) {
+      console.log('[canvas-editor submitHistory]', {
+        canUseDelta,
+        curIndex,
+        pendingMutationCount: this._pendingHistoryMutations.length,
+        deltaHistoryUnsafe: this._deltaHistoryUnsafe,
+        hasPreMutationMeta: this._preMutationMeta !== null,
+        historyEmpty: this.historyManager.isStackEmpty(),
+        mutationScopes: this._pendingHistoryMutations.map(m => m.scope)
+      })
+    }
     if (canUseDelta) {
       this._submitDeltaHistory(curIndex)
     } else {
@@ -5596,7 +5611,11 @@ export class Draw {
         // removed.length, ...inserted)——等价于「把改动重新做一遍」。
         for (let i = 0; i < mutations.length; i++) {
           const m = mutations[i]
-          this.elementList.splice(m.start, m.removed.length, ...m.inserted)
+          this.elementList.splice(
+            m.start,
+            m.removed.length,
+            ...getSlimCloneElementList(m.inserted)
+          )
         }
       } finally {
         this._isReplayingHistory = false
@@ -5624,7 +5643,11 @@ export class Draw {
         // 前一条已经应用之后的坐标系。
         for (let i = mutations.length - 1; i >= 0; i--) {
           const m = mutations[i]
-          this.elementList.splice(m.start, m.inserted.length, ...m.removed)
+          this.elementList.splice(
+            m.start,
+            m.inserted.length,
+            ...getSlimCloneElementList(m.removed)
+          )
         }
       } finally {
         this._isReplayingHistory = false

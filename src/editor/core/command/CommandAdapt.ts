@@ -419,6 +419,10 @@ export class CommandAdapt {
       !isIgnoreDisabledRule &&
       (this.draw.isReadonly() || this.draw.isDisabled())
     if (isDisabled) return
+    // Non-text style commands must terminate any pending typing batch before
+    // mutating element properties, otherwise undo can replay stale text-input
+    // delta mutations together with the new style change.
+    this.draw.flushTypingBatch()
     const { minSize, maxSize, defaultSize } = this.options
     if (payload < minSize || payload > maxSize) return
     // 选区设置或设置换行处样式
@@ -470,6 +474,7 @@ export class CommandAdapt {
       !isIgnoreDisabledRule &&
       (this.draw.isReadonly() || this.draw.isDisabled())
     if (isDisabled) return
+    this.draw.flushTypingBatch()
     const { defaultSize, maxSize } = this.options
     const selection = this.range.getTextLikeSelectionElementList()
     // 选区设置或设置换行处样式
@@ -525,6 +530,7 @@ export class CommandAdapt {
       !isIgnoreDisabledRule &&
       (this.draw.isReadonly() || this.draw.isDisabled())
     if (isDisabled) return
+    this.draw.flushTypingBatch()
     const { defaultSize, minSize } = this.options
     const selection = this.range.getTextLikeSelectionElementList()
     // 选区设置或设置换行处样式

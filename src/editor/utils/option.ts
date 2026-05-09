@@ -233,6 +233,7 @@ export function mergeOption(
     inactiveAlpha: 0.6,
     historyMaxRecordCount: 100,
     historyTypingBatchMs: 0,
+    debugHistory: false,
     wordBreak: WordBreak.BREAK_WORD,
     printPixelRatio: 3,
     maskMargin: [0, 0, 0, 0],

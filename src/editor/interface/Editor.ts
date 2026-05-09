@@ -85,6 +85,8 @@ export interface IEditorOption {
   // 闲置该时长后落盘；遇到非输入动作 / undo / redo 立即落盘。
   // 0（默认）保留每键一份 snapshot 的旧语义。详见 PERF-PLAN §1.2。
   historyTypingBatchMs?: number
+  // Enable verbose history/debug logging for submitHistory / undo / redo flows.
+  debugHistory?: boolean
   printPixelRatio?: number
   maskMargin?: IMargin
   letterClass?: string[]

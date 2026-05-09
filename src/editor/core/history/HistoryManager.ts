@@ -39,44 +39,64 @@ export class HistoryManager {
     this.maxRecordCount = draw.getOptions().historyMaxRecordCount + 1
   }
 
+  private _debugLog(action: string, extra?: Record<string, unknown>) {
+    if (!this.draw.getOptions().debugHistory) return
+    console.log('[canvas-editor history]', {
+      action,
+      undoDepth: this.undoStack.length,
+      redoDepth: this.redoStack.length,
+      undoTop: this._describeStackItem(this.undoStack[this.undoStack.length - 1]),
+      redoTop: this._describeStackItem(this.redoStack[this.redoStack.length - 1]),
+      ...extra
+    })
+  }
+
+  private _describeStackItem(item: StackItem | undefined) {
+    if (!item) return null
+    return typeof item === 'function' ? 'snapshot' : item.kind
+  }
+
   public undo() {
     // 输入合批未落盘时，先落盘再 undo（PERF-PLAN §1.2）
     this.draw.flushTypingBatch()
+    this._debugLog('undo:start')
     if (this.undoStack.length > 1) {
       const pop = this.undoStack.pop()!
       this.redoStack.push(pop)
+      this._debugLog('undo:popped', {
+        popped: this._describeStackItem(pop),
+        newUndoTop: this._describeStackItem(
+          this.undoStack[this.undoStack.length - 1]
+        )
+      })
       if (typeof pop === 'function') {
-        // legacy snapshot：调用新栈顶把状态拨回前一状态（与原逻辑等价）
-        const newTop = this.undoStack[this.undoStack.length - 1]
-        if (typeof newTop === 'function') {
-          newTop()
-        } else {
-          // 前一项是 delta——它的 applyForward 描述「从更早 snapshot 到自己的
-          // AFTER」的路径，但当前状态是被弹出的 snapshot 的 AFTER；最快捷的
-          // 还原方式是「先把弹出的 snapshot 反向逻辑撤销」——但 snapshot 没
-          // 有 BEFORE 信息。已验证 submitHistory 不会把 delta 项放在 snapshot
-          // 后面（snapshot 紧跟 snapshot，或仅追加 delta），因此本分支理论
-          // 不可达；为保守起见仍调用 applyForward 退化到「位移」语义。
-          newTop.applyForward()
-        }
+        // legacy snapshot：把状态拨回新的栈顶。若新的栈顶是 delta，则需要
+        // 从其最近的前置 snapshot 重建，再顺序重放中间所有 delta。
+        this._restoreUndoStackTop()
       } else {
         // delta：自带 BEFORE 元数据，直接反向应用
         pop.applyBackward()
       }
     }
+    this._debugLog('undo:end')
   }
 
   public redo() {
     this.draw.flushTypingBatch()
+    this._debugLog('redo:start')
     if (this.redoStack.length) {
       const pop = this.redoStack.pop()!
       this.undoStack.push(pop)
+      this._debugLog('redo:shifted', {
+        shifted: this._describeStackItem(pop)
+      })
       if (typeof pop === 'function') {
         pop()
       } else {
         pop.applyForward()
       }
     }
+    this._debugLog('redo:end')
   }
 
   public execute(fn: Function) {
@@ -87,6 +107,7 @@ export class HistoryManager {
     while (this.undoStack.length > this.maxRecordCount) {
       this.undoStack.shift()
     }
+    this._debugLog('push:snapshot')
   }
 
   /**
@@ -111,6 +132,7 @@ export class HistoryManager {
     while (this.undoStack.length > this.maxRecordCount) {
       this.undoStack.shift()
     }
+    this._debugLog('push:delta')
   }
 
   /**
@@ -167,5 +189,42 @@ export class HistoryManager {
 
   public popUndo() {
     return this.undoStack.pop()
+  }
+
+  private _restoreUndoStackTop() {
+    const topIndex = this.undoStack.length - 1
+    if (topIndex < 0) return
+    const top = this.undoStack[topIndex]
+    if (typeof top === 'function') {
+      this._debugLog('undo:restore-top-snapshot')
+      top()
+      return
+    }
+
+    let snapshotIndex = topIndex - 1
+    while (
+      snapshotIndex >= 0 &&
+      typeof this.undoStack[snapshotIndex] !== 'function'
+    ) {
+      snapshotIndex--
+    }
+    if (snapshotIndex < 0) return
+
+    const snapshot = this.undoStack[snapshotIndex]
+    if (typeof snapshot !== 'function') return
+    this._debugLog('undo:restore-from-snapshot', {
+      snapshotIndex,
+      topIndex
+    })
+    snapshot()
+
+    for (let i = snapshotIndex + 1; i <= topIndex; i++) {
+      const item = this.undoStack[i]
+      if (typeof item === 'function') {
+        item()
+      } else {
+        item.applyForward()
+      }
+    }
   }
 }
