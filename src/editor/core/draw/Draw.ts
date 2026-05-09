@@ -509,11 +509,14 @@ export class Draw {
     if (this.mode === EditorMode.PRINT) {
       this.setPrintData()
     }
+    this.range.setRange(0, 0)
     this.render({
       isInit: true,
-      isSetCursor: false,
-      isFirstRender: true
+      isSetCursor: true,
+      isFirstRender: true,
+      curIndex: 0
     })
+    this.cursor.focus()
   }
 
   // 设置打印数据
@@ -1248,6 +1251,23 @@ export class Draw {
       )._owningTd
       if (owningTd) {
         owningTd._dirty = true
+        // PERF-PLAN §2.5 follow-up：编辑表格单元格时 spliceElementList 的
+        // 作用域是 'table'，因此不会自动标脏主元素列表。若该 td 所属的 TABLE
+        // 元素在主列表中，就把主列表的 dirty 区间设为 TABLE 元素的索引位置，
+        // 使下一帧 _tryBuildResumeFrom 能恢复增量布局——避免在 34 页文档的
+        // 表格中每按一个键触发一次 ~1700 ms 的 full computeRowList。
+        const tdMeta = owningTd as unknown as {
+          _ownerElementIndex?: number
+          _dirty?: boolean
+        }
+        const ownerIdx = tdMeta._ownerElementIndex
+        if (
+          ownerIdx !== undefined &&
+          ownerIdx < this.elementList.length &&
+          this.elementList[ownerIdx].type === ElementType.TABLE
+        ) {
+          this.markDirty(ownerIdx, ownerIdx + 1)
+        }
       }
     }
     // PERF-PLAN §1.2 / Phase 1.2：除主列表以外的作用域无法走 delta 分支
@@ -2715,6 +2735,10 @@ export class Draw {
         // 计算表格行列
         this.tableParticle.computeRowColInfo(element)
         // 计算表格内元素信息
+        // 在外层捕获主元素列表索引，供下方 td 循环内的 _ownerElementIndex 使用。
+        // td 循环内有一个 `let i = 0`（td.rowspan 循环），会遮蔽外层 i，导致 TDZ，
+        // 因此在此先行捕获。
+        const tableElementIndex = i
         for (let t = 0; t < trList.length; t++) {
           const tr = trList[t]
           for (let d = 0; d < tr.tdList.length; d++) {
@@ -2724,6 +2748,15 @@ export class Draw {
             // 反向引用——这里保证每次 render 都重新设置一次（td 引用可能在表格
             // 重排时变化，因此 writable + 重写）。
             ;(td.value as unknown as { _owningTd: typeof td })._owningTd = td
+            // PERF-PLAN §2.5 follow-up：让 Mutator 边界也能把 dirty 传播到主元素
+            // 列表的 _dirtyRange。编辑表格单元格时 spliceElementList 的作用域是
+            //  'table'——不会自动标记主列表脏区。存储父 TABLE 元素在主列表中的
+            // 索引，spliceElementList 据此可精准设置主列表的 dirty 起点，使增量
+            // 布局 (_tryBuildResumeFrom) 能恢复运行——避免在 34 页文档的 table 中
+            // 按每个字符触发一次 full computeRowList。
+            // 注意：不存 _ownerElement 引用——那会形成 td→TABLE→trList→tdList→td
+            // 的循环引用，致使序列化 / 深拷贝递归爆栈。
+            ;(td as unknown as { _ownerElementIndex: number })._ownerElementIndex = tableElementIndex
             const tdInnerWidth = (td.width! - tdPaddingWidth) * scale
             // 缓存命中条件：td 未被 dirty 标记，且缓存键完全一致。
             const canReuseCell =
