@@ -128,6 +128,15 @@ import { Magnifier } from './interactive/Magnifier'
 import { IPageColumns } from '../../interface/PageColumns'
 import { IRange } from '../../interface/Range'
 import { IPositionContext } from '../../interface/Position'
+import {
+  DomRenderBackend,
+  WorkerOffscreenRenderBackend
+} from '../render/RenderBackend'
+import { CanvasCommandRecorder } from '../render/CanvasCommandRecorder'
+import {
+  IRecordedPagePaint,
+  IRenderBackend
+} from '../../interface/RenderBackend'
 
 /**
  * PERF-PLAN §1.2 / Phase 1.2：delta-based history 的「BEFORE 状态」元数据。
@@ -211,6 +220,7 @@ export class Draw {
   // 调用 drawRow 前置位为 decoration ctx，drawRow 完成后清零。
   // 为 null 时（包括非分层模式 / 单元格递归外层）走原 ctx——零回归。
   private _currentDecorationCtx: CanvasRenderingContext2D | null
+  private _suppressDecorationPaint: boolean
   // 复用的测量画布上下文（避免 computeRowList 每次创建 canvas）
   private _measureCanvas: HTMLCanvasElement | null
   private _measureCtx: CanvasRenderingContext2D | null
@@ -351,6 +361,8 @@ export class Draw {
   private control: Control
   private pageBorder: PageBorder
   private workerManager: WorkerManager
+  private domRenderBackend: DomRenderBackend
+  private renderBackend: IRenderBackend
   private scrollObserver: ScrollObserver
   private selectionObserver: SelectionObserver
   private imageObserver: ImageObserver
@@ -387,6 +399,7 @@ export class Draw {
     this._decorationDrawnPages = new Map()
     this._decorationVersion = 0
     this._currentDecorationCtx = null
+    this._suppressDecorationPaint = false
     this._measureCanvas = null
     this._measureCtx = null
     this._pendingRenderPayload = null
@@ -483,6 +496,14 @@ export class Draw {
     this.globalEvent.register()
 
     this.workerManager = new WorkerManager(this)
+    this.domRenderBackend = new DomRenderBackend(this)
+    this.renderBackend = this._createRenderBackend()
+    this.renderBackend.resizePage(
+      0,
+      this.getWidth(),
+      this.getHeight(),
+      this.getPagePixelRatio()
+    )
     new Actuator(this)
 
     const { letterClass } = options
@@ -951,6 +972,136 @@ export class Draw {
 
   public getCtx(): CanvasRenderingContext2D {
     return this.ctxList[this.pageNo]
+  }
+
+  public useDomRenderBackend() {
+    if (this.renderBackend === this.domRenderBackend) return
+    this.renderBackend.destroy()
+    this.renderBackend = this.domRenderBackend
+    this._drawnPages.clear()
+    this._decorationDrawnPages.clear()
+  }
+
+  public paintPageOnDom(payload: IDrawPagePayload) {
+    this._drawPage(payload)
+  }
+
+  public paintDecorationOnDom(payload: IDrawPagePayload) {
+    this._drawDecorationOnly(payload)
+  }
+
+  public presentWorkerBitmaps(
+    pageNo: number,
+    baseBitmap: ImageBitmap,
+    decorationBitmap: ImageBitmap | null
+  ) {
+    const baseCtx = this.ctxList[pageNo]
+    const baseCanvas = this.pageList[pageNo]
+    if (baseCtx && baseCanvas) {
+      baseCtx.clearRect(
+        0,
+        0,
+        Math.max(baseCanvas.width, this.getWidth()),
+        Math.max(baseCanvas.height, this.getHeight())
+      )
+      baseCtx.drawImage(baseBitmap, 0, 0, this.getWidth(), this.getHeight())
+    }
+    baseBitmap.close()
+    if (!decorationBitmap) return
+    const decorationCtx = this.decorationCtxList[pageNo]
+    const decorationCanvas = this.decorationCanvasList[pageNo]
+    if (decorationCtx && decorationCanvas) {
+      decorationCtx.clearRect(
+        0,
+        0,
+        Math.max(decorationCanvas.width, this.getWidth()),
+        Math.max(decorationCanvas.height, this.getHeight())
+      )
+      decorationCtx.drawImage(
+        decorationBitmap,
+        0,
+        0,
+        this.getWidth(),
+        this.getHeight()
+      )
+    }
+    decorationBitmap.close()
+  }
+
+  public presentWorkerDecorationBitmap(
+    pageNo: number,
+    decorationBitmap: ImageBitmap
+  ) {
+    const decorationCtx = this.decorationCtxList[pageNo]
+    const decorationCanvas = this.decorationCanvasList[pageNo]
+    if (decorationCtx && decorationCanvas) {
+      decorationCtx.clearRect(
+        0,
+        0,
+        Math.max(decorationCanvas.width, this.getWidth()),
+        Math.max(decorationCanvas.height, this.getHeight())
+      )
+      decorationCtx.drawImage(
+        decorationBitmap,
+        0,
+        0,
+        this.getWidth(),
+        this.getHeight()
+      )
+    }
+    decorationBitmap.close()
+  }
+
+  public recordPagePaint(
+    payload: IDrawPagePayload,
+    isDecorationOnly: boolean,
+    suppressDecorationPaint = false
+  ): IRecordedPagePaint | null {
+    const width = this.getWidth() * this.getPagePixelRatio()
+    const height = this.getHeight() * this.getPagePixelRatio()
+    if (!width || !height) return null
+    if (isDecorationOnly) {
+      const decorationRecorder = new CanvasCommandRecorder(
+        payload.pageNo,
+        width,
+        height
+      )
+      this._initPageContext(decorationRecorder.getContext())
+      this._recordDecorationOnly(payload, decorationRecorder.getContext())
+      if (decorationRecorder.getUnsupportedReason()) return null
+      return {
+        pageNo: payload.pageNo,
+        base: {
+          width,
+          height,
+          commands: []
+        },
+        decoration: decorationRecorder.getRecording(),
+        assets: decorationRecorder.getAssets(),
+        commandCount: decorationRecorder.getRecording().commands.length
+      }
+    }
+    const baseRecorder = new CanvasCommandRecorder(payload.pageNo, width, height)
+    const decorationRecorder = this._isPageLayered() && !suppressDecorationPaint
+      ? new CanvasCommandRecorder(payload.pageNo, width, height)
+      : null
+    this._initPageContext(baseRecorder.getContext())
+    if (decorationRecorder) {
+      this._initPageContext(decorationRecorder.getContext())
+    }
+    this._drawPageWithContexts(
+      payload,
+      baseRecorder.getContext(),
+      decorationRecorder?.getContext() ?? baseRecorder.getContext(),
+      suppressDecorationPaint
+    )
+    if (
+      baseRecorder.getUnsupportedReason() ||
+      decorationRecorder?.getUnsupportedReason()
+    ) {
+      return null
+    }
+    return baseRecorder.toRecordedPagePaint(decorationRecorder)
   }
 
   public getOptions(): DeepRequired<IEditorOption> {
@@ -1980,7 +2131,9 @@ export class Draw {
     this._prevPageRowCounts = null
     this._prevPageLayoutSignatures = null
     this._drawnPages.clear()
+    this._decorationDrawnPages.clear()
     this.chromeCacheKeyList = this.chromeCacheKeyList.map(() => null)
+    this.renderBackend?.invalidate()
     this._dirtyRange = null
     this._headerDirty = false
     this._footerDirty = false
@@ -2235,6 +2388,23 @@ export class Draw {
     return this._measureCtx
   }
 
+  private _createRenderBackend(): IRenderBackend {
+    if (this.mode === EditorMode.PRINT) {
+      return this.domRenderBackend
+    }
+    const { renderBackend } = this.options
+    if (renderBackend === 'dom') {
+      return this.domRenderBackend
+    }
+    if (
+      (renderBackend === 'worker-offscreen' || renderBackend === 'auto') &&
+      WorkerOffscreenRenderBackend.isSupported()
+    ) {
+      return new WorkerOffscreenRenderBackend(this, this.domRenderBackend)
+    }
+    return this.domRenderBackend
+  }
+
   private _createPage(pageNo: number) {
     const width = this.getWidth()
     const height = this.getHeight()
@@ -2316,6 +2486,7 @@ export class Draw {
     this.chromeCacheCanvasList.push(chromeCache)
     this.chromeCacheCtxList.push(chromeCacheCtx)
     this.chromeCacheKeyList.push(null)
+    this.renderBackend?.resizePage(pageNo, width, height, dpr)
   }
 
   /**
@@ -2372,6 +2543,7 @@ export class Draw {
       this._initPageContext(this.chromeCacheCtxList[pageNo])
       this.chromeCacheKeyList[pageNo] = null
     }
+    this.renderBackend?.resizePage(pageNo, w, h, dpr)
   }
 
   private _initPageContext(ctx: CanvasRenderingContext2D) {
@@ -3995,7 +4167,11 @@ export class Draw {
       // 绘制选区——PERF-PLAN — Strategy B：当 _currentDecorationCtx 非空（_drawPage
       // 设置）时写到 decoration 层；否则保持旧行为（写到 base ctx，用于打印 / 单层）。
       const decorationCtx = this._currentDecorationCtx ?? ctx
-      if (!isPrintMode && !isGraffitiMode) {
+      if (
+        !this._suppressDecorationPaint &&
+        !isPrintMode &&
+        !isGraffitiMode
+      ) {
         if (rangeRecord.width && rangeRecord.height) {
           const { x, y, width, height } = rangeRecord
           this.range.render(decorationCtx, x, y, width, height)
@@ -4045,23 +4221,22 @@ export class Draw {
     }
   }
 
-  private _clearPage(pageNo: number) {
-    const ctx = this.ctxList[pageNo]
+  private _clearPageContexts(
+    pageNo: number,
+    ctx: CanvasRenderingContext2D,
+    decoCtx: CanvasRenderingContext2D
+  ) {
     const pageDom = this.pageList[pageNo]
-    const w = Math.max(pageDom.width, this.getWidth())
-    const h = Math.max(pageDom.height, this.getHeight())
+    const w = Math.max(pageDom?.width || 0, this.getWidth())
+    const h = Math.max(pageDom?.height || 0, this.getHeight())
     ctx.clearRect(0, 0, w, h)
-    // PERF-PLAN — Strategy B：分层模式下 decoration 是独立 canvas，必须同步
-    // 清——否则上一帧的选区矩形会挂在新文本上。单层模式 decoCtx === ctx，
-    // 第二次 clearRect 是 no-op。
-    const decoCtx = this.decorationCtxList[pageNo]
     if (decoCtx && decoCtx !== ctx) {
       const deco = this.decorationCanvasList[pageNo]
       decoCtx.clearRect(
         0,
         0,
-        Math.max(deco.width, this.getWidth()),
-        Math.max(deco.height, this.getHeight())
+        Math.max(deco?.width || 0, this.getWidth()),
+        Math.max(deco?.height || 0, this.getHeight())
       )
     }
     this.blockParticle.clear()
@@ -4184,21 +4359,25 @@ export class Draw {
     ctx.drawImage(chromeCanvas, 0, 0, this.getWidth(), this.getHeight())
   }
 
-  private _drawPage(payload: IDrawPagePayload) {
+  private _drawPageWithContexts(
+    payload: IDrawPagePayload,
+    ctx: CanvasRenderingContext2D,
+    decoCtx: CanvasRenderingContext2D,
+    suppressDecorationPaint = false
+  ) {
     const { elementList, positionList, rowList, pageNo } = payload
     const { inactiveAlpha, lineNumber } = this.options
     const isPrintMode = this.mode === EditorMode.PRINT
     const innerWidth = this.getInnerWidth()
-    const ctx = this.ctxList[pageNo]
     // PERF-PLAN — Strategy B：drawRow 内部 range / table-cross-row paint 时
     // 取这个 ctx 作为目标。打印模式不需要选区——保留 null，落到 base ctx 上
     // 保持原行为（实际打印模式下 startIndex===endIndex，不会画选区）。
-    const decoCtx = this.decorationCtxList[pageNo]
+    this._suppressDecorationPaint = suppressDecorationPaint
     this._currentDecorationCtx = !isPrintMode ? decoCtx : null
     // 判断当前激活区域-非正文区域时元素透明度降低
     ctx.globalAlpha = !this.zone.isMainActive() ? inactiveAlpha : 1
     if (decoCtx && decoCtx !== ctx) decoCtx.globalAlpha = ctx.globalAlpha
-    this._clearPage(pageNo)
+    this._clearPageContexts(pageNo, ctx, decoCtx)
     this._blitPageChrome(ctx, pageNo)
     // 绘制区域
     if (!isPrintMode) {
@@ -4232,7 +4411,11 @@ export class Draw {
     // 搜索匹配绘制——PERF-PLAN — Strategy B：装饰层。打印模式没有搜索高亮，
     // 走原 ctx 是 no-op；其它情况落到 decoration canvas 上，便于 search-next
     // 触发的快路径重绘只擦除 decoration、不动 base 文字。
-    if (!isPrintMode && this.search.getSearchKeyword()) {
+    if (
+      !this._suppressDecorationPaint &&
+      !isPrintMode &&
+      this.search.getSearchKeyword()
+    ) {
       this.search.render(this._currentDecorationCtx ?? ctx, pageNo)
     }
     // 绘制空白占位符
@@ -4255,6 +4438,41 @@ export class Draw {
     // 命中后即可跳过重绘（同 (range, search) 状态多次重入时直接复用）。
     this._decorationDrawnPages.set(pageNo, this._decorationVersion)
     this._currentDecorationCtx = null
+    this._suppressDecorationPaint = false
+  }
+
+  private _drawPage(payload: IDrawPagePayload) {
+    this._drawPageWithContexts(
+      payload,
+      this.ctxList[payload.pageNo],
+      this.decorationCtxList[payload.pageNo]
+    )
+  }
+
+  private _recordDecorationOnly(
+    payload: IDrawPagePayload,
+    decoCtx: CanvasRenderingContext2D
+  ) {
+    const { pageNo, elementList, positionList, rowList } = payload
+    decoCtx.globalAlpha = !this.zone.isMainActive()
+      ? this.options.inactiveAlpha
+      : 1
+    decoCtx.clearRect(0, 0, this.getWidth(), this.getHeight())
+    if (!this._isDecorationActive()) {
+      return
+    }
+    this._walkDecorationRow(decoCtx, {
+      elementList,
+      positionList,
+      rowList,
+      pageNo,
+      startIndex: rowList[0]?.startIndex ?? 0,
+      innerWidth: this.getInnerWidth(),
+      zone: EditorZone.MAIN
+    })
+    if (this.search.getSearchKeyword()) {
+      this.search.render(decoCtx, pageNo)
+    }
   }
 
   /**
@@ -4274,7 +4492,7 @@ export class Draw {
       this._drawPage(payload)
       return
     }
-    const { pageNo, elementList, positionList, rowList } = payload
+    const { pageNo } = payload
     const isPrintMode = this.mode === EditorMode.PRINT
     if (isPrintMode) {
       this._drawPage(payload)
@@ -4307,19 +4525,7 @@ export class Draw {
       return
     }
     // 走 row 仅跑 rangeRecord 逻辑，不做任何文字 / 几何 paint。
-    this._walkDecorationRow(decoCtx, {
-      elementList,
-      positionList,
-      rowList,
-      pageNo,
-      startIndex: rowList[0]?.startIndex ?? 0,
-      innerWidth: this.getInnerWidth(),
-      zone: EditorZone.MAIN
-    })
-    // 搜索高亮——Search.render 只走 matchList，本身就很轻
-    if (this.search.getSearchKeyword()) {
-      this.search.render(decoCtx, pageNo)
-    }
+    this._recordDecorationOnly(payload, decoCtx)
     this._decorationDrawnPages.set(pageNo, this._decorationVersion)
   }
 
@@ -4607,7 +4813,7 @@ export class Draw {
       }
       for (const pageNo of immediatePages) {
         if (!this.pageRowList[pageNo]) continue
-        this._drawPage({
+        this.paintPageOnDom({
           elementList,
           positionList,
           rowList: this.pageRowList[pageNo],
@@ -4623,7 +4829,7 @@ export class Draw {
         if (entry.isIntersecting) {
           const index = Number((<HTMLCanvasElement>entry.target).dataset.index)
           if (!deferredPages.has(index) || !this.pageRowList[index]) return
-          this._drawPage({
+          this.renderBackend.paintPage({
             elementList,
             positionList,
             rowList: this.pageRowList[index],
@@ -4651,7 +4857,7 @@ export class Draw {
         : Array.from(syncPages).sort((a, b) => a - b)
     for (const i of pageIndices) {
       if (!this.pageRowList[i]) continue
-      this._drawPage({
+      this.paintPageOnDom({
         elementList,
         positionList,
         rowList: this.pageRowList[i],
@@ -4842,7 +5048,7 @@ export class Draw {
         : this._allPageIndices()
       for (const i of pageIndices) {
         if (!this.pageRowList[i] || !this.pageList[i]) continue
-        this._drawDecorationOnly({
+        this.renderBackend.paintDecoration({
           elementList,
           positionList,
           rowList: this.pageRowList[i],
@@ -5537,6 +5743,7 @@ export class Draw {
     this.scrollObserver.removeEvent()
     this.selectionObserver.removeEvent()
     this.workerManager.destroy()
+    this.renderBackend.destroy()
     this.magnifier.destroy()
     this.lazyRenderIntersectionObserver?.disconnect()
   }

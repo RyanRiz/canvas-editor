@@ -36,6 +36,11 @@ import { IGraffitiData, IGraffitiOption } from './Graffiti'
 import { IWhiteSpaceOption } from './WhiteSpace'
 import { IMagnifierOption } from './Magnifier'
 import { IPageLayeredOption } from './PageLayered'
+import {
+  EditorRenderBackend,
+  EditorRenderBackendFallback,
+  EditorRenderWorkerScope
+} from './RenderBackend'
 
 export interface IEditorData {
   header?: IElement[]
@@ -124,6 +129,10 @@ export interface IEditorOption {
   // PERF-PLAN — Strategy B：分层 canvas + 装饰层独立重绘。
   // 默认开启；selection drag / search-next 等高频交互省去全量 base 重绘。
   pageLayered?: IPageLayeredOption
+  renderBackend?: EditorRenderBackend
+  renderBackendFallback?: EditorRenderBackendFallback
+  renderWorkerScope?: EditorRenderWorkerScope
+  renderWorkerDebug?: boolean
   // 基础层页面重绘策略：
   //  - `full`：每次内容 render 同步重绘所有页（保守回退）
   //  - `visible-sync-lazy-offscreen`：可见页 + overscan 同步，离屏页懒重绘
