@@ -517,18 +517,27 @@ export class Position {
     const curPageNo = payload.pageNo ?? this.draw.getPageNo()
     const isMainActive = zoneManager.isMainActive()
     const positionNo = isMainActive ? curPageNo : 0
+    const shouldScopeRowsByColumn = !isTable
     const pageRowList = this.draw.getPageRowList()
-    const currentPageRows = pageRowList[positionNo] || []
-    const columnRowNoSet = new Set(
-      currentPageRows
-        .filter(row => {
-          const startX = row.pageStartX ?? this.draw.getMargins()[3]
-          const endX = startX + (row.innerWidth ?? this.draw.getInnerWidth())
-          return x >= startX && x <= endX
-        })
-        .map(row => row.rowIndex)
-    )
-    const hasColumnScopedRows = columnRowNoSet.size > 0
+    const currentPageRows = shouldScopeRowsByColumn
+      ? pageRowList[positionNo] || []
+      : []
+    const columnRowNoSet = shouldScopeRowsByColumn
+      ? new Set(
+          currentPageRows
+            .filter(row => {
+              const startX = row.pageStartX ?? this.draw.getMargins()[3]
+              const endX = startX + (row.innerWidth ?? this.draw.getInnerWidth())
+              return x >= startX && x <= endX
+            })
+            .map(row => row.rowIndex)
+        )
+      : new Set<number>()
+    const hasColumnScopedRows =
+      shouldScopeRowsByColumn && columnRowNoSet.size > 0
+    const firstScopedRowIndex = hasColumnScopedRows
+      ? currentPageRows.find(row => columnRowNoSet.has(row.rowIndex))?.rowIndex
+      : undefined
     // 验证浮于文字上方元素
     if (!isTable) {
       const floatTopPosition = this.getFloatPositionByXY({
@@ -809,9 +818,7 @@ export class Position {
             position.pageNo !== positionNo ||
             (hasColumnScopedRows && !columnRowNoSet.has(position.rowIndex)) ||
             (hasColumnScopedRows
-              ? position.rowIndex !==
-                currentPageRows.find(row => columnRowNoSet.has(row.rowIndex))
-                  ?.rowIndex
+              ? position.rowIndex !== firstScopedRowIndex
               : position.rowNo !== 0)
           ) {
             continue
