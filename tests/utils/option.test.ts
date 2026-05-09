@@ -16,9 +16,9 @@ describe('mergeOption', () => {
     expect(options.height).toBe(1123)
   })
 
-  it('默认启用 visible-sync-lazy-offscreen 页面重绘策略', () => {
+  it('默认启用 visible-sync-lazy 页面重绘策略', () => {
     const options = mergeOption()
-    expect(options.pagePaintStrategy).toBe('visible-sync-lazy-offscreen')
+    expect(options.pagePaintStrategy).toBe('visible-sync-lazy')
     expect(options.pagePaintOverscan).toBe(1)
   })
 
