@@ -88,6 +88,10 @@ export function ctrlBackspace(evt: KeyboardEvent, host: CanvasEvent) {
   const { index } = cursorPosition
   // cursor 是伪代码中的"游标位置"——相当于 elementList 下标 index 之后的空隙
   const cursor = index + 1
+  if (cursor <= 1) {
+    evt.preventDefault()
+    return
+  }
   let pos = cursor
 
   const elementList = draw.getElementList()
