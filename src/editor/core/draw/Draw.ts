@@ -1227,6 +1227,9 @@ export class Draw {
   ) {
     // 主列表 / 页眉 / 页脚分别维护 dirty 标志：render() 据此精确决定布局范围
     let scope: HistoryScope
+    // delta 历史所需：若本轮为表格单元格编辑，此变量保存 td 定位信息，
+    // 供后续构造 mutation event 时填充 tdPath。
+    let tableTdPath: { elementIdx: number; trIdx: number; tdIdx: number } | null = null
     if (elementList === this.elementList) {
       scope = 'main'
       const insertedLen = items?.length ?? 0
@@ -1258,6 +1261,8 @@ export class Draw {
         // 表格中每按一个键触发一次 ~1700 ms 的 full computeRowList。
         const tdMeta = owningTd as unknown as {
           _ownerElementIndex?: number
+          _trIdx?: number
+          _tdIdx?: number
           _dirty?: boolean
         }
         const ownerIdx = tdMeta._ownerElementIndex
@@ -1268,12 +1273,27 @@ export class Draw {
         ) {
           this.markDirty(ownerIdx, ownerIdx + 1)
         }
+        // PERF-PLAN §1.2 follow-up：捕获 td 定位信息以支持表格编辑的 delta
+        // 历史。若 tr/td 索引可用，后续 mutation event 会携带 tdPath，
+        // submitHistory 可走 delta 分支而非全量 snapshot——将 ~150 ms
+        // 的 history 开销降至 <1 ms。
+        if (
+          ownerIdx !== undefined &&
+          tdMeta._trIdx !== undefined &&
+          tdMeta._tdIdx !== undefined
+        ) {
+          tableTdPath = {
+            elementIdx: ownerIdx,
+            trIdx: tdMeta._trIdx,
+            tdIdx: tdMeta._tdIdx
+          }
+        }
       }
     }
-    // PERF-PLAN §1.2 / Phase 1.2：除主列表以外的作用域无法走 delta 分支
-    // （我们只为 main 维护逆向序列，HEADER/FOOTER/TABLE 的 elementList 引用
-    // 在 setElementList 时会被替换；retroactive splice 不可靠）。
-    if (scope !== 'main') {
+    // PERF-PLAN §1.2 / Phase 1.2：header/footer 无法走 delta 分支——
+    // setElementList 会替换整个 elementList，retroactive splice 不可靠。
+    // 表格编辑若捕获了 tdPath 则可走 delta；否则 fallback 到 snapshot。
+    if (scope !== 'main' && (scope !== 'table' || !tableTdPath)) {
       this._deltaHistoryUnsafe = true
     }
     // PERF-PLAN follow-up：维护 main 列表中 SURROUND 元素的计数缓存——
@@ -1421,12 +1441,13 @@ export class Draw {
         scope,
         start,
         removed: clonedRemoved,
-        inserted: clonedInserted
+        inserted: clonedInserted,
+        ...(tableTdPath ? { tdPath: tableTdPath } : {})
       }
       // 第一笔 mutation 入队前先锁住 BEFORE 状态——delta 入栈时携带，作为
-      // applyBackward 的「目的地」元数据。
+      // applyBackward 的「目的地」元数据。允许 table scope（若 tdPath 可用）。
       if (
-        scope === 'main' &&
+        (scope === 'main' || (scope === 'table' && tableTdPath)) &&
         !this._deltaHistoryUnsafe &&
         this._pendingHistoryMutations.length === 0 &&
         this._preMutationMeta === null
@@ -2756,7 +2777,9 @@ export class Draw {
             // 按每个字符触发一次 full computeRowList。
             // 注意：不存 _ownerElement 引用——那会形成 td→TABLE→trList→tdList→td
             // 的循环引用，致使序列化 / 深拷贝递归爆栈。
-            ;(td as unknown as { _ownerElementIndex: number })._ownerElementIndex = tableElementIndex
+            ;(td as unknown as { _ownerElementIndex: number; _trIdx: number; _tdIdx: number })._ownerElementIndex = tableElementIndex
+            ;(td as unknown as { _ownerElementIndex: number; _trIdx: number; _tdIdx: number })._trIdx = t
+            ;(td as unknown as { _ownerElementIndex: number; _trIdx: number; _tdIdx: number })._tdIdx = d
             const tdInnerWidth = (td.width! - tdPaddingWidth) * scale
             // 缓存命中条件：td 未被 dirty 标记，且缓存键完全一致。
             const canReuseCell =
@@ -5584,15 +5607,17 @@ export class Draw {
 
   public submitHistory(curIndex: number | undefined) {
     // PERF-PLAN §1.2 / Phase 1.2：尝试走 delta 分支——上一次 submit 之后只
-    // 经历了 main 列表的纯 splice，没有 deletable 跳过、没有 listId 旁清理、
-    // 没有 header / footer / table 改动、且初始 snapshot 已经在栈底。任何一
-    // 项不满足都退回到 legacy snapshot（保留正确性兜底）。
+    // 经历了 main / table（含 tdPath）纯 splice，没有 deletable 跳过、没有
+    // listId 旁清理、没有 header / footer 改动、且初始 snapshot 已在栈底。
+    // 任何一项不满足都退回到 legacy snapshot（保留正确性兜底）。
     const canUseDelta =
       !this._deltaHistoryUnsafe &&
       this._pendingHistoryMutations.length > 0 &&
       this._preMutationMeta !== null &&
       !this.historyManager.isStackEmpty() &&
-      this._pendingHistoryMutations.every(m => m.scope === 'main')
+      this._pendingHistoryMutations.every(
+        m => m.scope === 'main' || (m.scope === 'table' && !!m.tdPath)
+      )
     if (this.options.debugHistory) {
       console.log('[canvas-editor submitHistory]', {
         canUseDelta,
@@ -5637,6 +5662,12 @@ export class Draw {
     }
     const curIndexAfter = curIndex
     const curIndexBefore = metaBefore.range.startIndex
+    const _resolveTableTd = (tdPath: NonNullable<IMutationEvent['tdPath']>) => {
+      const el = this.elementList[tdPath.elementIdx]
+      if (!el?.trList) return null
+      const tr = el.trList[tdPath.trIdx]
+      return tr?.tdList?.[tdPath.tdIdx] ?? null
+    }
     const applyForward = () => {
       this._isReplayingHistory = true
       try {
@@ -5644,11 +5675,23 @@ export class Draw {
         // removed.length, ...inserted)——等价于「把改动重新做一遍」。
         for (let i = 0; i < mutations.length; i++) {
           const m = mutations[i]
-          this.elementList.splice(
-            m.start,
-            m.removed.length,
-            ...getSlimCloneElementList(m.inserted)
-          )
+          if (m.scope === 'table' && m.tdPath) {
+            const td = _resolveTableTd(m.tdPath)
+            if (td) {
+              td.value.splice(
+                m.start,
+                m.removed.length,
+                ...getSlimCloneElementList(m.inserted)
+              )
+              td._dirty = true
+            }
+          } else {
+            this.elementList.splice(
+              m.start,
+              m.removed.length,
+              ...getSlimCloneElementList(m.inserted)
+            )
+          }
         }
       } finally {
         this._isReplayingHistory = false
@@ -5676,11 +5719,23 @@ export class Draw {
         // 前一条已经应用之后的坐标系。
         for (let i = mutations.length - 1; i >= 0; i--) {
           const m = mutations[i]
-          this.elementList.splice(
-            m.start,
-            m.inserted.length,
-            ...getSlimCloneElementList(m.removed)
-          )
+          if (m.scope === 'table' && m.tdPath) {
+            const td = _resolveTableTd(m.tdPath)
+            if (td) {
+              td.value.splice(
+                m.start,
+                m.inserted.length,
+                ...getSlimCloneElementList(m.removed)
+              )
+              td._dirty = true
+            }
+          } else {
+            this.elementList.splice(
+              m.start,
+              m.inserted.length,
+              ...getSlimCloneElementList(m.removed)
+            )
+          }
         }
       } finally {
         this._isReplayingHistory = false
@@ -5711,6 +5766,13 @@ export class Draw {
     let lo = Number.POSITIVE_INFINITY
     let hi = -1
     for (const m of mutations) {
+      // table-scope mutations: dirty the TABLE element's index
+      if (m.scope === 'table' && m.tdPath) {
+        const elIdx = m.tdPath.elementIdx
+        if (elIdx < lo) lo = elIdx
+        if (elIdx + 1 > hi) hi = elIdx + 1
+        continue
+      }
       const len = Math.max(m.removed.length, m.inserted.length)
       if (m.start < lo) lo = m.start
       const endCandidate = m.start + len

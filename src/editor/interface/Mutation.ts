@@ -21,6 +21,15 @@ export interface IMutationEvent {
   removed: IElement[]
   /** 被插入的元素切片。空数组表示纯删除。 */
   inserted: IElement[]
+  /**
+   * 仅 scope='table' 时填充：用于 replay 时定位 td。
+   * 三元组 (elementIdx, trIdx, tdIdx) 定位 this.elementList 中的目标单元格。
+   */
+  tdPath?: {
+    elementIdx: number
+    trIdx: number
+    tdIdx: number
+  }
 }
 
 export type MutationListener = (event: IMutationEvent) => void
