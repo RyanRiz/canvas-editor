@@ -25,6 +25,7 @@ import {
 } from '../../interface/Editor'
 import {
   IElement,
+  IElementPosition,
   IElementMetrics,
   IElementFillRect,
   IElementStyle,
@@ -247,6 +248,8 @@ export class Draw {
   private _prevPageRowCounts: number[] | null
   // 上一次渲染各 page 的轻量布局签名。用于判断从哪一页开始发生分页漂移。
   private _prevPageLayoutSignatures: IPageLayoutSignature[] | null
+  // 当前 paintPlan 的 shifted 起点（仅用于本轮 paint 的局部优化提示）。
+  private _paintPlanFirstShiftedPage: number | null
   // 已绘制（且未被标脏）的 page 索引集合：lazy 渲染时这些页不再重复绘制
   private _drawnPages: Set<number>
   // PERF-PLAN §2.2 / Phase 2B：主元素列表 computeRowList 的行边界 checkpoint。
@@ -414,6 +417,7 @@ export class Draw {
     this._footerChromeVersion = 0
     this._prevPageRowCounts = null
     this._prevPageLayoutSignatures = null
+    this._paintPlanFirstShiftedPage = null
     this._drawnPages = new Set()
     this._mainRowCheckpoints = []
     this._mainLayoutSig = null
@@ -998,32 +1002,20 @@ export class Draw {
     const baseCtx = this.ctxList[pageNo]
     const baseCanvas = this.pageList[pageNo]
     if (baseCtx && baseCanvas) {
-      baseCtx.clearRect(
-        0,
-        0,
-        Math.max(baseCanvas.width, this.getWidth()),
-        Math.max(baseCanvas.height, this.getHeight())
-      )
-      baseCtx.drawImage(baseBitmap, 0, 0, this.getWidth(), this.getHeight())
+      const w = this.getWidth()
+      const h = this.getHeight()
+      baseCtx.clearRect(0, 0, w, h)
+      baseCtx.drawImage(baseBitmap, 0, 0, w, h)
     }
     baseBitmap.close()
     if (!decorationBitmap) return
     const decorationCtx = this.decorationCtxList[pageNo]
     const decorationCanvas = this.decorationCanvasList[pageNo]
     if (decorationCtx && decorationCanvas) {
-      decorationCtx.clearRect(
-        0,
-        0,
-        Math.max(decorationCanvas.width, this.getWidth()),
-        Math.max(decorationCanvas.height, this.getHeight())
-      )
-      decorationCtx.drawImage(
-        decorationBitmap,
-        0,
-        0,
-        this.getWidth(),
-        this.getHeight()
-      )
+      const w = this.getWidth()
+      const h = this.getHeight()
+      decorationCtx.clearRect(0, 0, w, h)
+      decorationCtx.drawImage(decorationBitmap, 0, 0, w, h)
     }
     decorationBitmap.close()
   }
@@ -1035,19 +1027,10 @@ export class Draw {
     const decorationCtx = this.decorationCtxList[pageNo]
     const decorationCanvas = this.decorationCanvasList[pageNo]
     if (decorationCtx && decorationCanvas) {
-      decorationCtx.clearRect(
-        0,
-        0,
-        Math.max(decorationCanvas.width, this.getWidth()),
-        Math.max(decorationCanvas.height, this.getHeight())
-      )
-      decorationCtx.drawImage(
-        decorationBitmap,
-        0,
-        0,
-        this.getWidth(),
-        this.getHeight()
-      )
+      const w = this.getWidth()
+      const h = this.getHeight()
+      decorationCtx.clearRect(0, 0, w, h)
+      decorationCtx.drawImage(decorationBitmap, 0, 0, w, h)
     }
     decorationBitmap.close()
   }
@@ -1081,10 +1064,15 @@ export class Draw {
         commandCount: decorationRecorder.getRecording().commands.length
       }
     }
-    const baseRecorder = new CanvasCommandRecorder(payload.pageNo, width, height)
-    const decorationRecorder = this._isPageLayered() && !suppressDecorationPaint
-      ? new CanvasCommandRecorder(payload.pageNo, width, height)
-      : null
+    const baseRecorder = new CanvasCommandRecorder(
+      payload.pageNo,
+      width,
+      height
+    )
+    const decorationRecorder =
+      this._isPageLayered() && !suppressDecorationPaint
+        ? new CanvasCommandRecorder(payload.pageNo, width, height)
+        : null
     this._initPageContext(baseRecorder.getContext())
     if (decorationRecorder) {
       this._initPageContext(decorationRecorder.getContext())
@@ -1351,7 +1339,6 @@ export class Draw {
       }
     }
   }
-
 
   public spliceElementList(
     elementList: IElement[],
@@ -2157,7 +2144,10 @@ export class Draw {
    * 任何会让任意一行的几何形状（width / height / x / y / page break 时机）改变的
    * 选项必须列入。签名变了 → 上一帧的 _mainRowCheckpoints 不再可信，必须全量。
    */
-  private _buildLayoutSig(extra: { isPagingMode: boolean; innerWidth: number }) {
+  private _buildLayoutSig(extra: {
+    isPagingMode: boolean
+    innerWidth: number
+  }) {
     const { scale, defaultSize, defaultRowMargin, defaultTabWidth } =
       this.options
     return {
@@ -2305,9 +2295,7 @@ export class Draw {
         const total = +(now() - t0).toFixed(2)
         console.log(
           `[PerfTrace] render #${this.renderCount} total=${total}ms`,
-          phases
-            .map(p => `${p.label}=${p.ms}ms`)
-            .join('  '),
+          phases.map(p => `${p.label}=${p.ms}ms`).join('  '),
           phases
         )
       }
@@ -2346,10 +2334,10 @@ export class Draw {
         !!a.isPageBreak !== !!b.isPageBreak ||
         !!a.isColumnBreak !== !!b.isColumnBreak
       ) {
-        console.error(
-          `[Phase2B/validate] row ${r} mismatch`,
-          { full: a, incremental: b }
-        )
+        console.error(`[Phase2B/validate] row ${r} mismatch`, {
+          full: a,
+          incremental: b
+        })
         return
       }
     }
@@ -2510,7 +2498,12 @@ export class Draw {
    * 块，确保两层 canvas 永远不会出现尺寸漂移（否则 decoration 上的选区矩形会
    * 偏离 base 上的文字）。
    */
-  private _resizePageBacking(pageNo: number, w: number, h: number, dpr: number) {
+  private _resizePageBacking(
+    pageNo: number,
+    w: number,
+    h: number,
+    dpr: number
+  ) {
     const base = this.pageList[pageNo]
     base.width = w * dpr
     base.height = h * dpr
@@ -3514,8 +3507,7 @@ export class Draw {
   ): boolean {
     if (rowList.length < 2) return false
     const completed = rowList[rowList.length - 2]
-    const completedAbsEnd =
-      completed.startIndex + completed.elementList.length
+    const completedAbsEnd = completed.startIndex + completed.elementList.length
     // 必须越过 dirty 末端——否则可能匹配到 dirty 区间内的旧行（误收敛会丢
     // 掉本应重排的行）。
     if (completedAbsEnd <= target.dirtyEndAbs) return false
@@ -4167,11 +4159,7 @@ export class Draw {
       // 绘制选区——PERF-PLAN — Strategy B：当 _currentDecorationCtx 非空（_drawPage
       // 设置）时写到 decoration 层；否则保持旧行为（写到 base ctx，用于打印 / 单层）。
       const decorationCtx = this._currentDecorationCtx ?? ctx
-      if (
-        !this._suppressDecorationPaint &&
-        !isPrintMode &&
-        !isGraffitiMode
-      ) {
+      if (!this._suppressDecorationPaint && !isPrintMode && !isGraffitiMode) {
         if (rangeRecord.width && rangeRecord.height) {
           const { x, y, width, height } = rangeRecord
           this.range.render(decorationCtx, x, y, width, height)
@@ -4224,20 +4212,19 @@ export class Draw {
   private _clearPageContexts(
     pageNo: number,
     ctx: CanvasRenderingContext2D,
-    decoCtx: CanvasRenderingContext2D
+    decoCtx: CanvasRenderingContext2D,
+    clipTop = 0
   ) {
-    const pageDom = this.pageList[pageNo]
-    const w = Math.max(pageDom?.width || 0, this.getWidth())
-    const h = Math.max(pageDom?.height || 0, this.getHeight())
-    ctx.clearRect(0, 0, w, h)
+    // pageNo 仅用于健壮性校验：允许在 page 尚未创建时仍按配置尺寸清空。
+    if (!this.pageList[pageNo]) {
+      // noop
+    }
+    const w = this.getWidth()
+    const h = this.getHeight()
+    const safeTop = Math.max(0, Math.min(clipTop, h))
+    ctx.clearRect(0, safeTop, w, h - safeTop)
     if (decoCtx && decoCtx !== ctx) {
-      const deco = this.decorationCanvasList[pageNo]
-      decoCtx.clearRect(
-        0,
-        0,
-        Math.max(deco?.width || 0, this.getWidth()),
-        Math.max(deco?.height || 0, this.getHeight())
-      )
+      decoCtx.clearRect(0, safeTop, w, h - safeTop)
     }
     this.blockParticle.clear()
   }
@@ -4292,22 +4279,14 @@ export class Draw {
   }
 
   private _renderPageChromeCache(pageNo: number) {
-    const {
-      inactiveAlpha,
-      pageMode,
-      header,
-      footer,
-      pageNumber,
-      pageBorder
-    } = this.options
+    const { inactiveAlpha, pageMode, header, footer, pageNumber, pageBorder } =
+      this.options
     const isPrintMode = this.mode === EditorMode.PRINT
     const isContinuityMode = pageMode === PageMode.CONTINUITY
     const chromeCtx = this.chromeCacheCtxList[pageNo]
     const chromeCanvas = this.chromeCacheCanvasList[pageNo]
     if (!chromeCtx || !chromeCanvas) return
-    const width = Math.max(chromeCanvas.width, this.getWidth())
-    const height = Math.max(chromeCanvas.height, this.getHeight())
-    chromeCtx.clearRect(0, 0, width, height)
+    chromeCtx.clearRect(0, 0, this.getWidth(), this.getHeight())
     chromeCtx.globalAlpha = !this.zone.isMainActive() ? inactiveAlpha : 1
     if (
       !isPrintMode ||
@@ -4369,6 +4348,22 @@ export class Draw {
     const { inactiveAlpha, lineNumber } = this.options
     const isPrintMode = this.mode === EditorMode.PRINT
     const innerWidth = this.getInnerWidth()
+    const canPartialPaint =
+      !suppressDecorationPaint &&
+      this._dirtyRange !== null &&
+      !this._isDecorationActive() &&
+      this.getIsPagingMode() &&
+      this._paintPlanFirstShiftedPage === null &&
+      !this._pageHasFloatImageOnPage(pageNo)
+    const partialInfo = canPartialPaint
+      ? this._getDirtyClipInfoForPage(rowList, positionList)
+      : null
+    const clipTop = partialInfo?.clipTop ?? 0
+    const rowListToPaint = partialInfo
+      ? rowList.slice(partialInfo.fromRowIndex)
+      : rowList
+    const w = this.getWidth()
+    const h = this.getHeight()
     // PERF-PLAN — Strategy B：drawRow 内部 range / table-cross-row paint 时
     // 取这个 ctx 作为目标。打印模式不需要选区——保留 null，落到 base ctx 上
     // 保持原行为（实际打印模式下 startIndex===endIndex，不会画选区）。
@@ -4377,7 +4372,20 @@ export class Draw {
     // 判断当前激活区域-非正文区域时元素透明度降低
     ctx.globalAlpha = !this.zone.isMainActive() ? inactiveAlpha : 1
     if (decoCtx && decoCtx !== ctx) decoCtx.globalAlpha = ctx.globalAlpha
-    this._clearPageContexts(pageNo, ctx, decoCtx)
+    this._clearPageContexts(pageNo, ctx, decoCtx, clipTop)
+    const needsClip = clipTop > 0 && clipTop < h
+    if (needsClip) {
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(0, clipTop, w, h - clipTop)
+      ctx.clip()
+      if (decoCtx && decoCtx !== ctx) {
+        decoCtx.save()
+        decoCtx.beginPath()
+        decoCtx.rect(0, clipTop, w, h - clipTop)
+        decoCtx.clip()
+      }
+    }
     this._blitPageChrome(ctx, pageNo)
     // 绘制区域
     if (!isPrintMode) {
@@ -4393,11 +4401,11 @@ export class Draw {
       this.control.renderHighlightList(ctx, pageNo)
     }
     // 渲染元素
-    const index = rowList[0]?.startIndex
+    const index = rowListToPaint[0]?.startIndex
     this.drawRow(ctx, {
       elementList,
       positionList,
-      rowList,
+      rowList: rowListToPaint,
       pageNo,
       startIndex: index,
       innerWidth,
@@ -4439,6 +4447,12 @@ export class Draw {
     this._decorationDrawnPages.set(pageNo, this._decorationVersion)
     this._currentDecorationCtx = null
     this._suppressDecorationPaint = false
+    if (needsClip) {
+      if (decoCtx && decoCtx !== ctx) {
+        decoCtx.restore()
+      }
+      ctx.restore()
+    }
   }
 
   private _drawPage(payload: IDrawPagePayload) {
@@ -4508,16 +4522,10 @@ export class Draw {
     // mousemove 抖动多次落到同一选区位置，or 拖拽穿过完全可见的多页时）。
     const cachedVersion = this._decorationDrawnPages.get(pageNo)
     if (cachedVersion === this._decorationVersion) return
-    const deco = this.decorationCanvasList[pageNo]
     decoCtx.globalAlpha = !this.zone.isMainActive()
       ? this.options.inactiveAlpha
       : 1
-    decoCtx.clearRect(
-      0,
-      0,
-      Math.max(deco.width, this.getWidth()),
-      Math.max(deco.height, this.getHeight())
-    )
+    decoCtx.clearRect(0, 0, this.getWidth(), this.getHeight())
     // B-β.1：装饰层逻辑「空状态」——选区收起、无搜索、非跨行表格选区时直接
     // 跳过整轮行遍历。clearRect 已经把上一帧的内容擦掉，绘制阶段无事可做。
     if (!this._isDecorationActive()) {
@@ -4540,6 +4548,65 @@ export class Draw {
     if (isCrossRowCol) return true
     if (this.search.getSearchKeyword()) return true
     return false
+  }
+
+  private _pageHasFloatImageOnPage(pageNo: number): boolean {
+    const floatPositionList = this.position.getFloatPositionList()
+    for (let i = 0; i < floatPositionList.length; i++) {
+      const floatPosition = floatPositionList[i]
+      if (floatPosition.pageNo !== pageNo) continue
+      const element = floatPosition.element
+      if (
+        element.type === ElementType.IMAGE &&
+        element.imgDisplay &&
+        [
+          ImageDisplay.SURROUND,
+          ImageDisplay.FLOAT_TOP,
+          ImageDisplay.FLOAT_BOTTOM
+        ].includes(element.imgDisplay)
+      ) {
+        return true
+      }
+    }
+    return false
+  }
+
+  private _getDirtyClipInfoForPage(
+    rowList: IRow[],
+    positionList: IElementPosition[]
+  ): { clipTop: number; fromRowIndex: number } | null {
+    if (this._dirtyRange === null) return null
+    if (!rowList.length) return null
+    const dirtyIndex = Math.min(this._dirtyRange.start, this._dirtyRange.end)
+    const pageStart = rowList[0].startIndex
+    const lastRow = rowList[rowList.length - 1]
+    const lastRowLen = Math.max(1, lastRow.elementList.length)
+    const pageEnd = lastRow.startIndex + lastRowLen - 1
+    if (dirtyIndex < pageStart || dirtyIndex > pageEnd) return null
+    let lo = 0
+    let hi = rowList.length - 1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      const row = rowList[mid]
+      const rowLen = Math.max(1, row.elementList.length)
+      const rowEnd = row.startIndex + rowLen - 1
+      if (dirtyIndex < row.startIndex) {
+        hi = mid - 1
+      } else if (dirtyIndex > rowEnd) {
+        lo = mid + 1
+      } else {
+        if (mid <= 0) return null
+        const pos = positionList[row.startIndex]
+        const y = pos?.coordinate?.leftTop?.[1]
+        if (typeof y !== 'number' || !Number.isFinite(y)) return null
+        const clipTop = Math.max(0, y - 2)
+        return {
+          clipTop,
+          fromRowIndex: mid
+        }
+      }
+    }
+    return null
   }
 
   /** [0, pageList.length) 的索引数组——visible filter fallback 时用。 */
@@ -4640,7 +4707,11 @@ export class Draw {
           }
         }
         // 嵌套表格——处理单元格内选区。打印模式与外层一致跳过。
-        if (element.type === ElementType.TABLE && !element.hide && element.trList) {
+        if (
+          element.type === ElementType.TABLE &&
+          !element.hide &&
+          element.trList
+        ) {
           for (let t = 0; t < element.trList.length; t++) {
             const tr = element.trList[t]
             for (let d = 0; d < tr.tdList.length; d++) {
@@ -4793,6 +4864,47 @@ export class Draw {
     }
   }
 
+  private _getMainIndexPageNo(index: number): number | null {
+    const positionList = this.position.getOriginalMainPositionList()
+    if (!positionList.length) return null
+    const safeIndex = Math.min(
+      Math.max(0, Math.floor(index)),
+      positionList.length - 1
+    )
+    return positionList[safeIndex]?.pageNo ?? null
+  }
+
+  private _collectPagesNeedingPaint(
+    paintPlan: IPagePaintPlan,
+    curIndex: number | undefined
+  ): Set<number> {
+    const out = new Set<number>()
+    const pageCount = this.pageRowList.length
+    if (paintPlan.firstShiftedPage !== null) {
+      for (let i = paintPlan.firstShiftedPage; i < pageCount; i++) {
+        out.add(i)
+      }
+    }
+    if (this._dirtyRange !== null) {
+      const startPage = this._getMainIndexPageNo(this._dirtyRange.start)
+      const endPage = this._getMainIndexPageNo(this._dirtyRange.end)
+      if (startPage !== null && endPage !== null) {
+        const lo = Math.min(startPage, endPage)
+        const hi = Math.max(startPage, endPage)
+        for (let i = lo; i <= hi; i++) out.add(i)
+      } else if (startPage !== null) {
+        out.add(startPage)
+      } else if (endPage !== null) {
+        out.add(endPage)
+      }
+    }
+    if (curIndex !== undefined) {
+      const cursorPage = this._getMainIndexPageNo(curIndex)
+      if (cursorPage !== null) out.add(cursorPage)
+    }
+    return out
+  }
+
   private _lazyRender(
     deferredPages: Set<number>,
     syncPages: Set<number> | null = null
@@ -4939,9 +5051,7 @@ export class Draw {
       isFirstRender:
         b.isFirstRender !== undefined ? b.isFirstRender : a.isFirstRender,
       isSourceHistory:
-        b.isSourceHistory !== undefined
-          ? b.isSourceHistory
-          : a.isSourceHistory,
+        b.isSourceHistory !== undefined ? b.isSourceHistory : a.isSourceHistory,
       // OR 合并
       isSubmitHistory: orTrue(a.isSubmitHistory, b.isSubmitHistory),
       isCompute: orTrue(a.isCompute, b.isCompute),
@@ -5041,8 +5151,7 @@ export class Draw {
       // B-β.2：分页模式下只重绘可见页（mousemove drag 期间通常仅 2-3 页可见，
       // 而 _drawDecorationOnly 仍按 pageRowList 全量遍历是浪费）。
       // 连续模式 / 首帧未观察到 visiblePageNoList 时退回全量遍历。
-      const useVisibleFilter =
-        isPagingMode && this.visiblePageNoList.length > 0
+      const useVisibleFilter = isPagingMode && this.visiblePageNoList.length > 0
       const pageIndices = useVisibleFilter
         ? this.visiblePageNoList
         : this._allPageIndices()
@@ -5144,7 +5253,8 @@ export class Draw {
         if (this._mainSurroundCount === null) {
           let count = 0
           for (let e = 0; e < this.elementList.length; e++) {
-            if (this.elementList[e].imgDisplay === ImageDisplay.SURROUND) count++
+            if (this.elementList[e].imgDisplay === ImageDisplay.SURROUND)
+              count++
           }
           this._mainSurroundCount = count
         }
@@ -5203,10 +5313,7 @@ export class Draw {
           fromNewRowGlobalIndex: number
           deltaElems: number
         } | null = null
-        if (
-          resumeFrom &&
-          resumeFrom.convergenceTarget.matched !== null
-        ) {
+        if (resumeFrom && resumeFrom.convergenceTarget.matched !== null) {
           const target = resumeFrom.convergenceTarget
           const matchedIdx = target.matched!.atOldIdx
           const reusedRows = target.oldRowsAfterCut.slice(matchedIdx + 1)
@@ -5291,7 +5398,9 @@ export class Draw {
             this._prevPageRowCounts.every(
               (n, idx) => n === this.pageRowList[idx].length
             )
-          const convergedReuse = paginationStable ? convergedReuseInfo : undefined
+          const convergedReuse = paginationStable
+            ? convergedReuseInfo
+            : undefined
           if (lastPrefixMutated) {
             this.position.computePositionListIncremental({
               fromRowGlobalIndex: resumeFrom.prefixRowList.length - 1,
@@ -5379,25 +5488,54 @@ export class Draw {
       !this._skipMainRowCompute
         ? this._buildPagePaintPlan()
         : null
+    this._paintPlanFirstShiftedPage = pagePaintPlan?.firstShiftedPage ?? null
     this._drawnPages.clear()
     trace?.mark('pre-paint')
     this._disconnectLazyRender()
+    const isPaintFilterEligible =
+      pagePaintPlan &&
+      this._dirtyRange !== null &&
+      !this._isDecorationActive() &&
+      this.mode !== EditorMode.PRINT
+    let effectiveSyncPages = pagePaintPlan?.syncPages ?? null
+    let effectiveDeferredPages = pagePaintPlan?.deferredPages ?? null
+    if (pagePaintPlan && isPaintFilterEligible) {
+      const needed = this._collectPagesNeedingPaint(pagePaintPlan, curIndex)
+      const filteredSync = new Set<number>()
+      for (const pageNo of pagePaintPlan.syncPages) {
+        if (needed.has(pageNo)) filteredSync.add(pageNo)
+      }
+      // 保底：避免由于边界条件导致可见页一个都不画。
+      if (filteredSync.size) {
+        effectiveSyncPages = filteredSync
+        const filteredDeferred = new Set<number>()
+        for (const pageNo of pagePaintPlan.deferredPages) {
+          if (needed.has(pageNo)) filteredDeferred.add(pageNo)
+        }
+        effectiveDeferredPages = filteredDeferred
+      }
+    }
     if (trace && pagePaintPlan) {
       console.log(
         `[PerfTrace] paintPlan shifted=${
           pagePaintPlan.firstShiftedPage ?? 'none'
-        } sync=${pagePaintPlan.syncPages.size} deferred=${pagePaintPlan.deferredPages.size}`,
+        } sync=${(effectiveSyncPages ?? pagePaintPlan.syncPages).size} deferred=${(effectiveDeferredPages ?? pagePaintPlan.deferredPages).size}`,
         {
-          syncPages: Array.from(pagePaintPlan.syncPages).sort((a, b) => a - b),
-          deferredPages: Array.from(pagePaintPlan.deferredPages).sort(
-            (a, b) => a - b
-          )
+          syncPages: Array.from(
+            effectiveSyncPages ?? pagePaintPlan.syncPages
+          ).sort((a, b) => a - b),
+          deferredPages: Array.from(
+            effectiveDeferredPages ?? pagePaintPlan.deferredPages
+          ).sort((a, b) => a - b)
         }
       )
     }
     if (pagePaintPlan) {
-      this._immediateRender(pagePaintPlan.syncPages)
-      this._lazyRender(pagePaintPlan.deferredPages, pagePaintPlan.syncPages)
+      this._immediateRender(effectiveSyncPages)
+      this._lazyRender(
+        effectiveDeferredPages ?? new Set<number>(),
+        effectiveSyncPages
+      )
     } else {
       // 连续页因为有高度的变化会导致 canvas 渲染空白，需立即渲染，否则会出现闪动。
       // paging 模式在 fallback/full 策略下也同步渲染全部页面，避免可见页等待 observer 回调。
@@ -5426,9 +5564,7 @@ export class Draw {
       // historyTypingBatchMs<=0 时关闭合批，保留每键一份 snapshot 的旧语义（默认）。
       const batchMs = this.options.historyTypingBatchMs
       const canBatch =
-        isTextInput &&
-        batchMs > 0 &&
-        !this.historyManager.isStackEmpty()
+        isTextInput && batchMs > 0 && !this.historyManager.isStackEmpty()
       if (canBatch) {
         this._typingBatchActive = true
         this._typingBatchLastCurIndex = curIndex
@@ -5605,11 +5741,7 @@ export class Draw {
         // removed.length, ...inserted)——等价于「把改动重新做一遍」。
         for (let i = 0; i < mutations.length; i++) {
           const m = mutations[i]
-          this.elementList.splice(
-            m.start,
-            m.removed.length,
-            ...m.inserted
-          )
+          this.elementList.splice(m.start, m.removed.length, ...m.inserted)
         }
       } finally {
         this._isReplayingHistory = false
@@ -5637,11 +5769,7 @@ export class Draw {
         // 前一条已经应用之后的坐标系。
         for (let i = mutations.length - 1; i >= 0; i--) {
           const m = mutations[i]
-          this.elementList.splice(
-            m.start,
-            m.inserted.length,
-            ...m.removed
-          )
+          this.elementList.splice(m.start, m.inserted.length, ...m.removed)
         }
       } finally {
         this._isReplayingHistory = false
