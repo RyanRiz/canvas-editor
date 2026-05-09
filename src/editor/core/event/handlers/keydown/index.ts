@@ -71,6 +71,40 @@ export function keydown(evt: KeyboardEvent, host: CanvasEvent) {
       eventBus.emit('saved', draw.getValue())
     }
     evt.preventDefault()
+  } else if (isMod(evt) && evt.key.toLocaleLowerCase() === KeyMap.V && evt.shiftKey) {
+    // Ctrl+Shift+V: paste as plain text. Firefox includes text/html in
+    // the paste event even for plain-text paste, so the normal paste
+    // handler takes the HTML path and produces nothing. Intercept here
+    // and read directly from the clipboard as plain text.
+    // Also reset style attributes so the text uses defaults (black color,
+    // no bold/italic/underline) — matching what users expect from
+    // "paste without formatting".
+    if (draw.isReadonly() || draw.isDisabled()) return
+    evt.preventDefault()
+    navigator.clipboard.readText().then((text) => {
+      if (!text) return
+      const rangeManager = draw.getRange()
+      const prevDefaultStyle = rangeManager.getDefaultStyle()
+      // Clear existing default style, then set neutral overrides so the
+      // pasted text doesn't inherit color / bold / italic etc. from the
+      // element under the cursor.
+      rangeManager.setDefaultStyle(null)
+      rangeManager.setDefaultStyle({
+        bold: false,
+        color: '#000000',
+        italic: false,
+        underline: false,
+        strikeout: false
+      })
+      host.input(text)
+      rangeManager.setDefaultStyle(prevDefaultStyle)
+    }).catch(() => { /* clipboard read failed — silently ignored */ })
+  } else if (isMod(evt) && evt.key.toLocaleLowerCase() === KeyMap.V) {
+    // Ctrl+V (without Shift): let the native paste event on the hidden
+    // textarea handle it. Only preventDefault if read-only.
+    if (draw.isReadonly() || draw.isDisabled()) {
+      evt.preventDefault()
+    }
   } else if (evt.key === KeyMap.ESC) {
     // 退出格式刷
     host.clearPainterStyle()
