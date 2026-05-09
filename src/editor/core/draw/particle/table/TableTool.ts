@@ -516,6 +516,7 @@ export class TableTool {
           }
         }
         if (isChangeSize) {
+          this.draw.markTableElementDirty(element)
           this.draw.render({ isSetCursor: false })
         }
         // 还原副作用

@@ -166,7 +166,8 @@ export class BaseBlock {
         document.body.style.cursor = ''
         canvas.style.cursor = 'text'
         // 更新文档
-        this.draw.render()
+        const elIdx = this.draw.getOriginalMainElementList().indexOf(this.element)
+        this.draw.render({ curIndex: elIdx !== -1 ? elIdx : undefined })
       },
       {
         once: true

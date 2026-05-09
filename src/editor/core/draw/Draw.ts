@@ -1170,17 +1170,31 @@ export class Draw {
   /**
    * 标记主元素列表的 dirty 区间（PERF-PLAN §2.1）。
    * - 多次标记会取并集（最小 start、最大 end）
-   * - 仅作为渲染期 dirty-page 计算的提示；为 null 时按全量路径处理
-   * - render() 完成后会被自动清空
+  * - 仅作为渲染期 dirty-page 计算的提示；为 null 时按全量路径处理
+  * - render() 完成后会被自动清空
    */
   public markDirty(start: number, end: number) {
     const lo = Math.max(0, Math.min(start, end))
-    const hi = Math.max(start, end)
-    if (this._dirtyRange === null) {
-      this._dirtyRange = { start: lo, end: hi }
+    const hi = Math.max(lo, Math.max(start, end))
+    if (this._dirtyRange) {
+      this._dirtyRange.start = Math.min(this._dirtyRange.start, lo)
+      this._dirtyRange.end = Math.max(this._dirtyRange.end, hi)
     } else {
-      if (lo < this._dirtyRange.start) this._dirtyRange.start = lo
-      if (hi > this._dirtyRange.end) this._dirtyRange.end = hi
+      this._dirtyRange = { start: lo, end: hi }
+    }
+  }
+
+  /**
+   * PERF-PLAN §2.6：用 computeRowList 预先存储在 TABLE 元素上的
+   * _mainElementIndex 将其在主列表中的位置标脏。TableTool 的列/行拖拽、
+   * TableOperate 的插入/删除行/列/合并/拆分等操作均直接更改元素属性后调用
+   * render()，不经过 spliceElementList 故无法自动设脏。此方法提供统一的
+   * 标脏入口，使增量布局在表格操作后仍能生效。
+   */
+  public markTableElementDirty(element: IElement) {
+    const idx = (element as unknown as { _mainElementIndex?: number })._mainElementIndex
+    if (idx !== undefined) {
+      this.markDirty(idx, idx)
     }
   }
 
@@ -2720,6 +2734,11 @@ export class Draw {
           }
         }
       } else if (element.type === ElementType.TABLE) {
+        // PERF-PLAN §2.6：除 td 级 _ownerElementIndex 外，也在 TABLE 元素本身
+        // 存储其在主列表中的索引。TableTool 的列/行拖拽缩放直接更改元素属性
+        // 后调用 render()——不经过 spliceElementList，因此无法自动标脏。此索引
+        // 使 resize 路径也能精准 markDirty(tableIndex)，启用增量布局。
+        ;(element as unknown as { _mainElementIndex?: number })._mainElementIndex = i
         const tdPaddingWidth = tdPadding[1] + tdPadding[3]
         const tdPaddingHeight = tdPadding[0] + tdPadding[2]
         // 表格分页处理进度：https://github.com/Hufe921/canvas-editor/issues/41
@@ -5185,6 +5204,24 @@ export class Draw {
           this._mainSurroundCount === 0
             ? []
             : pickSurroundElementList(this.elementList)
+        // PERF-PLAN §2.6：表格操作/图像缩放/块缩放直接更改元素属性后调用
+        // render()，不经过 spliceElementList 故 _dirtyRange 保持为 null。
+        // 利用位置上下文或 curIndex 自动标脏，使 _tryBuildResumeFrom 能够
+        // 启用增量布局，避免回退到 full computeRowList。
+        if (!this._dirtyRange && isMainZone && !isTextInput) {
+          const ctx = this.position.getPositionContext()
+          if (ctx.isTable && ctx.index !== undefined) {
+            this.markDirty(ctx.index, ctx.index)
+          } else if (curIndex !== undefined) {
+            const el = this.elementList[curIndex]
+            if (
+              el &&
+              (el.type === ElementType.IMAGE || el.type === ElementType.BLOCK)
+            ) {
+              this.markDirty(curIndex, curIndex)
+            }
+          }
+        }
         // PERF-PLAN §2.2 / Phase 2B：在「上一帧 row checkpoint 仍然有效 + 已有 dirty
         // 区间提示 + 布局签名未变 + 至少存在可保留的前缀行」时启用增量布局，
         // 跳过 dirty 起点之前的 measureText / 包装判定 / surround 计算等 O(N) 工作。
