@@ -42,6 +42,27 @@ describe('PageLayered (PERF-PLAN — Strategy B)', () => {
       expect(wrapper.parentElement).toBe(pageContainer)
     })
 
+    it('只有 base canvas 携带 data-index（避免外部 querySelector 双计数）', () => {
+      ctx = createTestEditor({
+        data: { header: [], main: midDoc(), footer: [] }
+      })
+      const draw = (ctx.editor as any).draw
+      const container = draw.getPageContainer() as HTMLDivElement
+      // 选择全部带 data-index 的元素——只应是 base canvas，每页一个。
+      const indexed = container.querySelectorAll('[data-index]')
+      const expectedCount = draw.getPageList().length
+      expect(indexed.length).toBe(expectedCount)
+      indexed.forEach(el => {
+        expect((el as HTMLElement).classList.contains('ce-page-base')).toBe(
+          true
+        )
+      })
+      // 直接对应「1 页文档识别为 2 页」回归——即便分层后也只有 1 个 data-index
+      expect(
+        container.querySelectorAll('canvas[data-index]').length
+      ).toBe(draw.getPageList().length)
+    })
+
     it('decoration canvas 设置了 pointer-events:none', () => {
       ctx = createTestEditor({
         data: { header: [], main: midDoc(), footer: [] }
@@ -201,6 +222,209 @@ describe('PageLayered (PERF-PLAN — Strategy B)', () => {
         expect(w.querySelectorAll('.ce-page-base').length).toBe(1)
         expect(w.querySelectorAll('.ce-page-decoration').length).toBe(1)
       })
+    })
+  })
+
+  describe('B-β.1：装饰层空状态跳过', () => {
+    it('选区收起 + 无搜索 → _walkDecorationRow 不被调用', () => {
+      ctx = createTestEditor({
+        data: { header: [], main: midDoc(), footer: [] }
+      })
+      const draw = (ctx.editor as any).draw
+      // 让光标 / 装饰层先进入 painted 状态
+      draw.getRange().setRange(2, 2)
+      draw.render({ curIndex: 2, isSetCursor: true, isSubmitHistory: false })
+      const walkSpy = vi.spyOn(draw as any, '_walkDecorationRow')
+      // 触发 decoration-only render；没有选区 / 搜索——空状态
+      draw.render({
+        isCompute: false,
+        isSetCursor: false,
+        isSubmitHistory: false,
+        isDecorationOnly: true
+      })
+      expect(walkSpy).not.toHaveBeenCalled()
+    })
+
+    it('选区展开 → _walkDecorationRow 被调用（active 状态）', () => {
+      ctx = createTestEditor({
+        data: { header: [], main: midDoc(), footer: [] }
+      })
+      const draw = (ctx.editor as any).draw
+      draw.getRange().setRange(2, 6)
+      draw.render({ curIndex: 6, isSetCursor: false, isSubmitHistory: false })
+      // 触发一次 decoration-only：版本号 + 缓存让相同状态的同帧重入也命中。
+      // 用 bumpDecorationVersion 强制让缓存失效，验证 walk 真的会跑。
+      draw.bumpDecorationVersion()
+      const walkSpy = vi.spyOn(draw as any, '_walkDecorationRow')
+      draw.render({
+        isCompute: false,
+        isSetCursor: false,
+        isSubmitHistory: false,
+        isDecorationOnly: true
+      })
+      expect(walkSpy).toHaveBeenCalled()
+    })
+  })
+
+  describe('B-δ：可见页同步绘制（消除 IntersectionObserver paint 延迟）', () => {
+    it('visiblePageNoList 命中的 dirty 页 → _drawPage 在 render() 同步阶段被调用', () => {
+      ctx = createTestEditor({
+        data: { header: [], main: midDoc(), footer: [] }
+      })
+      const draw = (ctx.editor as any).draw
+      // 模拟 ScrollObserver 已经把页 0 标记为可见——避免依赖真 jsdom 滚动事件
+      draw.setVisiblePageNoList([0])
+      // 把 base 重绘缓存清掉以确保下一帧 render 必须重新 _drawPage
+      draw.invalidatePaintCache()
+      const drawPageSpy = vi.spyOn(draw as any, '_drawPage')
+      // 触发一次完整 render——之前会经 _lazyRender 异步绑 observer，本次必须同步
+      draw.render({
+        isCompute: true,
+        isSetCursor: false,
+        isSubmitHistory: false,
+        isLazy: true // 强制走 _lazyRender 分支（paging 模式默认）
+      })
+      // 关键断言：render() 返回时 _drawPage 必须已被调用过（同步），不能等
+      // 异步 IntersectionObserver
+      expect(drawPageSpy).toHaveBeenCalled()
+    })
+
+    it('visiblePageNoList 为空（初始未滚动） → 退回 observer 路径，不抛错', () => {
+      ctx = createTestEditor({
+        data: { header: [], main: midDoc(), footer: [] }
+      })
+      const draw = (ctx.editor as any).draw
+      // 不设置 visiblePageNoList——保持空（默认）
+      expect(() =>
+        draw.render({
+          isCompute: true,
+          isSetCursor: false,
+          isSubmitHistory: false,
+          isLazy: true
+        })
+      ).not.toThrow()
+    })
+
+    it('dirtyPages 中的页一律同步绘制——即使不在 visiblePageNoList（overflow 新页场景）', () => {
+      ctx = createTestEditor({
+        data: { header: [], main: midDoc(), footer: [] }
+      })
+      const draw = (ctx.editor as any).draw
+      // jsdom 的 canvas-mock 测不出真实文字宽度——layout 永远只算 1 页。
+      // 直接在 Draw 内部 stub 一个 fake page 1 来复刻场景：
+      // pageRowList[1] / pageList[1] 存在，但 visiblePageNoList 不含 1。
+      const fakePage1Canvas = document.createElement('canvas')
+      ;(draw as any).pageList.push(fakePage1Canvas)
+      ;(draw as any).ctxList.push(fakePage1Canvas.getContext('2d'))
+      ;(draw as any).pageRowList.push([])
+      ;(draw as any).pageWrapperList.push(fakePage1Canvas)
+      ;(draw as any).decorationCanvasList.push(fakePage1Canvas)
+      ;(draw as any).decorationCtxList.push(fakePage1Canvas.getContext('2d'))
+      // 复刻用户场景：visiblePageNoList 只含 page 0；dirtyPages 包含新建的 page 1
+      draw.setVisiblePageNoList([0])
+      const dirtyPages = new Set<number>([0, 1])
+      const drawPageSpy = vi.spyOn(draw as any, '_drawPage')
+      ;(draw as any)._lazyRender(dirtyPages)
+      // 关键断言——回归测试覆盖「now it doesn't update until cursor moved to page 2」：
+      // page 1（新创建、不在 visiblePageNoList）必须在同步阶段被画过
+      const calledPageNos = drawPageSpy.mock.calls.map((c: any[]) => c[0].pageNo)
+      expect(calledPageNos).toContain(1)
+    })
+
+    it('viewport 在 page 1，edit at page 0 但 dirtyPages 漏掉 page 1 → page 1（视口可见）也必须同步重绘', () => {
+      ctx = createTestEditor({
+        data: { header: [], main: midDoc(), footer: [] }
+      })
+      const draw = (ctx.editor as any).draw
+      // 复刻用户报错场景的最小形：3 页文档，viewport 在 page 1（中间），
+      // edit at page 0（上方），_computeDirtyPages 由于补偿型移位返回 {0}
+      // 漏掉 page 1——但 page 1 视口可见，必须同步重绘。
+      // 我们直接 stub 出 3 页，然后注入 dirtyPages={0}（漏掉 page 1）。
+      for (let n = 1; n <= 2; n++) {
+        const fake = document.createElement('canvas')
+        ;(draw as any).pageList.push(fake)
+        ;(draw as any).ctxList.push(fake.getContext('2d'))
+        ;(draw as any).pageRowList.push([])
+        ;(draw as any).pageWrapperList.push(fake)
+        ;(draw as any).decorationCanvasList.push(fake)
+        ;(draw as any).decorationCtxList.push(fake.getContext('2d'))
+      }
+      draw.setVisiblePageNoList([1]) // 用户视口在 page 1
+      const dirtyPages = new Set<number>([0]) // 启发式漏掉了 page 1 的级联影响
+      const drawPageSpy = vi.spyOn(draw as any, '_drawPage')
+      ;(draw as any)._lazyRender(dirtyPages)
+      const calledPageNos = drawPageSpy.mock.calls.map((c: any[]) => c[0].pageNo)
+      // 关键断言：page 0（dirty）必须画，page 1（视口）也必须画——
+      // 「viewport 永远是最新的」契约。回归测试覆盖 user report
+      // 「when showing at middle page editing at above page, the below page doesn't update」。
+      expect(calledPageNos).toContain(0)
+      expect(calledPageNos).toContain(1)
+    })
+  })
+
+  describe('B-γ：版本号缓存', () => {
+    it('同状态重入 → walk 被跳过（cache hit）', () => {
+      ctx = createTestEditor({
+        data: { header: [], main: midDoc(), footer: [] }
+      })
+      const draw = (ctx.editor as any).draw
+      draw.getRange().setRange(2, 6)
+      draw.render({ curIndex: 6, isSetCursor: false, isSubmitHistory: false })
+      // 第一次 decoration-only：缓存填充
+      draw.render({
+        isCompute: false,
+        isSetCursor: false,
+        isSubmitHistory: false,
+        isDecorationOnly: true
+      })
+      const walkSpy = vi.spyOn(draw as any, '_walkDecorationRow')
+      // 第二次同状态重入：版本号未变 → cache hit → walk 跳过
+      draw.render({
+        isCompute: false,
+        isSetCursor: false,
+        isSubmitHistory: false,
+        isDecorationOnly: true
+      })
+      expect(walkSpy).not.toHaveBeenCalled()
+    })
+
+    it('setRange 触发 bumpDecorationVersion → 缓存失效', () => {
+      ctx = createTestEditor({
+        data: { header: [], main: midDoc(), footer: [] }
+      })
+      const draw = (ctx.editor as any).draw
+      draw.getRange().setRange(2, 6)
+      draw.render({ curIndex: 6, isSetCursor: false, isSubmitHistory: false })
+      draw.render({
+        isCompute: false,
+        isSetCursor: false,
+        isSubmitHistory: false,
+        isDecorationOnly: true
+      })
+      // setRange 之后版本号应该 +1，下一帧 walk 必须被调用
+      draw.getRange().setRange(3, 7)
+      const walkSpy = vi.spyOn(draw as any, '_walkDecorationRow')
+      draw.render({
+        isCompute: false,
+        isSetCursor: false,
+        isSubmitHistory: false,
+        isDecorationOnly: true
+      })
+      expect(walkSpy).toHaveBeenCalled()
+    })
+
+    it('search.setSearchKeyword 同样触发缓存失效', () => {
+      ctx = createTestEditor({
+        data: { header: [], main: midDoc(), footer: [] }
+      })
+      const draw = (ctx.editor as any).draw
+      draw.getRange().setRange(2, 6)
+      draw.render({ curIndex: 6, isSetCursor: false, isSubmitHistory: false })
+      // 测一次状态稳定下的版本号；setSearchKeyword 后必须 ++
+      const v0 = (draw as any)._decorationVersion
+      draw.getSearch().setSearchKeyword('hello')
+      const v1 = (draw as any)._decorationVersion
+      expect(v1).toBeGreaterThan(v0)
     })
   })
 })

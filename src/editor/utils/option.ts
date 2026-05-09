@@ -241,6 +241,8 @@ export function mergeOption(
     shortcutDisableKeys: [],
     scrollContainerSelector: '',
     pageOuterSelectionDisable: false,
+    pagePaintStrategy: 'visible-sync-lazy-offscreen',
+    pagePaintOverscan: 1,
     ...options,
     table: tableOptions,
     header: headerOptions,

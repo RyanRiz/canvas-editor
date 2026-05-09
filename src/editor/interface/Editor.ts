@@ -124,6 +124,13 @@ export interface IEditorOption {
   // PERF-PLAN — Strategy B：分层 canvas + 装饰层独立重绘。
   // 默认开启；selection drag / search-next 等高频交互省去全量 base 重绘。
   pageLayered?: IPageLayeredOption
+  // 基础层页面重绘策略：
+  //  - `full`：每次内容 render 同步重绘所有页（保守回退）
+  //  - `visible-sync-lazy-offscreen`：可见页 + overscan 同步，离屏页懒重绘
+  // 默认使用后者，以兼顾分页漂移正确性与多页文档的 typing latency。
+  pagePaintStrategy?: 'full' | 'visible-sync-lazy-offscreen'
+  // visible-sync-lazy-offscreen 模式下，可见页两侧额外同步重绘的页数。
+  pagePaintOverscan?: number
 }
 
 export interface IEditorResult {

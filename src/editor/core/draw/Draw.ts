@@ -162,6 +162,19 @@ export type DraftHistoryStackItem =
       applyBackward: () => void
     }
 
+interface IPageLayoutSignature {
+  firstRowStartIndex: number
+  lastRowStartIndex: number
+  rowCount: number
+  rowHeightSum: number
+}
+
+interface IPagePaintPlan {
+  firstShiftedPage: number | null
+  syncPages: Set<number>
+  deferredPages: Set<number>
+}
+
 export class Draw {
   private container: HTMLDivElement
   private pageContainer: HTMLDivElement
@@ -174,11 +187,26 @@ export class Draw {
   // 条目直接 alias 到 base，所有 paint 代码无差别地写到一个 ctx——零回归。
   private decorationCanvasList: HTMLCanvasElement[]
   private decorationCtxList: CanvasRenderingContext2D[]
+  private chromeCacheCanvasList: HTMLCanvasElement[]
+  private chromeCacheCtxList: CanvasRenderingContext2D[]
+  private chromeCacheKeyList: (string | null)[]
   private pageWrapperList: HTMLDivElement[]
   // 装饰层 dirty page 集合：与 _drawnPages 平行——「这一页的 decoration 已是最新」。
   // 装饰层只跟踪：选区 / 搜索高亮 / 表格跨行/列。base 重绘时同时清空 decoration
   // 缓存（base 改 → row 几何变 → 选区位置可能变）。
-  private _decorationDrawnPages: Set<number>
+  // PERF-PLAN — Strategy B-γ：从 Set<number> 改为 Map<pageNo, version>。
+  // 同一 (range, search) 状态下重复 decoration-only 渲染（典型场景：mousemove
+  // 抖动多次落到同一选区位置）→ 命中即跳过 _walkDecorationRow，O(N) 行遍历
+  // 退化为 1 个 Map.get + 比较。
+  private _decorationDrawnPages: Map<number, number>
+  // PERF-PLAN — Strategy B-γ：装饰层逻辑「版本号」。
+  //   - 初始为 0；range / search keyword 任一变更时 +1
+  //   - _drawDecorationOnly 完成时把 _decorationVersion 写入对应 pageNo
+  //   - 下次进入 decoration-only 路径前，发现 pageVersion === _decorationVersion
+  //     → 跳过本页（DOM 已是最新）
+  // 注意：base 重绘（_drawPage）会同时把 decoration 一起画，因此 base 重绘后
+  // 也用同一 _decorationVersion 标记 → decoration-only 紧随其后命中缓存。
+  private _decorationVersion: number
   // drawRow 内部 range / table-cross-row paint 时使用的目标 ctx——_drawPage 在
   // 调用 drawRow 前置位为 decoration ctx，drawRow 完成后清零。
   // 为 null 时（包括非分层模式 / 单元格递归外层）走原 ctx——零回归。
@@ -203,8 +231,12 @@ export class Draw {
   // 输入：避免为了一次按键而把整篇 N-page 主文档重新布局（PERF-PLAN §2 follow-up）。
   private _headerDirty: boolean
   private _footerDirty: boolean
-  // 上一次渲染各 page 的 row 数，用于检测下游 pagination 是否漂移
+  private _headerChromeVersion: number
+  private _footerChromeVersion: number
+  // 上一次渲染各 page 的 row 数；仍用于某些增量 position 复用判定。
   private _prevPageRowCounts: number[] | null
+  // 上一次渲染各 page 的轻量布局签名。用于判断从哪一页开始发生分页漂移。
+  private _prevPageLayoutSignatures: IPageLayoutSignature[] | null
   // 已绘制（且未被标脏）的 page 索引集合：lazy 渲染时这些页不再重复绘制
   private _drawnPages: Set<number>
   // PERF-PLAN §2.2 / Phase 2B：主元素列表 computeRowList 的行边界 checkpoint。
@@ -348,8 +380,12 @@ export class Draw {
     this.ctxList = []
     this.decorationCanvasList = []
     this.decorationCtxList = []
+    this.chromeCacheCanvasList = []
+    this.chromeCacheCtxList = []
+    this.chromeCacheKeyList = []
     this.pageWrapperList = []
-    this._decorationDrawnPages = new Set()
+    this._decorationDrawnPages = new Map()
+    this._decorationVersion = 0
     this._currentDecorationCtx = null
     this._measureCanvas = null
     this._measureCtx = null
@@ -361,7 +397,10 @@ export class Draw {
     this._dirtyRange = null
     this._headerDirty = false
     this._footerDirty = false
+    this._headerChromeVersion = 0
+    this._footerChromeVersion = 0
     this._prevPageRowCounts = null
+    this._prevPageLayoutSignatures = null
     this._drawnPages = new Set()
     this._mainRowCheckpoints = []
     this._mainLayoutSig = null
@@ -1179,9 +1218,11 @@ export class Draw {
     } else if (elementList === this.header.getElementList()) {
       scope = 'header'
       this._headerDirty = true
+      this._headerChromeVersion++
     } else if (elementList === this.footer.getElementList()) {
       scope = 'footer'
       this._footerDirty = true
+      this._footerChromeVersion++
     } else {
       scope = 'table'
       // PERF-PLAN §2.5 / Phase 2B：如果该 elementList 是某个 td.value（由上一次
@@ -1549,6 +1590,8 @@ export class Draw {
   public setPageMode(payload: PageMode) {
     if (!payload || this.options.pageMode === payload) return
     this.options.pageMode = payload
+    // 分页模式切换会重建整套 pageRowList / page signature；旧的 paint plan 不可复用。
+    this._invalidatePaintCache()
     // 纸张大小重置
     if (payload === PageMode.PAGING) {
       const { height } = this.options
@@ -1935,7 +1978,9 @@ export class Draw {
 
   private _invalidatePaintCache() {
     this._prevPageRowCounts = null
+    this._prevPageLayoutSignatures = null
     this._drawnPages.clear()
+    this.chromeCacheKeyList = this.chromeCacheKeyList.map(() => null)
     this._dirtyRange = null
     this._headerDirty = false
     this._footerDirty = false
@@ -2208,6 +2253,11 @@ export class Draw {
     base.height = height * dpr
     const ctx = base.getContext('2d')!
     this._initPageContext(ctx)
+    const chromeCache = document.createElement('canvas')
+    chromeCache.width = width * dpr
+    chromeCache.height = height * dpr
+    const chromeCacheCtx = chromeCache.getContext('2d')!
+    this._initPageContext(chromeCacheCtx)
 
     if (isLayered) {
       // wrapper 是 pageContainer 的直接子节点——继承原 base canvas 在 flex/block
@@ -2215,7 +2265,9 @@ export class Draw {
       // 用 absolute 位于 wrapper 内部叠放。
       const wrapper = document.createElement('div')
       wrapper.classList.add(`${EDITOR_PREFIX}-page-wrapper`)
-      wrapper.setAttribute('data-index', String(pageNo))
+      // wrapper 同样不带 data-index——避免外部 `[data-index]` 查询双计数。
+      // 唯一带 data-index 的是 base canvas（line 2206）——保留事件命中和
+      // 索引语义不变。
       wrapper.style.position = 'relative'
       wrapper.style.width = `${width}px`
       wrapper.style.height = `${height}px`
@@ -2230,7 +2282,10 @@ export class Draw {
 
       const decoration = document.createElement('canvas')
       decoration.classList.add(`${EDITOR_PREFIX}-page-decoration`)
-      decoration.setAttribute('data-index', String(pageNo))
+      // 注意：装饰层不带 data-index——很多外部代码（如 JATS canvas-inspect-overlay）
+      // 用 `canvas[data-index]` 计数页数；如果装饰层也带 data-index，会双计数→
+      // 「1 页文档被识别为 2 页」。仅 base canvas 需要 data-index（事件命中、
+      // IntersectionObserver target、demo 中的 page 索引）。
       decoration.style.position = 'absolute'
       decoration.style.left = '0'
       decoration.style.top = '0'
@@ -2258,6 +2313,9 @@ export class Draw {
     }
     this.pageList.push(base)
     this.ctxList.push(ctx)
+    this.chromeCacheCanvasList.push(chromeCache)
+    this.chromeCacheCtxList.push(chromeCacheCtx)
+    this.chromeCacheKeyList.push(null)
   }
 
   /**
@@ -2306,6 +2364,13 @@ export class Draw {
       deco.style.width = `${w}px`
       deco.style.height = `${h}px`
       this._initPageContext(this.decorationCtxList[pageNo])
+    }
+    const chromeCache = this.chromeCacheCanvasList[pageNo]
+    if (chromeCache) {
+      chromeCache.width = w * dpr
+      chromeCache.height = h * dpr
+      this._initPageContext(this.chromeCacheCtxList[pageNo])
+      this.chromeCacheKeyList[pageNo] = null
     }
   }
 
@@ -4002,19 +4067,127 @@ export class Draw {
     this.blockParticle.clear()
   }
 
-  private _drawPage(payload: IDrawPagePayload) {
-    const { elementList, positionList, rowList, pageNo } = payload
+  private _getPageChromeCacheKey(pageNo: number): string {
     const {
       inactiveAlpha,
       pageMode,
       header,
       footer,
       pageNumber,
-      lineNumber,
+      pageBorder,
+      watermark,
+      margins,
+      width,
+      height,
+      scale
+    } = this.options
+    return JSON.stringify({
+      pageNo,
+      pageCount: this.pageRowList.length,
+      width,
+      height,
+      scale,
+      pageMode,
+      alpha: !this.zone.isMainActive() ? inactiveAlpha : 1,
+      isPrintMode: this.mode === EditorMode.PRINT,
+      printBackgroundDisabled:
+        this.options.modeRule[EditorMode.PRINT]?.backgroundDisabled ?? false,
+      headerDisabled: header.disabled,
+      footerDisabled: footer.disabled,
+      pageNumberDisabled: pageNumber.disabled,
+      pageBorderDisabled: pageBorder.disabled,
+      headerExtraHeight: this.header.getExtraHeight(),
+      watermarkData: watermark.data,
+      watermarkLayer: watermark.layer,
+      watermarkType: watermark.type,
+      watermarkOpacity: watermark.opacity,
+      watermarkColor: watermark.color,
+      watermarkFont: watermark.font,
+      watermarkSize: watermark.size,
+      watermarkRepeat: watermark.repeat,
+      watermarkGap: watermark.gap,
+      watermarkNumberType: watermark.numberType,
+      pageBorderColor: pageBorder.color,
+      pageBorderLineWidth: pageBorder.lineWidth,
+      pageBorderPadding: pageBorder.padding,
+      margins,
+      headerVersion: this._headerChromeVersion,
+      footerVersion: this._footerChromeVersion
+    })
+  }
+
+  private _renderPageChromeCache(pageNo: number) {
+    const {
+      inactiveAlpha,
+      pageMode,
+      header,
+      footer,
+      pageNumber,
       pageBorder
     } = this.options
     const isPrintMode = this.mode === EditorMode.PRINT
     const isContinuityMode = pageMode === PageMode.CONTINUITY
+    const chromeCtx = this.chromeCacheCtxList[pageNo]
+    const chromeCanvas = this.chromeCacheCanvasList[pageNo]
+    if (!chromeCtx || !chromeCanvas) return
+    const width = Math.max(chromeCanvas.width, this.getWidth())
+    const height = Math.max(chromeCanvas.height, this.getHeight())
+    chromeCtx.clearRect(0, 0, width, height)
+    chromeCtx.globalAlpha = !this.zone.isMainActive() ? inactiveAlpha : 1
+    if (
+      !isPrintMode ||
+      !this.options.modeRule[EditorMode.PRINT]?.backgroundDisabled
+    ) {
+      this.background.render(chromeCtx, pageNo)
+    }
+    if (
+      !isContinuityMode &&
+      this.options.watermark.data &&
+      this.options.watermark.layer === WatermarkLayer.BOTTOM
+    ) {
+      this.waterMark.render(chromeCtx, pageNo)
+    }
+    if (!isPrintMode) {
+      this.margin.render(chromeCtx, pageNo)
+    }
+    if (this.getIsPagingMode()) {
+      if (!header.disabled) {
+        this.header.render(chromeCtx, pageNo)
+      }
+      if (!pageNumber.disabled) {
+        this.pageNumber.render(chromeCtx, pageNo)
+      }
+      if (!footer.disabled) {
+        this.footer.render(chromeCtx, pageNo)
+      }
+    }
+    if (!pageBorder.disabled) {
+      this.pageBorder.render(chromeCtx)
+    }
+    if (
+      !isContinuityMode &&
+      this.options.watermark.data &&
+      this.options.watermark.layer === WatermarkLayer.TOP
+    ) {
+      this.waterMark.render(chromeCtx, pageNo)
+    }
+  }
+
+  private _blitPageChrome(ctx: CanvasRenderingContext2D, pageNo: number) {
+    const nextKey = this._getPageChromeCacheKey(pageNo)
+    if (this.chromeCacheKeyList[pageNo] !== nextKey) {
+      this._renderPageChromeCache(pageNo)
+      this.chromeCacheKeyList[pageNo] = nextKey
+    }
+    const chromeCanvas = this.chromeCacheCanvasList[pageNo]
+    if (!chromeCanvas) return
+    ctx.drawImage(chromeCanvas, 0, 0, this.getWidth(), this.getHeight())
+  }
+
+  private _drawPage(payload: IDrawPagePayload) {
+    const { elementList, positionList, rowList, pageNo } = payload
+    const { inactiveAlpha, lineNumber } = this.options
+    const isPrintMode = this.mode === EditorMode.PRINT
     const innerWidth = this.getInnerWidth()
     const ctx = this.ctxList[pageNo]
     // PERF-PLAN — Strategy B：drawRow 内部 range / table-cross-row paint 时
@@ -4026,28 +4199,10 @@ export class Draw {
     ctx.globalAlpha = !this.zone.isMainActive() ? inactiveAlpha : 1
     if (decoCtx && decoCtx !== ctx) decoCtx.globalAlpha = ctx.globalAlpha
     this._clearPage(pageNo)
-    // 绘制背景
-    if (
-      !isPrintMode ||
-      !this.options.modeRule[EditorMode.PRINT]?.backgroundDisabled
-    ) {
-      this.background.render(ctx, pageNo)
-    }
+    this._blitPageChrome(ctx, pageNo)
     // 绘制区域
     if (!isPrintMode) {
       this.area.render(ctx, pageNo)
-    }
-    // 绘制水印（底层）
-    if (
-      !isContinuityMode &&
-      this.options.watermark.data &&
-      this.options.watermark.layer === WatermarkLayer.BOTTOM
-    ) {
-      this.waterMark.render(ctx, pageNo)
-    }
-    // 绘制页边距
-    if (!isPrintMode) {
-      this.margin.render(ctx, pageNo)
     }
     // 渲染衬于文字下方元素
     this._drawFloat(ctx, {
@@ -4069,20 +4224,6 @@ export class Draw {
       innerWidth,
       zone: EditorZone.MAIN
     })
-    if (this.getIsPagingMode()) {
-      // 绘制页眉
-      if (!header.disabled) {
-        this.header.render(ctx, pageNo)
-      }
-      // 绘制页码
-      if (!pageNumber.disabled) {
-        this.pageNumber.render(ctx, pageNo)
-      }
-      // 绘制页脚
-      if (!footer.disabled) {
-        this.footer.render(ctx, pageNo)
-      }
-    }
     // 渲染浮于文字上方元素
     this._drawFloat(ctx, {
       pageNo,
@@ -4102,27 +4243,17 @@ export class Draw {
     if (!lineNumber.disabled) {
       this.lineNumber.render(ctx, pageNo)
     }
-    // 绘制页面边框
-    if (!pageBorder.disabled) {
-      this.pageBorder.render(ctx)
-    }
     // 绘制签章
     this.badge.render(ctx, pageNo)
     // 绘制涂鸦
     if (this.isGraffitiMode()) {
       this.graffiti.render(ctx, pageNo)
     }
-    // 绘制水印（顶层）
-    if (
-      !isContinuityMode &&
-      this.options.watermark.data &&
-      this.options.watermark.layer === WatermarkLayer.TOP
-    ) {
-      this.waterMark.render(ctx, pageNo)
-    }
     // PERF-PLAN — Strategy B：完成本页后 decoration 视为最新；后续若仅
     // selection / search 改动则可走快路径只重绘装饰层。
-    this._decorationDrawnPages.add(pageNo)
+    // B-γ：用 _decorationVersion 而非常量打 tag——下次 decoration-only render
+    // 命中后即可跳过重绘（同 (range, search) 状态多次重入时直接复用）。
+    this._decorationDrawnPages.set(pageNo, this._decorationVersion)
     this._currentDecorationCtx = null
   }
 
@@ -4155,6 +4286,10 @@ export class Draw {
       this._drawPage(payload)
       return
     }
+    // B-γ：版本号缓存——同 (range, search) 状态的重入直接跳过（典型场景：
+    // mousemove 抖动多次落到同一选区位置，or 拖拽穿过完全可见的多页时）。
+    const cachedVersion = this._decorationDrawnPages.get(pageNo)
+    if (cachedVersion === this._decorationVersion) return
     const deco = this.decorationCanvasList[pageNo]
     decoCtx.globalAlpha = !this.zone.isMainActive()
       ? this.options.inactiveAlpha
@@ -4165,6 +4300,12 @@ export class Draw {
       Math.max(deco.width, this.getWidth()),
       Math.max(deco.height, this.getHeight())
     )
+    // B-β.1：装饰层逻辑「空状态」——选区收起、无搜索、非跨行表格选区时直接
+    // 跳过整轮行遍历。clearRect 已经把上一帧的内容擦掉，绘制阶段无事可做。
+    if (!this._isDecorationActive()) {
+      this._decorationDrawnPages.set(pageNo, this._decorationVersion)
+      return
+    }
     // 走 row 仅跑 rangeRecord 逻辑，不做任何文字 / 几何 paint。
     this._walkDecorationRow(decoCtx, {
       elementList,
@@ -4179,7 +4320,36 @@ export class Draw {
     if (this.search.getSearchKeyword()) {
       this.search.render(decoCtx, pageNo)
     }
-    this._decorationDrawnPages.add(pageNo)
+    this._decorationDrawnPages.set(pageNo, this._decorationVersion)
+  }
+
+  /**
+   * 装饰层是否「需要画东西」——选区展开 / 跨行 / 搜索关键字均算 active。
+   * 三者全空时 _drawDecorationOnly 会 clearRect 后立刻 return（B-β.1），跳过
+   * 整轮 _walkDecorationRow 行遍历。
+   */
+  private _isDecorationActive(): boolean {
+    const { startIndex, endIndex, isCrossRowCol } = this.range.getRange()
+    if (startIndex !== endIndex) return true
+    if (isCrossRowCol) return true
+    if (this.search.getSearchKeyword()) return true
+    return false
+  }
+
+  /** [0, pageList.length) 的索引数组——visible filter fallback 时用。 */
+  private _allPageIndices(): number[] {
+    const out: number[] = []
+    for (let i = 0; i < this.pageRowList.length; i++) out.push(i)
+    return out
+  }
+
+  /**
+   * B-γ：装饰层逻辑状态变更钩子——RangeManager.setRange 与 Search.setSearchKeyword
+   * 在状态变化后调用，把 _decorationVersion +1。下次 decoration-only 路径取到
+   * 不匹配的 cachedVersion，正常重绘并记录新版本。
+   */
+  public bumpDecorationVersion() {
+    this._decorationVersion++
   }
 
   /**
@@ -4307,58 +4477,152 @@ export class Draw {
     this.lazyRenderIntersectionObserver?.disconnect()
   }
 
-  /**
-   * 根据上一次渲染的每页 row 数与本次渲染的 dirty 提示，计算需要重绘的 page 集合
-   * （PERF-PLAN §2.4）。返回 null 表示「无法判定，应全量重绘」。
-   *
-   * 触发非全量的条件：
-   *  - 必须有 _prevPageRowCounts（首次渲染或被 invalidatePaintCache() 清空时全量）
-   *  - 必须有 _dirtyRange 提示（无 spliceElementList 等显式信号时全量，保证安全）
-   *
-   * 落在 dirty 集合的 page：
-   *  - 包含 dirty 区间起/止元素的 page（光标插入点所在页）
-   *  - 第一处 row 数与上次不同的 page 及其后所有 page（pagination 漂移）
-   *  - 任何新增的 page
-   */
-  private _computeDirtyPages(): Set<number> | null {
-    if (this._prevPageRowCounts === null) return null
-    if (this._dirtyRange === null) return null
-    const cur = this.pageRowList
-    const curCount = cur.length
-    const prev = this._prevPageRowCounts
-    const dirty = new Set<number>()
-    // 1) row 数差异：从首处差异页起，本帧及之后均视为脏（pagination 下游漂移）
-    let firstShifted = curCount
-    for (let i = 0; i < curCount; i++) {
-      const prevLen = i < prev.length ? prev[i] : -1
-      if (prevLen !== cur[i].length) {
-        firstShifted = i
-        break
+  private _getPageLayoutSignatures(
+    pageRowList: IRow[][] = this.pageRowList
+  ): IPageLayoutSignature[] {
+    return pageRowList.map(rowList => {
+      if (!rowList.length) {
+        return {
+          firstRowStartIndex: -1,
+          lastRowStartIndex: -1,
+          rowCount: 0,
+          rowHeightSum: 0
+        }
       }
-    }
-    for (let i = firstShifted; i < curCount; i++) dirty.add(i)
-    // 2) dirty 元素区间所在页（即便 row 数不变，单页内容仍需重绘）
-    const positionList = this.position.getOriginalMainPositionList()
-    const startPos =
-      positionList[Math.min(this._dirtyRange.start, positionList.length - 1)]
-    if (startPos) dirty.add(startPos.pageNo)
-    const endPos =
-      positionList[Math.min(this._dirtyRange.end, positionList.length - 1)]
-    if (endPos) dirty.add(endPos.pageNo)
-    return dirty
+      let rowHeightSum = 0
+      for (let i = 0; i < rowList.length; i++) {
+        const row = rowList[i]
+        rowHeightSum += row.height + (row.offsetY || 0)
+      }
+      return {
+        firstRowStartIndex: rowList[0].startIndex,
+        lastRowStartIndex: rowList[rowList.length - 1].startIndex,
+        rowCount: rowList.length,
+        rowHeightSum: +rowHeightSum.toFixed(2)
+      }
+    })
   }
 
-  private _lazyRender(dirtyPages: Set<number> | null) {
+  private _findFirstShiftedPage(
+    prev: IPageLayoutSignature[],
+    cur: IPageLayoutSignature[]
+  ): number | null {
+    const sharedCount = Math.min(prev.length, cur.length)
+    for (let i = 0; i < sharedCount; i++) {
+      const a = prev[i]
+      const b = cur[i]
+      if (
+        a.firstRowStartIndex !== b.firstRowStartIndex ||
+        a.lastRowStartIndex !== b.lastRowStartIndex ||
+        a.rowCount !== b.rowCount ||
+        Math.abs(a.rowHeightSum - b.rowHeightSum) > 0.01
+      ) {
+        return i
+      }
+    }
+    if (prev.length !== cur.length) return sharedCount
+    return null
+  }
+
+  private _collectVisibleSyncPages(pageCount: number): Set<number> {
+    const syncPages = new Set<number>()
+    const overscan = Math.max(0, Math.floor(this.options.pagePaintOverscan))
+    for (let i = 0; i < this.visiblePageNoList.length; i++) {
+      const visiblePageNo = this.visiblePageNoList[i]
+      if (visiblePageNo < 0 || visiblePageNo >= pageCount) continue
+      const start = Math.max(0, visiblePageNo - overscan)
+      const end = Math.min(pageCount - 1, visiblePageNo + overscan)
+      for (let pageNo = start; pageNo <= end; pageNo++) {
+        syncPages.add(pageNo)
+      }
+    }
+    return syncPages
+  }
+
+  private _buildPagePaintPlan(): IPagePaintPlan | null {
+    if (!this.getIsPagingMode()) return null
+    if (this.options.pagePaintStrategy === 'full') return null
+    if (this.visiblePageNoList.length === 0) return null
+    if (this._prevPageLayoutSignatures === null) return null
+    const pageCount = this.pageRowList.length
+    const syncPages = this._collectVisibleSyncPages(pageCount)
+    const curSignatures = this._getPageLayoutSignatures()
+    const firstShiftedPage = this._findFirstShiftedPage(
+      this._prevPageLayoutSignatures,
+      curSignatures
+    )
+    const deferredPages = new Set<number>()
+    if (firstShiftedPage !== null) {
+      for (let i = firstShiftedPage; i < pageCount; i++) {
+        deferredPages.add(i)
+      }
+    }
+    if (this._dirtyRange !== null) {
+      const positionList = this.position.getOriginalMainPositionList()
+      const startPos =
+        positionList[Math.min(this._dirtyRange.start, positionList.length - 1)]
+      if (startPos) {
+        syncPages.add(startPos.pageNo)
+        deferredPages.delete(startPos.pageNo)
+      }
+      const endPos =
+        positionList[Math.min(this._dirtyRange.end, positionList.length - 1)]
+      if (endPos) {
+        syncPages.add(endPos.pageNo)
+        deferredPages.delete(endPos.pageNo)
+      }
+    }
+    for (const pageNo of syncPages) {
+      deferredPages.delete(pageNo)
+    }
+    for (let i = 0; i < pageCount; i++) {
+      if (!syncPages.has(i) && !deferredPages.has(i)) {
+        deferredPages.add(i)
+      }
+    }
+    return {
+      firstShiftedPage,
+      syncPages,
+      deferredPages
+    }
+  }
+
+  private _lazyRender(
+    deferredPages: Set<number>,
+    syncPages: Set<number> | null = null
+  ) {
     const positionList = this.position.getOriginalMainPositionList()
     const elementList = this.getOriginalMainElementList()
     this._disconnectLazyRender()
+    if (!deferredPages.size) return
+    // Backward-compatible helper behavior for direct callers in tests and
+    // legacy code: if no explicit sync set is provided, treat the requested
+    // pages plus the current viewport pages as "must paint now", and observe
+    // only the remainder.
+    if (syncPages === null) {
+      const immediatePages = new Set<number>(deferredPages)
+      const pageCount = this.pageRowList.length
+      for (const pageNo of this._collectVisibleSyncPages(pageCount)) {
+        immediatePages.add(pageNo)
+      }
+      for (const pageNo of immediatePages) {
+        if (!this.pageRowList[pageNo]) continue
+        this._drawPage({
+          elementList,
+          positionList,
+          rowList: this.pageRowList[pageNo],
+          pageNo
+        })
+        this._drawnPages.add(pageNo)
+        deferredPages.delete(pageNo)
+      }
+      if (!deferredPages.size) return
+    }
     this.lazyRenderIntersectionObserver = new IntersectionObserver(entries => {
       entries.forEach(entry => {
         if (entry.isIntersecting) {
           const index = Number((<HTMLCanvasElement>entry.target).dataset.index)
-          // 已绘制且未被本帧标脏：跳过（PERF-PLAN §2.4）
-          const isDirty = dirtyPages === null || dirtyPages.has(index)
-          if (!isDirty && this._drawnPages.has(index)) return
+          if (!deferredPages.has(index) || !this.pageRowList[index]) return
           this._drawPage({
             elementList,
             positionList,
@@ -4366,21 +4630,27 @@ export class Draw {
             pageNo: index
           })
           this._drawnPages.add(index)
+          this.lazyRenderIntersectionObserver?.unobserve(entry.target)
         }
       })
     })
-    this.pageList.forEach(el => {
-      this.lazyRenderIntersectionObserver!.observe(el)
+    deferredPages.forEach(index => {
+      const page = this.pageList[index]
+      if (page) {
+        this.lazyRenderIntersectionObserver!.observe(page)
+      }
     })
   }
 
-  private _immediateRender(dirtyPages: Set<number> | null) {
+  private _immediateRender(syncPages: Set<number> | null) {
     const positionList = this.position.getOriginalMainPositionList()
     const elementList = this.getOriginalMainElementList()
-    for (let i = 0; i < this.pageRowList.length; i++) {
-      const isDirty = dirtyPages === null || dirtyPages.has(i)
-      // 干净且已绘制：跳过本页 _drawPage 调用
-      if (!isDirty && this._drawnPages.has(i)) continue
+    const pageIndices =
+      syncPages === null
+        ? this._allPageIndices()
+        : Array.from(syncPages).sort((a, b) => a - b)
+    for (const i of pageIndices) {
+      if (!this.pageRowList[i]) continue
       this._drawPage({
         elementList,
         positionList,
@@ -4557,9 +4827,20 @@ export class Draw {
       this._dirtyRange === null &&
       this.mode !== EditorMode.PRINT
     ) {
+      // B-γ：版本号由 RangeManager.setRange / Search.setSearchKeyword /
+      // Search.searchNavigatePre/Next 在状态变更时 bump——这里不再无条件 ++，
+      // 避免相同 (range, search) 状态的同帧重入也成为 cache miss。
       const positionList = this.position.getOriginalMainPositionList()
       const elementList = this.getOriginalMainElementList()
-      for (let i = 0; i < this.pageRowList.length; i++) {
+      // B-β.2：分页模式下只重绘可见页（mousemove drag 期间通常仅 2-3 页可见，
+      // 而 _drawDecorationOnly 仍按 pageRowList 全量遍历是浪费）。
+      // 连续模式 / 首帧未观察到 visiblePageNoList 时退回全量遍历。
+      const useVisibleFilter =
+        isPagingMode && this.visiblePageNoList.length > 0
+      const pageIndices = useVisibleFilter
+        ? this.visiblePageNoList
+        : this._allPageIndices()
+      for (const i of pageIndices) {
         if (!this.pageRowList[i] || !this.pageList[i]) continue
         this._drawDecorationOnly({
           elementList,
@@ -4880,26 +5161,46 @@ export class Draw {
       for (const idx of Array.from(this._drawnPages)) {
         if (idx >= curPageCount) this._drawnPages.delete(idx)
       }
-      for (const idx of Array.from(this._decorationDrawnPages)) {
+      for (const idx of Array.from(this._decorationDrawnPages.keys())) {
         if (idx >= curPageCount) this._decorationDrawnPages.delete(idx)
       }
     }
-    // 计算 dirty pages（PERF-PLAN §2.4）。无 dirty 提示 / 首次渲染时返回 null
-    // 表示「全部重绘」，行为与原版完全一致。
-    const dirtyPages = isCompute ? this._computeDirtyPages() : null
-    // 全量重绘时清空已绘制集合，让本次渲染无条件重画所有 page
-    if (dirtyPages === null) this._drawnPages.clear()
-    // 绘制元素
-    // 连续页因为有高度的变化会导致canvas渲染空白，需立即渲染，否则会出现闪动
+    const pagePaintPlan =
+      isPagingMode &&
+      isLazy &&
+      !isInit &&
+      !isFirstRender &&
+      !this._skipMainRowCompute
+        ? this._buildPagePaintPlan()
+        : null
+    this._drawnPages.clear()
     trace?.mark('pre-paint')
-    if (isLazy && isPagingMode) {
-      this._lazyRender(dirtyPages)
+    this._disconnectLazyRender()
+    if (trace && pagePaintPlan) {
+      console.log(
+        `[PerfTrace] paintPlan shifted=${
+          pagePaintPlan.firstShiftedPage ?? 'none'
+        } sync=${pagePaintPlan.syncPages.size} deferred=${pagePaintPlan.deferredPages.size}`,
+        {
+          syncPages: Array.from(pagePaintPlan.syncPages).sort((a, b) => a - b),
+          deferredPages: Array.from(pagePaintPlan.deferredPages).sort(
+            (a, b) => a - b
+          )
+        }
+      )
+    }
+    if (pagePaintPlan) {
+      this._immediateRender(pagePaintPlan.syncPages)
+      this._lazyRender(pagePaintPlan.deferredPages, pagePaintPlan.syncPages)
     } else {
-      this._immediateRender(dirtyPages)
+      // 连续页因为有高度的变化会导致 canvas 渲染空白，需立即渲染，否则会出现闪动。
+      // paging 模式在 fallback/full 策略下也同步渲染全部页面，避免可见页等待 observer 回调。
+      this._immediateRender(null)
     }
     trace?.mark('paint')
     // 落盘本次 row 数与清除 dirty 提示，供下次渲染做差分
     this._prevPageRowCounts = this.pageRowList.map(rl => rl.length)
+    this._prevPageLayoutSignatures = this._getPageLayoutSignatures()
     this.clearDirtyRange()
     // 光标重绘
     if (isSetCursor) {

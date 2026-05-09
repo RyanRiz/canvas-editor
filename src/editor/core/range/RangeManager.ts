@@ -447,6 +447,10 @@ export class RangeManager {
         endTrIndex
       )
       this.setDefaultStyle(null)
+      // PERF-PLAN — Strategy B-γ：选区变更使装饰层缓存失效——下次
+      // decoration-only render 才会真正 _walkDecorationRow + 重画，否则直接命中
+      // 同版本缓存。
+      this.draw.bumpDecorationVersion()
     }
     this.range.zone = this.draw.getZone().getZone()
     // 激活控件

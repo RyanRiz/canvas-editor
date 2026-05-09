@@ -2025,8 +2025,17 @@ window.onload = function () {
     const positionList = instance.command.getPositionList()
     const opts = instance.command.getOptions()
     const scale = opts.scale ?? 1
-    const canvases =
-      document.querySelectorAll<HTMLCanvasElement>('.editor canvas')
+    // PERF-PLAN — Strategy B：分层 canvas 后每页有 2 个 <canvas>（base + decoration）。
+    // 直接选择 .editor canvas 会得到 2× 数量、按 pageNo 索引就会拿到错误的 page
+    // ——典型症状是「1 页文档被识别为 2 页」/ 验证面板贴在错误位置。
+    // 优先用 .ce-page-base 选择器（分层模式）；分层关闭时退回 .editor canvas
+    // 兼容旧 DOM。
+    const baseCanvases = document.querySelectorAll<HTMLCanvasElement>(
+      '.editor canvas.ce-page-base'
+    )
+    const canvases = baseCanvases.length
+      ? baseCanvases
+      : document.querySelectorAll<HTMLCanvasElement>('.editor canvas')
     figureValidationListDom.innerHTML = ''
     type PanelEntry = {
       panel: HTMLDivElement
