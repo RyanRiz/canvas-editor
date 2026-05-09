@@ -2548,7 +2548,9 @@ export class Draw {
           rowIndex: 0,
           rowFlex: elementList?.[0]?.rowFlex || elementList?.[1]?.rowFlex,
           pageColumns: currentPageColumns,
-          innerWidth: this.getColumnInnerWidth(currentPageColumns)
+          innerWidth: isFromTable
+            ? innerWidth
+            : this.getColumnInnerWidth(currentPageColumns)
         })
       }
       // 起始位置及页码计算
@@ -2617,7 +2619,9 @@ export class Draw {
               rowFlex:
                 elementList?.[i]?.rowFlex || elementList?.[i + 1]?.rowFlex,
               pageColumns: currentPageColumns,
-              innerWidth: this.getColumnInnerWidth(currentPageColumns)
+              innerWidth: isFromTable
+                ? innerWidth
+                : this.getColumnInnerWidth(currentPageColumns)
             })
             // 新行 checkpoint 落盘：与 rowList 长度保持平行
             if (checkpointSink && iterStartCkpt) {
@@ -2628,7 +2632,9 @@ export class Draw {
             y += rowList[rowList.length - 2].height
           } else {
             curRow.pageColumns = currentPageColumns
-            curRow.innerWidth = this.getColumnInnerWidth(currentPageColumns)
+            curRow.innerWidth = isFromTable
+              ? innerWidth
+              : this.getColumnInnerWidth(currentPageColumns)
           }
         }
       }
@@ -3231,7 +3237,9 @@ export class Draw {
           rowIndex: curRow.rowIndex + 1,
           rowFlex: elementList[i]?.rowFlex || elementList[i + 1]?.rowFlex,
           pageColumns: currentPageColumns,
-          innerWidth: this.getColumnInnerWidth(currentPageColumns),
+          innerWidth: isFromTable
+            ? innerWidth
+            : this.getColumnInnerWidth(currentPageColumns),
           isPageBreak: element.type === ElementType.PAGE_BREAK,
           isColumnBreak: element.type === ElementType.COLUMN_BREAK
         }
