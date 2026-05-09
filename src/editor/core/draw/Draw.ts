@@ -1271,7 +1271,7 @@ export class Draw {
           ownerIdx < this.elementList.length &&
           this.elementList[ownerIdx].type === ElementType.TABLE
         ) {
-          this.markDirty(ownerIdx, ownerIdx + 1)
+          this.markDirty(ownerIdx, ownerIdx)
         }
         // PERF-PLAN §1.2 follow-up：捕获 td 定位信息以支持表格编辑的 delta
         // 历史。若 tr/td 索引可用，后续 mutation event 会携带 tdPath，
