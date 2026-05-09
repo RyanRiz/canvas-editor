@@ -82,6 +82,10 @@ export class WorkerOffscreenRenderBackend implements IRenderBackend {
   }
 
   public paintPage(payload: IDrawPagePayload) {
+    if (!this.draw.getOptions().pageLayered.enable) {
+      this.fallback.paintPage(payload)
+      return
+    }
     // Keep selection/search/table-range on the DOM decoration layer so those
     // latency-sensitive overlays do not wait on worker round-trips.
     this.fallback.paintDecoration(payload)

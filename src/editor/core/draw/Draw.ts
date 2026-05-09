@@ -1008,16 +1008,29 @@ export class Draw {
       baseCtx.drawImage(baseBitmap, 0, 0, w, h)
     }
     baseBitmap.close()
-    if (!decorationBitmap) return
-    const decorationCtx = this.decorationCtxList[pageNo]
-    const decorationCanvas = this.decorationCanvasList[pageNo]
-    if (decorationCtx && decorationCanvas) {
-      const w = this.getWidth()
-      const h = this.getHeight()
-      decorationCtx.clearRect(0, 0, w, h)
-      decorationCtx.drawImage(decorationBitmap, 0, 0, w, h)
+    if (decorationBitmap) {
+      const decorationCtx = this.decorationCtxList[pageNo]
+      const decorationCanvas = this.decorationCanvasList[pageNo]
+      if (decorationCtx && decorationCanvas) {
+        const w = this.getWidth()
+        const h = this.getHeight()
+        decorationCtx.clearRect(0, 0, w, h)
+        decorationCtx.drawImage(decorationBitmap, 0, 0, w, h)
+      }
+      decorationBitmap.close()
     }
-    decorationBitmap.close()
+    this._refreshWorkerPageDecoration(pageNo)
+  }
+
+  private _refreshWorkerPageDecoration(pageNo: number) {
+    const rowList = this.pageRowList[pageNo]
+    if (!rowList?.length) return
+    this._drawDecorationOnly({
+      elementList: this.getOriginalMainElementList(),
+      positionList: this.position.getOriginalMainPositionList(),
+      rowList,
+      pageNo
+    })
   }
 
   public presentWorkerDecorationBitmap(
