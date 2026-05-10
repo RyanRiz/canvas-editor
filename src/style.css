@@ -829,15 +829,14 @@ ul {
   box-shadow: rgb(158 161 165 / 40%) 0px 2px 12px 0px;
 }
 
-.comment {
-  width: 250px;
-  max-height: 650px;
+.comment-list {
   position: fixed;
-  transform: translateX(420px);
-  top: 200px;
+  top: 0;
   left: 50%;
-  overflow-y: auto;
-  transition: top 0.1s ease-out;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 8;
 }
 
 .figure-validation-list {
@@ -983,15 +982,19 @@ ul {
 }
 
 .comment-item {
+  width: 250px;
   background: #ffffff;
   border: 1px solid #e2e6ed;
-  position: relative;
+  position: fixed;
+  transform: translateX(420px);
+  left: 50%;
   border-radius: 8px;
   padding: 15px;
   font-size: 14px;
-  margin-bottom: 20px;
   cursor: pointer;
-  transition: all .5s;
+  pointer-events: auto;
+  box-sizing: border-box;
+  transition: top 0.1s ease-out, border-color .5s, box-shadow .5s;
 }
 
 .comment-item:hover {
