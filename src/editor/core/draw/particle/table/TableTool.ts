@@ -480,6 +480,13 @@ export class TableTool {
       'mouseup',
       () => {
         let isChangeSize = false
+        // 捕获旧状态供 delta 逆操作
+        const trList = element.trList
+        const colgroup = element.colgroup
+        const oldTrHeights = trList?.map(tr => ({ height: tr.height, minHeight: tr.minHeight }))
+        const oldColWidths = colgroup?.map(c => c.width)
+        const oldTableWidth = element.width
+        const oldTranslateX = element.translateX
         // 改变尺寸
         if (order === TableOrder.ROW) {
           const trList = element.trList!
@@ -559,8 +566,35 @@ export class TableTool {
           }
         }
         if (isChangeSize) {
+          // 推入轻量 delta 历史：仅捕获修改前的尺寸快照，避免全量 snapshot
+          // (O(28k) clone)。逆操作按快照恢复 tr/colgroup/width/translateX。
+          const targetEl = element
+          this.draw.getHistoryManager().executeDelta({
+            applyForward: () => {},
+            applyBackward: () => {
+              const trl = targetEl.trList
+              const colg = targetEl.colgroup
+              if (oldTrHeights && trl) {
+                for (let t = 0; t < Math.min(oldTrHeights.length, trl.length); t++) {
+                  trl[t].height = oldTrHeights[t].height
+                  trl[t].minHeight = oldTrHeights[t].minHeight
+                }
+              }
+              if (oldColWidths && colg) {
+                for (let c = 0; c < Math.min(oldColWidths.length, colg.length); c++) {
+                  colg[c].width = oldColWidths[c]
+                }
+              }
+              if (oldTableWidth !== undefined) targetEl.width = oldTableWidth
+              targetEl.translateX = oldTranslateX
+              this.draw.markTableElementDirty(targetEl)
+              this.draw.cancelScheduledRender()
+              this.draw.render({ isSetCursor: true, isSubmitHistory: false })
+            }
+          })
           this.draw.markTableElementDirty(element)
-          this.draw.render({ isSetCursor: false })
+          this.draw.cancelScheduledRender()
+          this.draw.render({ isSetCursor: true, isSubmitHistory: false })
         }
         // 还原副作用
         anchorLine.remove()

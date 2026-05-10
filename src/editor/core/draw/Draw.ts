@@ -5541,9 +5541,27 @@ export class Draw {
               }
             }
             // baseRowIdx 是「第一个被复用的旧行」在 NEW rowList 中的全局 index。
-            convergedReuseInfo = {
-              fromNewRowGlobalIndex: baseRowIdx,
-              deltaElems
+            // PERF-PLAN §2.9：若 dirty 区域内任一行高度变更，convergedReuse
+            // 不能回收旧位置对象——旧 Y 坐标已失效。此时不传 convergedReuseInfo，
+            // computePositionListIncremental 会为重排区域后的复用行逐一重新计算坐标。
+            let anyHeightChanged = false
+            const oldCutStart = target.oldRowsAfterCut
+            const newCutStart = this.rowList.slice(
+              resumeFrom.prefixRowList.length,
+              baseRowIdx
+            )
+            const cmpCount = Math.min(oldCutStart.length, newCutStart.length)
+            for (let cmp = 0; cmp < cmpCount; cmp++) {
+              if (oldCutStart[cmp].height !== newCutStart[cmp].height) {
+                anyHeightChanged = true
+                break
+              }
+            }
+            if (!anyHeightChanged) {
+              convergedReuseInfo = {
+                fromNewRowGlobalIndex: baseRowIdx,
+                deltaElems
+              }
             }
           }
         }

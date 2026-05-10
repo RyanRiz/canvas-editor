@@ -177,12 +177,12 @@ export class BaseBlock {
           applyForward: () => {
             el.width = newWidth
             el.height = newHeight
-            this.draw.render({ curIndex: curIdx, isSubmitHistory: false })
+            this.draw.render({ curIndex: curIdx, isSetCursor: true, isSubmitHistory: false })
           },
           applyBackward: () => {
             el.width = oldWidth
             el.height = oldHeight
-            this.draw.render({ curIndex: curIdx, isSubmitHistory: false })
+            this.draw.render({ curIndex: curIdx, isSetCursor: true, isSubmitHistory: false })
           }
         })
         this.draw.render({ curIndex: curIdx, isSubmitHistory: false })
