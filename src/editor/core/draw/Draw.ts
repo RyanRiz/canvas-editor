@@ -176,6 +176,11 @@ interface IPagePaintPlan {
   deferredPages: Set<number>
 }
 
+interface IDirtyPageSpan {
+  startPage: number
+  endPage: number
+}
+
 export class Draw {
   private container: HTMLDivElement
   private pageContainer: HTMLDivElement
@@ -4974,7 +4979,28 @@ export class Draw {
     return syncPages
   }
 
-  private _buildPagePaintPlan(): IPagePaintPlan | null {
+  private _getDirtyPageSpanFromPositionList(
+    positionList: IElementPosition[]
+  ): IDirtyPageSpan | null {
+    if (this._dirtyRange === null || !positionList.length) return null
+    const startPos =
+      positionList[Math.min(this._dirtyRange.start, positionList.length - 1)]
+    const endPos =
+      positionList[Math.min(this._dirtyRange.end, positionList.length - 1)]
+    const startPage = startPos?.pageNo
+    const endPage = endPos?.pageNo
+    if (startPage === undefined && endPage === undefined) return null
+    const lo = Math.min(startPage ?? endPage!, endPage ?? startPage!)
+    const hi = Math.max(startPage ?? endPage!, endPage ?? startPage!)
+    return {
+      startPage: lo,
+      endPage: hi
+    }
+  }
+
+  private _buildPagePaintPlan(
+    preLayoutDirtyPageSpan: IDirtyPageSpan | null = null
+  ): IPagePaintPlan | null {
     if (!this.getIsPagingMode()) return null
     if (this.options.pagePaintStrategy === 'full') return null
     if (this.visiblePageNoList.length === 0) return null
@@ -5007,6 +5033,17 @@ export class Draw {
         deferredPages.delete(endPos.pageNo)
       }
     }
+    if (preLayoutDirtyPageSpan) {
+      for (
+        let pageNo = preLayoutDirtyPageSpan.startPage;
+        pageNo <= preLayoutDirtyPageSpan.endPage;
+        pageNo++
+      ) {
+        if (pageNo < 0 || pageNo >= pageCount) continue
+        syncPages.add(pageNo)
+        deferredPages.delete(pageNo)
+      }
+    }
     for (const pageNo of syncPages) {
       deferredPages.delete(pageNo)
     }
@@ -5034,7 +5071,8 @@ export class Draw {
 
   private _collectPagesNeedingPaint(
     paintPlan: IPagePaintPlan,
-    curIndex: number | undefined
+    curIndex: number | undefined,
+    preLayoutDirtyPageSpan: IDirtyPageSpan | null = null
   ): Set<number> {
     const out = new Set<number>()
     const pageCount = this.pageRowList.length
@@ -5054,6 +5092,15 @@ export class Draw {
         out.add(startPage)
       } else if (endPage !== null) {
         out.add(endPage)
+      }
+    }
+    if (preLayoutDirtyPageSpan) {
+      for (
+        let i = preLayoutDirtyPageSpan.startPage;
+        i <= preLayoutDirtyPageSpan.endPage;
+        i++
+      ) {
+        if (i >= 0 && i < pageCount) out.add(i)
       }
     }
     if (curIndex !== undefined) {
@@ -5295,6 +5342,9 @@ export class Draw {
     const isPagingMode = this.getIsPagingMode()
     // 缓存当前页数信息
     const oldPageSize = this.pageRowList.length
+    const preLayoutDirtyPageSpan = this._getDirtyPageSpanFromPositionList(
+      this.position.getOriginalMainPositionList()
+    )
 
     // PERF-PLAN — Strategy B：装饰层独立重绘快路径。
     // 调用方显式标注 isDecorationOnly 时——典型来自 selection drag (mousemove) /
@@ -5693,7 +5743,7 @@ export class Draw {
       !isInit &&
       !isFirstRender &&
       !this._skipMainRowCompute
-        ? this._buildPagePaintPlan()
+        ? this._buildPagePaintPlan(preLayoutDirtyPageSpan)
         : null
     this._paintPlanFirstShiftedPage = pagePaintPlan?.firstShiftedPage ?? null
     this._drawnPages.clear()
@@ -5707,7 +5757,11 @@ export class Draw {
     let effectiveSyncPages = pagePaintPlan?.syncPages ?? null
     let effectiveDeferredPages = pagePaintPlan?.deferredPages ?? null
     if (pagePaintPlan && isPaintFilterEligible) {
-      const needed = this._collectPagesNeedingPaint(pagePaintPlan, curIndex)
+      const needed = this._collectPagesNeedingPaint(
+        pagePaintPlan,
+        curIndex,
+        preLayoutDirtyPageSpan
+      )
       const filteredSync = new Set<number>()
       for (const pageNo of pagePaintPlan.syncPages) {
         if (needed.has(pageNo)) filteredSync.add(pageNo)
