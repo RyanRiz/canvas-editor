@@ -45,6 +45,13 @@ export class ListParticle {
     }
     // 设置值
     const listId = getUUID()
+    // 捕获旧值供 delta 历史逆操作
+    const oldValues = changeElementList.map(el => ({
+      el,
+      listId: el.listId,
+      listType: el.listType,
+      listStyle: el.listStyle
+    }))
     changeElementList.forEach(el => {
       el.listId = listId
       el.listType = listType
@@ -53,7 +60,28 @@ export class ListParticle {
     // 光标定位
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
-    this.draw.render({ curIndex, isSetCursor })
+    // 推入轻量 delta 历史
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldValues) {
+          item.el.listId = listId
+          item.el.listType = listType
+          item.el.listStyle = listStyle
+        }
+        this.draw.render({ curIndex, isSetCursor })
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          item.el.listId = item.listId
+          item.el.listType = item.listType
+          item.el.listStyle = item.listStyle
+        }
+        this.draw.render({ curIndex, isSetCursor })
+      }
+    })
+    this.draw.markDirty(startIndex, endIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
 
   public unsetList() {
@@ -66,26 +94,36 @@ export class ListParticle {
       .getRangeParagraphElementList()
       ?.filter(el => el.listId)
     if (!changeElementList || !changeElementList.length) return
-    // 如果列表最后字符不是换行符则需插入换行符
+    // 如果需要补换行符，走一次性手动 delta（同时捕获元素插入与属性删除）
     const elementList = this.draw.getElementList()
     const endElement = elementList[endIndex]
+    let needZeroInsert = false
+    let zeroInsertIndex = -1
     if (endElement.listId) {
       let start = endIndex + 1
       while (start < elementList.length) {
         const element = elementList[start]
         if (element.value === ZERO && !element.listWrap) break
         if (element.listId !== endElement.listId) {
-          this.draw.spliceElementList(elementList, start, 0, [
-            {
-              value: ZERO
-            }
-          ])
+          needZeroInsert = true
+          zeroInsertIndex = start
           break
         }
         start++
       }
     }
-    // 取消设置
+    // 捕获变更前的所有状态
+    const oldValues = changeElementList.map(el => ({
+      el,
+      listId: el.listId,
+      listType: el.listType,
+      listStyle: el.listStyle,
+      listWrap: el.listWrap
+    }))
+    // 应用变更
+    if (needZeroInsert) {
+      elementList.splice(zeroInsertIndex, 0, { value: ZERO })
+    }
     changeElementList.forEach(el => {
       delete el.listId
       delete el.listType
@@ -95,7 +133,35 @@ export class ListParticle {
     // 光标定位
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
-    this.draw.render({ curIndex, isSetCursor })
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        if (needZeroInsert) {
+          elementList.splice(zeroInsertIndex, 0, { value: ZERO })
+        }
+        for (const item of oldValues) {
+          delete item.el.listId
+          delete item.el.listType
+          delete item.el.listStyle
+          delete item.el.listWrap
+        }
+        this.draw.render({ curIndex, isSetCursor })
+      },
+      applyBackward: () => {
+        if (needZeroInsert) {
+          elementList.splice(zeroInsertIndex, 1)
+        }
+        for (const item of oldValues) {
+          item.el.listId = item.listId
+          item.el.listType = item.listType
+          item.el.listStyle = item.listStyle
+          if (item.listWrap !== undefined) item.el.listWrap = item.listWrap
+        }
+        this.draw.render({ curIndex, isSetCursor })
+      }
+    })
+    this.draw.markDirty(startIndex, endIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
 
   public computeListStyle(

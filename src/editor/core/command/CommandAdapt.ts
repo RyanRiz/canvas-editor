@@ -978,6 +978,7 @@ export class CommandAdapt {
     // 光标定位
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.markDirty(startIndex, endIndex)
     this.draw.render({ curIndex, isSetCursor })
   }
 
@@ -994,13 +995,35 @@ export class CommandAdapt {
     if (!~startIndex && !~endIndex) return
     const rowElementList = this.range.getRangeRowElementList()
     if (!rowElementList) return
+    // 捕获旧值供 delta 历史逆操作
+    const oldValues = rowElementList.map(el => ({
+      el,
+      rowFlex: el.rowFlex
+    }))
+    const newValue = payload
+    // 应用新值
     rowElementList.forEach(element => {
       element.rowFlex = payload
     })
     // 光标定位
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
-    this.draw.render({ curIndex, isSetCursor })
+    // 推入轻量 delta 历史（仅记录属性变更，无需 28k 元素 snapshot）
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldValues) {
+          item.el.rowFlex = newValue
+        }
+        this.draw.recomputeRowProperties(curIndex)
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          item.el.rowFlex = item.rowFlex
+        }
+        this.draw.recomputeRowProperties(curIndex)
+      }
+    })
+    this.draw.recomputeRowProperties(curIndex)
   }
 
   public rowMargin(payload: number) {
@@ -1010,13 +1033,34 @@ export class CommandAdapt {
     if (!~startIndex && !~endIndex) return
     const rowElementList = this.range.getRangeRowElementList()
     if (!rowElementList) return
+    // 捕获旧值供 delta 历史逆操作
+    const oldValues = rowElementList.map(el => ({
+      el,
+      rowMargin: el.rowMargin
+    }))
+    const newValue = payload
+    // 应用新值
     rowElementList.forEach(element => {
       element.rowMargin = payload
     })
     // 光标定位
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
-    this.draw.render({ curIndex, isSetCursor })
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldValues) {
+          item.el.rowMargin = newValue
+        }
+        this.draw.recomputeRowProperties(curIndex)
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          item.el.rowMargin = item.rowMargin
+        }
+        this.draw.recomputeRowProperties(curIndex)
+      }
+    })
+    this.draw.recomputeRowProperties(curIndex)
   }
 
   public insertTable(row: number, col: number) {

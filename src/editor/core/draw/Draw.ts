@@ -2132,11 +2132,37 @@ export class Draw {
     checkpoint: ILayoutCheckpoint
     convergenceTarget: IConvergenceTarget
   } | null {
-    if (!this._dirtyRange) return null
-    if (!this._mainRowCheckpoints.length) return null
-    if (this.rowList.length <= 1) return null
-    if (this._mainRowCheckpoints.length !== this.rowList.length) return null
-    if (!this._isLayoutSigCompatible(extra)) return null
+    if (!this._dirtyRange) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: no _dirtyRange'
+      )
+      return null
+    }
+    if (!this._mainRowCheckpoints.length) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: _mainRowCheckpoints empty'
+      )
+      return null
+    }
+    if (this.rowList.length <= 1) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: rowList too short (<=1)'
+      )
+      return null
+    }
+    if (this._mainRowCheckpoints.length !== this.rowList.length) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: checkpoint/row length mismatch',
+        { checkpoints: this._mainRowCheckpoints.length, rows: this.rowList.length }
+      )
+      return null
+    }
+    if (!this._isLayoutSigCompatible(extra)) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: layout sig incompatible'
+      )
+      return null
+    }
     const dirtyStart = this._dirtyRange.start
     // 二分查找第一个 startIndex > dirtyStart 的行，O(log R) 替代 O(R)。
     // rowList 的 startIndex 单调非递减——同一 startIndex 出现多次时取最后一个，
@@ -2153,10 +2179,22 @@ export class Draw {
     }
     // lo 现在指向第一个 startIndex > dirtyStart 的行；前一行包含 dirtyStart。
     const dirtyRowIndex = lo - 1
-    if (dirtyRowIndex <= 0) return null
+    if (dirtyRowIndex <= 0) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: dirtyRowIndex <= 0 (dirty starts in first row)',
+        { dirtyStart, dirtyRowIndex, firstRowStartIndex: this.rowList[0]?.startIndex }
+      )
+      return null
+    }
     const prefixRowList = this.rowList.slice(0, dirtyRowIndex)
     const checkpoint = this._mainRowCheckpoints[dirtyRowIndex]
-    if (!checkpoint) return null
+    if (!checkpoint) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: no checkpoint at dirtyRowIndex',
+        { dirtyRowIndex, checkpointsLen: this._mainRowCheckpoints.length }
+      )
+      return null
+    }
     // dirty 行的第一个元素索引：从该行开始重排
     const startElementIndex = this.rowList[dirtyRowIndex].startIndex
     // 收敛目标：从 dirty 行起的旧行序列 + 对应 checkpoint。computeRowList 跑到
@@ -2481,6 +2519,107 @@ export class Draw {
     const lineHeight = el.rowMargin ?? defaultRowMargin
     const extraLineHeight = Math.max(0, lineHeight - 1) * fontSize
     return (extraLineHeight / 2) * scale
+  }
+
+  /**
+   * PERF-PLAN §2.7：rowFlex / rowMargin 等纯行级属性变更的快速重算。
+   *
+   * 这些操作仅更改元素上的 rowFlex / rowMargin 属性——元素列表结构、字体、
+   * 换行边界均未变。跳过完整 computeRowList（1683 ms），直接基于当前
+   * rowList 还原自然宽度（_naturalWidth）后重新应用对齐与行距逻辑。
+   *
+   * 最后更新 pageRowList、positionList 并触发 paint 周期。
+   */
+  public recomputeRowProperties(curIndex: number | undefined) {
+    const innerWidth = this.getInnerWidth()
+    for (let r = 0; r < this.rowList.length; r++) {
+      const row = this.rowList[r]
+      const rowInnerWidth = row.innerWidth || innerWidth
+      // 1. 还原自然宽度（擦除上次 alignment 引入的拉伸量）
+      for (let e = 0; e < row.elementList.length; e++) {
+        const el = row.elementList[e]
+        const nw = (el as unknown as { _naturalWidth?: number })._naturalWidth
+        if (nw !== undefined) {
+          el.metrics.width = nw
+        }
+      }
+      // 2. 重算行高（rowMargin 可能已变更）
+      let maxRowHeight = 0
+      let totalWidth = 0
+      const firstEl = row.elementList[0]
+      const lastEl = row.elementList[row.elementList.length - 1]
+      for (let e = 0; e < row.elementList.length; e++) {
+        const el = row.elementList[e]
+        const m = el.metrics
+        totalWidth += m.width
+        const elRowMargin = this.getElementRowMargin(el)
+        // 与 computeRowList 一致：行高 = 各元素高度的最大值
+        const elHeight =
+          elRowMargin + m.boundingBoxAscent + m.boundingBoxDescent + elRowMargin
+        if (elHeight > maxRowHeight) {
+          maxRowHeight = elHeight
+          // 行 ascent 取最高元素的 ascent（含 rowMargin，与 computeRowList 一致）
+          row.ascent = m.boundingBoxAscent + elRowMargin
+        }
+      }
+      row.height = maxRowHeight
+      // 3. 重算行宽（重走 justify / alignment 逻辑）
+      const preEl = lastEl || firstEl
+      if (
+        !row.isSurround &&
+        (preEl?.rowFlex === RowFlex.JUSTIFY ||
+          (preEl?.rowFlex === RowFlex.ALIGNMENT && row.isWidthNotEnough))
+      ) {
+        // 忽略换行符及尾部元素间隔设置
+        const rl = row.elementList[0]?.value === ZERO
+          ? row.elementList.slice(1)
+          : row.elementList
+        const whitespaceIndexes: number[] = []
+        for (let e = 0; e < rl.length - 1; e++) {
+          const v = rl[e].value
+          if (v === ' ' || v === '\u00a0') {
+            whitespaceIndexes.push(e)
+          }
+        }
+        let hasLatin = false
+        for (let e = 0; e < rl.length; e++) {
+          const v = rl[e].value
+          if (v && this.LETTER_REG.test(v)) {
+            hasLatin = true
+            break
+          }
+        }
+        const availableWidth = rowInnerWidth
+        if (whitespaceIndexes.length > 0) {
+          const gap = (availableWidth - totalWidth) / whitespaceIndexes.length
+          for (let g = 0; g < whitespaceIndexes.length; g++) {
+            rl[whitespaceIndexes[g]].metrics.width += gap
+          }
+          totalWidth = availableWidth
+        } else if (!hasLatin && rl.length > 1) {
+          const gap = (availableWidth - totalWidth) / (rl.length - 1)
+          for (let e = 0; e < rl.length - 1; e++) {
+            rl[e].metrics.width += gap
+          }
+          totalWidth = availableWidth
+        }
+      }
+      row.width = totalWidth
+      // 更新 row.rowFlex（computePageRowPosition 用此判断左/居中/右对齐）
+      // 遵循 computeRowList 的赋值逻辑：取行首元素（或第二个）的 rowFlex
+      const rowFlexEl = row.elementList[0]
+      row.rowFlex =
+        rowFlexEl?.rowFlex ?? row.elementList[1]?.rowFlex ?? rowFlexEl?.rowFlex
+    }
+    // 重算页列表和位置
+    this.pageRowList = this._computePageList()
+    this.position.computePositionList()
+    this.area.compute()
+    // 清空挂起的 rAF 渲染队列——否则 render() 的 OR 合并会将
+    // isSubmitHistory: false 覆盖为 true，触发全额 snapshot 克隆。
+    this.cancelScheduledRender()
+    // 触发热刷新（跳过 layout，仅 paint + cursor，历史由调用方负责）
+    this.render({ curIndex, isCompute: false, isSetCursor: true, isSubmitHistory: false })
   }
 
   public computeRowList(payload: IComputeRowListPayload) {
@@ -3111,6 +3250,10 @@ export class Draw {
         if (element.letterSpacing) {
           metrics.width += element.letterSpacing * scale
         }
+        // PERF-PLAN §2.7：存储自然宽度（alignment 前）。rowFlex / rowMargin
+        // 快速路径需要还原到未拉伸宽度后重新对齐，避免在 34 页文档上每
+        // 次属性变更触发 ~1700ms 的 full computeRowList。
+        ;(element as unknown as { _naturalWidth?: number })._naturalWidth = metrics.width
         // 使用基于字体的基准度量以确保一致的行高，避免字符特定度量导致的布局跳动
         const basisMetrics = this.textParticle.measureBasisWord(
           ctx,
@@ -4960,6 +5103,19 @@ export class Draw {
     caf(this._pendingRenderFrameId as number)
     this._pendingRenderFrameId = null
     this._flushScheduledRender()
+  }
+
+  /** 取消挂起的 rAF 渲染但不执行——用于需要以特定选项同步 render 时。 */
+  public cancelScheduledRender() {
+    if (this._pendingRenderFrameId !== null) {
+      const caf =
+        typeof cancelAnimationFrame === 'function'
+          ? cancelAnimationFrame
+          : clearTimeout
+      caf(this._pendingRenderFrameId as number)
+      this._pendingRenderFrameId = null
+      this._pendingRenderPayload = null
+    }
   }
 
   private _flushScheduledRender() {
