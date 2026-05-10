@@ -1,5 +1,6 @@
 import { ImageDisplay } from '../../../dataset/enum/Common'
 import { ControlComponent } from '../../../dataset/enum/Control'
+import { EditorMode } from '../../../dataset/enum/Editor'
 import { ElementType } from '../../../dataset/enum/Element'
 import { CanvasEvent } from '../CanvasEvent'
 
@@ -43,15 +44,34 @@ export function mousemove(evt: MouseEvent, host: CanvasEvent) {
     host.isAllowDrop = true
     return
   }
-  if (!host.isAllowSelection || !host.mouseDownStartPosition) return
   const target = evt.target as HTMLDivElement
   const pageIndex = target.dataset.index
   // 设置pageNo
   if (pageIndex) {
     draw.setPageNo(Number(pageIndex))
   }
-  // 结束位置
   const position = draw.getPosition()
+  if (!host.isAllowSelection || !host.mouseDownStartPosition) {
+    const tableTool = draw.getTableTool()
+    if (draw.isReadonly() || draw.getMode() === EditorMode.FORM) {
+      tableTool.dispose()
+      return
+    }
+    const positionResult = position.getPositionByXY({
+      x: evt.offsetX,
+      y: evt.offsetY
+    })
+    if (positionResult.isTable && ~positionResult.index) {
+      tableTool.render({
+        positionContext: positionResult,
+        pageNo: pageIndex ? Number(pageIndex) : undefined
+      })
+    } else {
+      tableTool.dispose()
+    }
+    return
+  }
+  // 结束位置
   const positionResult = position.getPositionByXY({
     x: evt.offsetX,
     y: evt.offsetY
@@ -123,12 +143,10 @@ export function mousemove(evt: MouseEvent, host: CanvasEvent) {
     }
     rangeManager.setRange(start, end)
   }
-  const useDecorationOnly = !startIsTable && !isTable
   // 绘制
   draw.render({
     isSubmitHistory: false,
     isSetCursor: false,
-    isCompute: false,
-    isDecorationOnly: useDecorationOnly
+    isCompute: false
   })
 }

@@ -10,5 +10,6 @@ export function mouseleave(evt: MouseEvent, host: CanvasEvent) {
   if (evt.x >= x && evt.x <= x + width && evt.y >= y && evt.y <= y + height) {
     return
   }
+  draw.getTableTool().dispose()
   host.setIsAllowSelection(false)
 }
