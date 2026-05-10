@@ -4516,7 +4516,8 @@ export class Draw {
       this._dirtyRange !== null &&
       !this._isDecorationActive() &&
       this.getIsPagingMode() &&
-      this._paintPlanFirstShiftedPage === null &&
+      (this._paintPlanFirstShiftedPage === null ||
+        pageNo < this._paintPlanFirstShiftedPage) &&
       !this._pageHasFloatImageOnPage(pageNo)
     const partialInfo = canPartialPaint
       ? this._getDirtyClipInfoForPage(rowList, positionList)
@@ -5552,6 +5553,13 @@ export class Draw {
           fromNewRowGlobalIndex: number
           deltaElems: number
         } | null = null
+        // Fallback for partial pagination instability: positions from the first
+        // fully-stable page boundary are always safe to reuse even when dirty-zone
+        // row heights changed or some earlier pages gained/lost rows.
+        let stablePageConvergedReuse: {
+          fromNewRowGlobalIndex: number
+          deltaElems: number
+        } | null = null
         if (resumeFrom && resumeFrom.convergenceTarget.matched !== null) {
           const target = resumeFrom.convergenceTarget
           const matchedIdx = target.matched!.atOldIdx
@@ -5613,6 +5621,34 @@ export class Draw {
                 deltaElems
               }
             }
+            // Stable-page fallback: even when some pages gained/lost rows (line
+            // wraps, etc.), find the first page P where all pages P..end have
+            // identical row counts to the previous frame. P's first row has
+            // Y = page startY (margin), so it's a safe position-reuse boundary
+            // regardless of what changed above it.
+            if (
+              this._prevPageRowCounts !== null &&
+              this._prevPageRowCounts.length === this.pageRowList.length
+            ) {
+              const prevCounts = this._prevPageRowCounts
+              let fp = this.pageRowList.length
+              for (let p = this.pageRowList.length - 1; p >= 0; p--) {
+                if (prevCounts[p] !== this.pageRowList[p].length) break
+                fp = p
+              }
+              // fp=0 means all pages stable — paginationStable handles that.
+              // fp>0 means pages 0..fp-1 changed; pages fp..end are stable.
+              if (fp > 0 && fp < this.pageRowList.length) {
+                let sri = 0
+                for (let p = 0; p < fp; p++) sri += this.pageRowList[p].length
+                if (sri >= baseRowIdx) {
+                  stablePageConvergedReuse = {
+                    fromNewRowGlobalIndex: sri,
+                    deltaElems
+                  }
+                }
+              }
+            }
           }
         }
         // 验证桩（PERF-PLAN §2.2 「validation harness」）：若启用，则同时跑一遍
@@ -5657,7 +5693,7 @@ export class Draw {
             )
           const convergedReuse = paginationStable
             ? convergedReuseInfo
-            : undefined
+            : (stablePageConvergedReuse ?? undefined)
           if (lastPrefixMutated) {
             this.position.computePositionListIncremental({
               fromRowGlobalIndex: resumeFrom.prefixRowList.length - 1,
