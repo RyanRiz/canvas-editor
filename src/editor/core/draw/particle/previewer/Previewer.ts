@@ -190,11 +190,30 @@ export class Previewer {
       () => {
         // 改变尺寸
         if (this.curElement && !this.previewerDrawOption.dragDisable) {
-          this.curElement.width = this.width
-          this.curElement.height = this.height
+          const oldWidth = this.curElement.width
+          const oldHeight = this.curElement.height
+          const newWidth = this.width
+          const newHeight = this.height
+          this.curElement.width = newWidth
+          this.curElement.height = newHeight
+          const el = this.curElement
+          const curIdx = this.curPosition?.index
+          this.draw.getHistoryManager().executeDelta({
+            applyForward: () => {
+              el.width = newWidth
+              el.height = newHeight
+              this.draw.render({ isSetCursor: true, curIndex: curIdx, isSubmitHistory: false })
+            },
+            applyBackward: () => {
+              el.width = oldWidth
+              el.height = oldHeight
+              this.draw.render({ isSetCursor: true, curIndex: curIdx, isSubmitHistory: false })
+            }
+          })
           this.draw.render({
             isSetCursor: true,
-            curIndex: this.curPosition?.index
+            curIndex: curIdx,
+            isSubmitHistory: false
           })
         }
         // 还原副作用

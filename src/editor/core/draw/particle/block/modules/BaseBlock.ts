@@ -157,8 +157,12 @@ export class BaseBlock {
     document.addEventListener(
       'mouseup',
       () => {
-        this.element.width = Math.min(this.width, this.draw.getInnerWidth())
-        this.element.height = this.height
+        const oldWidth = this.element.width
+        const oldHeight = this.element.height
+        const newWidth = Math.min(this.width, this.draw.getInnerWidth())
+        const newHeight = this.height
+        this.element.width = newWidth
+        this.element.height = newHeight
         this.isAllowResize = false
         this.resizerSelection.style.display = 'none'
         this.resizerMask.style.display = 'none'
@@ -167,7 +171,21 @@ export class BaseBlock {
         canvas.style.cursor = 'text'
         // 更新文档
         const elIdx = this.draw.getOriginalMainElementList().indexOf(this.element)
-        this.draw.render({ curIndex: elIdx !== -1 ? elIdx : undefined })
+        const curIdx = elIdx !== -1 ? elIdx : undefined
+        const el = this.element
+        this.draw.getHistoryManager().executeDelta({
+          applyForward: () => {
+            el.width = newWidth
+            el.height = newHeight
+            this.draw.render({ curIndex: curIdx, isSubmitHistory: false })
+          },
+          applyBackward: () => {
+            el.width = oldWidth
+            el.height = oldHeight
+            this.draw.render({ curIndex: curIdx, isSubmitHistory: false })
+          }
+        })
+        this.draw.render({ curIndex: curIdx, isSubmitHistory: false })
       },
       {
         once: true
