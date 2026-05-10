@@ -587,11 +587,23 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (selection?.length) {
-      const noBoldIndex = selection.findIndex(s => !s.bold)
-      selection.forEach(el => {
-        el.bold = !!~noBoldIndex
+      const { startIndex, endIndex } = this.range.getRange()
+      const newValue = !selection.every(s => s.bold)
+      const oldValues = selection.map(el => ({ el, bold: el.bold }))
+      selection.forEach(el => { el.bold = newValue })
+      this.draw.getHistoryManager().executeDelta({
+        applyForward: () => {
+          for (const item of oldValues) item.el.bold = newValue
+          this.draw.render({ isSetCursor: false })
+        },
+        applyBackward: () => {
+          for (const item of oldValues) item.el.bold = item.bold
+          this.draw.render({ isSetCursor: false })
+        }
       })
-      this.draw.render({ isSetCursor: false })
+      this.draw.markDirty(startIndex, endIndex)
+      this.draw.cancelScheduledRender()
+      this.draw.render({ isSetCursor: false, isSubmitHistory: false })
     } else {
       let isSubmitHistory = true
       const { endIndex } = this.range.getRange()
@@ -622,11 +634,23 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (selection?.length) {
-      const noItalicIndex = selection.findIndex(s => !s.italic)
-      selection.forEach(el => {
-        el.italic = !!~noItalicIndex
+      const { startIndex, endIndex } = this.range.getRange()
+      const newValue = !selection.every(s => s.italic)
+      const oldValues = selection.map(el => ({ el, italic: el.italic }))
+      selection.forEach(el => { el.italic = newValue })
+      this.draw.getHistoryManager().executeDelta({
+        applyForward: () => {
+          for (const item of oldValues) item.el.italic = newValue
+          this.draw.render({ isSetCursor: false })
+        },
+        applyBackward: () => {
+          for (const item of oldValues) item.el.italic = item.italic
+          this.draw.render({ isSetCursor: false })
+        }
       })
-      this.draw.render({ isSetCursor: false })
+      this.draw.markDirty(startIndex, endIndex)
+      this.draw.cancelScheduledRender()
+      this.draw.render({ isSetCursor: false, isSubmitHistory: false })
     } else {
       let isSubmitHistory = true
       const { endIndex } = this.range.getRange()
@@ -672,6 +696,11 @@ export class CommandAdapt {
             s.textDecoration &&
             !isObjectEqual(s.textDecoration, textDecoration))
       )
+      const oldValues = selection.map(el => ({
+        el,
+        underline: el.underline,
+        textDecoration: el.textDecoration
+      }))
       selection.forEach(el => {
         el.underline = isSetUnderline
         if (isSetUnderline && textDecoration) {
@@ -680,9 +709,35 @@ export class CommandAdapt {
           delete el.textDecoration
         }
       })
+      this.draw.getHistoryManager().executeDelta({
+        applyForward: () => {
+          for (const item of oldValues) {
+            item.el.underline = isSetUnderline
+            if (isSetUnderline && textDecoration) {
+              item.el.textDecoration = textDecoration
+            } else {
+              delete item.el.textDecoration
+            }
+          }
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        },
+        applyBackward: () => {
+          for (const item of oldValues) {
+            item.el.underline = item.underline
+            if (item.textDecoration !== undefined) {
+              item.el.textDecoration = item.textDecoration
+            } else {
+              delete item.el.textDecoration
+            }
+          }
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        }
+      })
+      this.draw.cancelScheduledRender()
       this.draw.render({
         isSetCursor: false,
-        isCompute: false
+        isCompute: false,
+        isSubmitHistory: false
       })
     } else {
       let isSubmitHistory = true
@@ -716,13 +771,24 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (selection?.length) {
-      const noStrikeoutIndex = selection.findIndex(s => !s.strikeout)
-      selection.forEach(el => {
-        el.strikeout = !!~noStrikeoutIndex
+      const newValue = !selection.every(s => s.strikeout)
+      const oldValues = selection.map(el => ({ el, strikeout: el.strikeout }))
+      selection.forEach(el => { el.strikeout = newValue })
+      this.draw.getHistoryManager().executeDelta({
+        applyForward: () => {
+          for (const item of oldValues) item.el.strikeout = newValue
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        },
+        applyBackward: () => {
+          for (const item of oldValues) item.el.strikeout = item.strikeout
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        }
       })
+      this.draw.cancelScheduledRender()
       this.draw.render({
         isSetCursor: false,
-        isCompute: false
+        isCompute: false,
+        isSubmitHistory: false
       })
     } else {
       let isSubmitHistory = true
@@ -756,12 +822,16 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (!selection) return
-    const superscriptIndex = selection.findIndex(
-      s => s.type === ElementType.SUPERSCRIPT
-    )
+    const { startIndex, endIndex } = this.range.getRange()
+    const oldValues = selection.map(el => ({
+      el,
+      type: el.type,
+      actualSize: el.actualSize
+    }))
+    const isActivating = !selection.some(s => s.type === ElementType.SUPERSCRIPT)
     selection.forEach(el => {
       // 取消上标
-      if (~superscriptIndex) {
+      if (!isActivating) {
         if (el.type === ElementType.SUPERSCRIPT) {
           el.type = ElementType.TEXT
           delete el.actualSize
@@ -777,7 +847,34 @@ export class CommandAdapt {
         }
       }
     })
-    this.draw.render({ isSetCursor: false })
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldValues) {
+          if (!isActivating) {
+            if (item.type === ElementType.SUPERSCRIPT) {
+              item.el.type = ElementType.TEXT
+              delete item.el.actualSize
+            }
+          } else {
+            if (!item.type || item.type === ElementType.TEXT || item.type === ElementType.SUBSCRIPT) {
+              item.el.type = ElementType.SUPERSCRIPT
+            }
+          }
+        }
+        this.draw.render({ isSetCursor: false })
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          item.el.type = item.type
+          if (item.actualSize !== undefined) item.el.actualSize = item.actualSize
+          else delete item.el.actualSize
+        }
+        this.draw.render({ isSetCursor: false })
+      }
+    })
+    this.draw.markDirty(startIndex, endIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ isSetCursor: false, isSubmitHistory: false })
   }
 
   public subscript(options?: IRichtextOption) {
@@ -788,12 +885,16 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (!selection) return
-    const subscriptIndex = selection.findIndex(
-      s => s.type === ElementType.SUBSCRIPT
-    )
+    const { startIndex, endIndex } = this.range.getRange()
+    const oldValues = selection.map(el => ({
+      el,
+      type: el.type,
+      actualSize: el.actualSize
+    }))
+    const isActivating = !selection.some(s => s.type === ElementType.SUBSCRIPT)
     selection.forEach(el => {
       // 取消下标
-      if (~subscriptIndex) {
+      if (!isActivating) {
         if (el.type === ElementType.SUBSCRIPT) {
           el.type = ElementType.TEXT
           delete el.actualSize
@@ -809,7 +910,34 @@ export class CommandAdapt {
         }
       }
     })
-    this.draw.render({ isSetCursor: false })
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldValues) {
+          if (!isActivating) {
+            if (item.type === ElementType.SUBSCRIPT) {
+              item.el.type = ElementType.TEXT
+              delete item.el.actualSize
+            }
+          } else {
+            if (!item.type || item.type === ElementType.TEXT || item.type === ElementType.SUPERSCRIPT) {
+              item.el.type = ElementType.SUBSCRIPT
+            }
+          }
+        }
+        this.draw.render({ isSetCursor: false })
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          item.el.type = item.type
+          if (item.actualSize !== undefined) item.el.actualSize = item.actualSize
+          else delete item.el.actualSize
+        }
+        this.draw.render({ isSetCursor: false })
+      }
+    })
+    this.draw.markDirty(startIndex, endIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ isSetCursor: false, isSubmitHistory: false })
   }
 
   public color(payload: string | null, options?: IRichtextOption) {
@@ -820,6 +948,10 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (selection?.length) {
+      const oldValues = selection.map(el => ({
+        el,
+        color: el.color
+      }))
       selection.forEach(el => {
         if (payload) {
           el.color = payload
@@ -827,9 +959,27 @@ export class CommandAdapt {
           delete el.color
         }
       })
+      this.draw.getHistoryManager().executeDelta({
+        applyForward: () => {
+          for (const item of oldValues) {
+            if (payload) item.el.color = payload
+            else delete item.el.color
+          }
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        },
+        applyBackward: () => {
+          for (const item of oldValues) {
+            if (item.color !== undefined) item.el.color = item.color
+            else delete item.el.color
+          }
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        }
+      })
+      this.draw.cancelScheduledRender()
       this.draw.render({
         isSetCursor: false,
-        isCompute: false
+        isCompute: false,
+        isSubmitHistory: false
       })
     } else {
       let isSubmitHistory = true
@@ -865,6 +1015,10 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (selection?.length) {
+      const oldValues = selection.map(el => ({
+        el,
+        highlight: el.highlight
+      }))
       selection.forEach(el => {
         if (payload) {
           el.highlight = payload
@@ -872,9 +1026,27 @@ export class CommandAdapt {
           delete el.highlight
         }
       })
+      this.draw.getHistoryManager().executeDelta({
+        applyForward: () => {
+          for (const item of oldValues) {
+            if (payload) item.el.highlight = payload
+            else delete item.el.highlight
+          }
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        },
+        applyBackward: () => {
+          for (const item of oldValues) {
+            if (item.highlight !== undefined) item.el.highlight = item.highlight
+            else delete item.el.highlight
+          }
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        }
+      })
+      this.draw.cancelScheduledRender()
       this.draw.render({
         isSetCursor: false,
-        isCompute: false
+        isCompute: false,
+        isSubmitHistory: false
       })
     } else {
       let isSubmitHistory = true
@@ -2544,6 +2716,10 @@ export class CommandAdapt {
 
     let capitalizeNext: boolean
 
+    const { startIndex, endIndex } = this.range.getRange()
+    // 捕获旧值
+    const oldValues = selection.map(el => ({ el, value: el.value }))
+
     switch (type) {
       case ChangeCaseType.UPPER:
         selection.forEach(el => {
@@ -2604,7 +2780,20 @@ export class CommandAdapt {
         break
     }
 
-    this.draw.render({ isSetCursor: false })
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        // current state — forward is no-op, backward restores
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          item.el.value = item.value
+        }
+        this.draw.render({ isSetCursor: false })
+      }
+    })
+    this.draw.markDirty(startIndex, endIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ isSetCursor: false, isSubmitHistory: false })
   }
 
   public setHTML(payload: Partial<IEditorHTML>) {

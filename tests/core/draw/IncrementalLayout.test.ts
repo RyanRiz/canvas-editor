@@ -119,7 +119,7 @@ describe('Draw - incremental computeRowList (P2.2)', () => {
     expect(internal.rowList.length).toBe(baselineRowCount)
   })
 
-  it('dirty 落在第一行内：回退到全量，增量决策返回 null', () => {
+  it('dirty 落在第一行内：prefix 为空但仍可尝试增量（靠收敛复用尾部）', () => {
     ctx = createTestEditor({
       options: { pageMode: PageMode.CONTINUITY },
       data: { header: [], main: makeManyParagraphs(10), footer: [] }
@@ -133,7 +133,9 @@ describe('Draw - incremental computeRowList (P2.2)', () => {
       isPagingMode: false,
       innerWidth: 794 - 240
     })
-    expect(resume).toBeNull()
+    expect(resume).not.toBeNull()
+    expect((resume as any).startElementIndex).toBe(0)
+    expect((resume as any).prefixRowList).toEqual([])
   })
 
   it('setEditorData 后 _mainRowCheckpoints 被失效，下一帧走全量', () => {
@@ -320,44 +322,37 @@ describe('Draw - incremental computeRowList (P2.2)', () => {
     expect(incSnap).toEqual(fullSnap)
   })
 
-  it(
-    'PERF-PLAN §2.3: 增量分支下 positionList 前缀对象引用被复用',
-    () => {
-      ctx = createTestEditor({
-        options: { pageMode: PageMode.CONTINUITY },
-        data: { header: [], main: makeManyParagraphs(40), footer: [] }
-      })
-      const draw = ctx.editor.draw
-      draw.render({ isCompute: true, isSubmitHistory: false })
-      const internal = draw as unknown as DrawInternals
-      expect(internal.rowList.length).toBeGreaterThanOrEqual(3)
+  it('PERF-PLAN §2.3: 增量分支下 positionList 前缀对象引用被复用', () => {
+    ctx = createTestEditor({
+      options: { pageMode: PageMode.CONTINUITY },
+      data: { header: [], main: makeManyParagraphs(40), footer: [] }
+    })
+    const draw = ctx.editor.draw
+    draw.render({ isCompute: true, isSubmitHistory: false })
+    const internal = draw as unknown as DrawInternals
+    expect(internal.rowList.length).toBeGreaterThanOrEqual(3)
 
-      // 拿到当前 positionList 的若干前缀引用
-      const beforePos = draw.getPosition().getOriginalMainPositionList()
-      const baselinePos0 = beforePos[0]
-      const baselinePos1 = beforePos[1]
+    // 拿到当前 positionList 的若干前缀引用
+    const beforePos = draw.getPosition().getOriginalMainPositionList()
+    const baselinePos0 = beforePos[0]
+    const baselinePos1 = beforePos[1]
 
-      // 在第三行之后 splice，迫使增量分支生效
-      const dirtyStart = internal.rowList[2].startIndex + 1
-      draw.spliceElementList(
-        draw.getOriginalMainElementList(),
-        dirtyStart,
-        0,
-        [{ value: 'q' }]
-      )
-      draw.render({ isCompute: true, isSubmitHistory: false })
+    // 在第三行之后 splice，迫使增量分支生效
+    const dirtyStart = internal.rowList[2].startIndex + 1
+    draw.spliceElementList(draw.getOriginalMainElementList(), dirtyStart, 0, [
+      { value: 'q' }
+    ])
+    draw.render({ isCompute: true, isSubmitHistory: false })
 
-      const afterPos = draw.getPosition().getOriginalMainPositionList()
-      // 前缀位置对象应保持同一引用——增量靠 positionList.length 截断 + 复用
-      expect(afterPos[0]).toBe(baselinePos0)
-      expect(afterPos[1]).toBe(baselinePos1)
-    },
-    // 40-paragraph CONTINUITY render + splice + re-render in jsdom can run
-    // longer than the 5s default test-runner timeout on slower machines —
-    // the assertion itself doesn't have a perf budget, so give the test
-    // wall-clock room to finish.
-    30000
-  )
+    const afterPos = draw.getPosition().getOriginalMainPositionList()
+    // 前缀位置对象应保持同一引用——增量靠 positionList.length 截断 + 复用
+    expect(afterPos[0]).toBe(baselinePos0)
+    expect(afterPos[1]).toBe(baselinePos1)
+  }, // 40-paragraph CONTINUITY render + splice + re-render in jsdom can run
+  // longer than the 5s default test-runner timeout on slower machines —
+  // the assertion itself doesn't have a perf budget, so give the test
+  // wall-clock room to finish.
+  30000)
 
   it('PERF-PLAN §2.2: 收敛检测命中 — 中段插入 1 字符仅重排受影响段落', () => {
     // 构造一个足够大的文档（多段 + 多 wrap），在中段插入一个字符。
@@ -395,30 +390,24 @@ describe('Draw - incremental computeRowList (P2.2)', () => {
     const midRowIdx = Math.floor(internal.rowList.length / 2)
     const dirtyStart = internal.rowList[midRowIdx].startIndex + 1
     const before = draw.getOriginalMainElementList().length
-    draw.spliceElementList(
-      draw.getOriginalMainElementList(),
-      dirtyStart,
-      0,
-      [{ value: 'Z' }]
-    )
+    draw.spliceElementList(draw.getOriginalMainElementList(), dirtyStart, 0, [
+      { value: 'Z' }
+    ])
 
     // 拦截 _tryBuildResumeFrom 拿到本次构造出的 convergenceTarget——render
     // 之后我们能看到 matched 是否被写入。
-    let observedTarget:
-      | {
-          matched: { atOldIdx: number } | null
-        }
-      | null = null
+    let observedTarget: {
+      matched: { atOldIdx: number } | null
+    } | null = null
     const orig = internal._tryBuildResumeFrom.bind(internal)
-    ;(internal as unknown as Record<string, unknown>)._tryBuildResumeFrom = (
-      extra: { isPagingMode: boolean; innerWidth: number }
-    ): unknown => {
-      const result = orig(extra) as {
-        convergenceTarget?: { matched: { atOldIdx: number } | null }
-      } | null
-      if (result?.convergenceTarget) observedTarget = result.convergenceTarget
-      return result
-    }
+    ;(internal as unknown as Record<string, unknown>)._tryBuildResumeFrom =
+      (extra: { isPagingMode: boolean; innerWidth: number }): unknown => {
+        const result = orig(extra) as {
+          convergenceTarget?: { matched: { atOldIdx: number } | null }
+        } | null
+        if (result?.convergenceTarget) observedTarget = result.convergenceTarget
+        return result
+      }
 
     draw.render({ isCompute: true, isSubmitHistory: false })
 
@@ -438,7 +427,13 @@ describe('Draw - incremental computeRowList (P2.2)', () => {
   it('PERF-PLAN follow-up: 收敛 + pagination 稳定时，positionList 与全量字节相等', () => {
     // 平行场景：A 走增量 + 收敛尾部复用；B 强制全量。比较 positionList 关键
     // 字段（pageNo / index / coordinate.leftTop[0..1]）必须字节相等。
-    function snapshot(positions: { pageNo: number; index: number; coordinate: { leftTop: number[] } }[]) {
+    function snapshot(
+      positions: {
+        pageNo: number
+        index: number
+        coordinate: { leftTop: number[] }
+      }[]
+    ) {
       return positions.map(p => ({
         pageNo: p.pageNo,
         index: p.index,

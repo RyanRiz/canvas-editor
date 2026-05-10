@@ -1170,8 +1170,8 @@ export class Draw {
   /**
    * 标记主元素列表的 dirty 区间（PERF-PLAN §2.1）。
    * - 多次标记会取并集（最小 start、最大 end）
-  * - 仅作为渲染期 dirty-page 计算的提示；为 null 时按全量路径处理
-  * - render() 完成后会被自动清空
+   * - 仅作为渲染期 dirty-page 计算的提示；为 null 时按全量路径处理
+   * - render() 完成后会被自动清空
    */
   public markDirty(start: number, end: number) {
     const lo = Math.max(0, Math.min(start, end))
@@ -1192,7 +1192,8 @@ export class Draw {
    * 标脏入口，使增量布局在表格操作后仍能生效。
    */
   public markTableElementDirty(element: IElement) {
-    const idx = (element as unknown as { _mainElementIndex?: number })._mainElementIndex
+    const idx = (element as unknown as { _mainElementIndex?: number })
+      ._mainElementIndex
     if (idx !== undefined) {
       this.markDirty(idx, idx)
     }
@@ -1243,7 +1244,11 @@ export class Draw {
     let scope: HistoryScope
     // delta 历史所需：若本轮为表格单元格编辑，此变量保存 td 定位信息，
     // 供后续构造 mutation event 时填充 tdPath。
-    let tableTdPath: { elementIdx: number; trIdx: number; tdIdx: number } | null = null
+    let tableTdPath: {
+      elementIdx: number
+      trIdx: number
+      tdIdx: number
+    } | null = null
     if (elementList === this.elementList) {
       scope = 'main'
       const insertedLen = items?.length ?? 0
@@ -2118,8 +2123,8 @@ export class Draw {
    *  1) 上一帧已经至少跑过一次主体布局（_mainRowCheckpoints / rowList 非空）。
    *  2) _dirtyRange 已被显式标记。
    *  3) 布局签名（scale / innerWidth / pagingMode / defaultSize / ...）与上一帧一致。
-   *  4) dirty 起点之前至少存在一个完整的、未受影响的行可以保留——dirty 落在
-   *     第一行时（R = 0）回退到全量；前缀长度 0 没有省下任何工作。
+   *  4) dirty 起点所在行能定位到一个有效 checkpoint（通常就是 dirtyRowIndex 对应项）。
+   *     dirty 落在第一行时前缀为空，但仍可借助 convergence 复用尾部旧行。
    *  5) 所有 prefix 行的元素引用必须仍可信（即没有 setEditorData / 跨文档替换）。
    *     由 _invalidatePaintCache() 在那些路径上同步失效 _mainRowCheckpoints 来保证。
    */
@@ -2144,16 +2149,19 @@ export class Draw {
       )
       return null
     }
-    if (this.rowList.length <= 1) {
+    if (!this.rowList.length) {
       console.warn(
-        '[IncrementalLayout] _tryBuildResumeFrom rejected: rowList too short (<=1)'
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: rowList empty'
       )
       return null
     }
     if (this._mainRowCheckpoints.length !== this.rowList.length) {
       console.warn(
         '[IncrementalLayout] _tryBuildResumeFrom rejected: checkpoint/row length mismatch',
-        { checkpoints: this._mainRowCheckpoints.length, rows: this.rowList.length }
+        {
+          checkpoints: this._mainRowCheckpoints.length,
+          rows: this.rowList.length
+        }
       )
       return null
     }
@@ -2179,15 +2187,36 @@ export class Draw {
     }
     // lo 现在指向第一个 startIndex > dirtyStart 的行；前一行包含 dirtyStart。
     const dirtyRowIndex = lo - 1
-    if (dirtyRowIndex <= 0) {
+    if (dirtyRowIndex < 0) {
       console.warn(
-        '[IncrementalLayout] _tryBuildResumeFrom rejected: dirtyRowIndex <= 0 (dirty starts in first row)',
-        { dirtyStart, dirtyRowIndex, firstRowStartIndex: this.rowList[0]?.startIndex }
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: dirtyRowIndex < 0',
+        {
+          dirtyStart,
+          dirtyRowIndex,
+          firstRowStartIndex: this.rowList[0]?.startIndex
+        }
       )
       return null
     }
+    // PERF-PLAN §2.8：dirtyRowIndex === 0 表示脏起始于首行。此时前缀为空，
+    // 需要构造初始 checkpoint（等同行 0 之前的状态）。该 checkpoint 不与
+    // _mainRowCheckpoints 中的条目对齐，因此从边界参数重建。
     const prefixRowList = this.rowList.slice(0, dirtyRowIndex)
-    const checkpoint = this._mainRowCheckpoints[dirtyRowIndex]
+    let checkpoint = this._mainRowCheckpoints[dirtyRowIndex]
+    if (dirtyRowIndex === 0 && !checkpoint) {
+      const margins = this.options.margins
+      const extraHeight = this.header.getExtraHeight()
+      checkpoint = {
+        x: margins[3],
+        y: extra.isPagingMode ? margins[0] + extraHeight : 0,
+        pageNo: 0,
+        listId: undefined,
+        listIndex: 0,
+        controlRealWidth: 0,
+        currentPageColumns: this.normalizePageColumns(undefined),
+        surroundElementList: []
+      }
+    }
     if (!checkpoint) {
       console.warn(
         '[IncrementalLayout] _tryBuildResumeFrom rejected: no checkpoint at dirtyRowIndex',
@@ -2571,9 +2600,10 @@ export class Draw {
           (preEl?.rowFlex === RowFlex.ALIGNMENT && row.isWidthNotEnough))
       ) {
         // 忽略换行符及尾部元素间隔设置
-        const rl = row.elementList[0]?.value === ZERO
-          ? row.elementList.slice(1)
-          : row.elementList
+        const rl =
+          row.elementList[0]?.value === ZERO
+            ? row.elementList.slice(1)
+            : row.elementList
         const whitespaceIndexes: number[] = []
         for (let e = 0; e < rl.length - 1; e++) {
           const v = rl[e].value
@@ -2619,7 +2649,12 @@ export class Draw {
     // isSubmitHistory: false 覆盖为 true，触发全额 snapshot 克隆。
     this.cancelScheduledRender()
     // 触发热刷新（跳过 layout，仅 paint + cursor，历史由调用方负责）
-    this.render({ curIndex, isCompute: false, isSetCursor: true, isSubmitHistory: false })
+    this.render({
+      curIndex,
+      isCompute: false,
+      isSetCursor: true,
+      isSubmitHistory: false
+    })
   }
 
   public computeRowList(payload: IComputeRowListPayload) {
@@ -2755,6 +2790,23 @@ export class Draw {
               : []
           }
         : null
+      // PERF-PLAN §2.8：dirtyRowIndex===0 时 rowList 初始为空（无前缀行）。
+      // 必须创建种子行以承接第一个迭代元素，逻辑与全量路径相同。
+      if (!rowList.length && elementList.length) {
+        rowList.push({
+          width: 0,
+          height: 0,
+          ascent: 0,
+          elementList: [],
+          startIndex: i,
+          rowIndex: 0,
+          rowFlex: elementList[i]?.rowFlex || elementList[i + 1]?.rowFlex,
+          pageColumns: currentPageColumns,
+          innerWidth: isFromTable
+            ? innerWidth
+            : this.getColumnInnerWidth(currentPageColumns)
+        })
+      }
       let curRow: IRow = rowList[rowList.length - 1]
       const element = elementList[i]
       if (!isFromTable && element.pageColumns) {
@@ -2877,7 +2929,9 @@ export class Draw {
         // 存储其在主列表中的索引。TableTool 的列/行拖拽缩放直接更改元素属性
         // 后调用 render()——不经过 spliceElementList，因此无法自动标脏。此索引
         // 使 resize 路径也能精准 markDirty(tableIndex)，启用增量布局。
-        ;(element as unknown as { _mainElementIndex?: number })._mainElementIndex = i
+        ;(
+          element as unknown as { _mainElementIndex?: number }
+        )._mainElementIndex = i
         const tdPaddingWidth = tdPadding[1] + tdPadding[3]
         const tdPaddingHeight = tdPadding[0] + tdPadding[2]
         // 表格分页处理进度：https://github.com/Hufe921/canvas-editor/issues/41
@@ -2941,9 +2995,27 @@ export class Draw {
             // 按每个字符触发一次 full computeRowList。
             // 注意：不存 _ownerElement 引用——那会形成 td→TABLE→trList→tdList→td
             // 的循环引用，致使序列化 / 深拷贝递归爆栈。
-            ;(td as unknown as { _ownerElementIndex: number; _trIdx: number; _tdIdx: number })._ownerElementIndex = tableElementIndex
-            ;(td as unknown as { _ownerElementIndex: number; _trIdx: number; _tdIdx: number })._trIdx = t
-            ;(td as unknown as { _ownerElementIndex: number; _trIdx: number; _tdIdx: number })._tdIdx = d
+            ;(
+              td as unknown as {
+                _ownerElementIndex: number
+                _trIdx: number
+                _tdIdx: number
+              }
+            )._ownerElementIndex = tableElementIndex
+            ;(
+              td as unknown as {
+                _ownerElementIndex: number
+                _trIdx: number
+                _tdIdx: number
+              }
+            )._trIdx = t
+            ;(
+              td as unknown as {
+                _ownerElementIndex: number
+                _trIdx: number
+                _tdIdx: number
+              }
+            )._tdIdx = d
             const tdInnerWidth = (td.width! - tdPaddingWidth) * scale
             // 缓存命中条件：td 未被 dirty 标记，且缓存键完全一致。
             const canReuseCell =
@@ -3253,7 +3325,8 @@ export class Draw {
         // PERF-PLAN §2.7：存储自然宽度（alignment 前）。rowFlex / rowMargin
         // 快速路径需要还原到未拉伸宽度后重新对齐，避免在 34 页文档上每
         // 次属性变更触发 ~1700ms 的 full computeRowList。
-        ;(element as unknown as { _naturalWidth?: number })._naturalWidth = metrics.width
+        ;(element as unknown as { _naturalWidth?: number })._naturalWidth =
+          metrics.width
         // 使用基于字体的基准度量以确保一致的行高，避免字符特定度量导致的布局跳动
         const basisMetrics = this.textParticle.measureBasisWord(
           ctx,
@@ -5379,8 +5452,8 @@ export class Draw {
           }
         }
         // PERF-PLAN §2.2 / Phase 2B：在「上一帧 row checkpoint 仍然有效 + 已有 dirty
-        // 区间提示 + 布局签名未变 + 至少存在可保留的前缀行」时启用增量布局，
-        // 跳过 dirty 起点之前的 measureText / 包装判定 / surround 计算等 O(N) 工作。
+        // 区间提示 + 布局签名未变」时尝试启用增量布局。
+        // dirty 在首行时 prefix 为空，但仍可通过 convergence 复用尾部旧行。
         const resumeFrom = this._tryBuildResumeFrom({
           isPagingMode,
           innerWidth
