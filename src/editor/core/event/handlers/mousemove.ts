@@ -101,7 +101,18 @@ export function mousemove(evt: MouseEvent, host: CanvasEvent) {
     isTable &&
     startIsTable &&
     (tdIndex !== startTdIndex || trIndex !== startTrIndex)
+  let isRangeChange = false
   if (crossCell) {
+    isRangeChange = rangeManager.getIsRangeChange(
+      endIndex,
+      endIndex,
+      tableId,
+      startTdIndex,
+      tdIndex,
+      startTrIndex,
+      trIndex
+    )
+    if (!isRangeChange) return
     rangeManager.setRange(
       endIndex,
       endIndex,
@@ -141,6 +152,8 @@ export function mousemove(evt: MouseEvent, host: CanvasEvent) {
     ) {
       return
     }
+    isRangeChange = rangeManager.getIsRangeChange(start, end)
+    if (!isRangeChange) return
     rangeManager.setRange(start, end)
   }
   // 绘制
