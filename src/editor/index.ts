@@ -13,6 +13,7 @@ import {
   LocationPosition
 } from './dataset/enum/Common'
 import { ElementType } from './dataset/enum/Element'
+import { SectionBreakType } from './dataset/enum/SectionBreak'
 import { formatElementList } from './utils/element'
 import { Register } from './core/register/Register'
 import { ContextMenu } from './core/contextmenu/ContextMenu'
@@ -198,6 +199,7 @@ export {
   EditorZone,
   EditorMode,
   ElementType,
+  SectionBreakType,
   ControlType,
   EditorComponent,
   PageMode,

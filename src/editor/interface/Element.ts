@@ -1,6 +1,7 @@
 import { ImageDisplay } from '../dataset/enum/Common'
 import { ControlComponent } from '../dataset/enum/Control'
 import { ElementType } from '../dataset/enum/Element'
+import { SectionBreakType } from '../dataset/enum/SectionBreak'
 import { ListStyle, ListType } from '../dataset/enum/List'
 import { RowFlex } from '../dataset/enum/Row'
 import { TitleLevel } from '../dataset/enum/Title'
@@ -114,6 +115,14 @@ export interface ISeparator {
   lineWidth?: number
 }
 
+export interface ISectionBreakElement {
+  // Section break flavour (MS Word semantics). Only meaningful when
+  // `type === ElementType.SECTION_BREAK`; carried on the element rather than a
+  // dedicated node so the existing block-break plumbing (row.isPageBreak,
+  // ctrl-backspace atomic delete, clipboard serialization) can be reused.
+  sectionBreakType?: SectionBreakType
+}
+
 export interface IControlElement {
   control?: IControl
   controlId?: string
@@ -213,6 +222,7 @@ export type IElement = IElementBasic &
   IHyperlinkElement &
   ISuperscriptSubscript &
   ISeparator &
+  ISectionBreakElement &
   IControlElement &
   ICheckboxElement &
   IRadioElement &

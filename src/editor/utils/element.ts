@@ -1379,6 +1379,27 @@ export function createDomFromElementList(
         const pageBreakElement = document.createElement('div')
         pageBreakElement.style.breakAfter = 'page'
         clipboardDom.append(pageBreakElement)
+      } else if (element.type === ElementType.SECTION_BREAK) {
+        // CONTINUOUS section breaks deliberately do not force a page in the
+        // host renderer; NEXT_PAGE / EVEN_PAGE / ODD_PAGE do. CSS `break-after`
+        // covers the common page case; `left`/`right` map to even/odd parity.
+        const sectionBreakElement = document.createElement('div')
+        switch (element.sectionBreakType) {
+          case 'continuous':
+            // No forced page break — still emit a paragraph boundary.
+            break
+          case 'evenPage':
+            sectionBreakElement.style.breakAfter = 'left'
+            break
+          case 'oddPage':
+            sectionBreakElement.style.breakAfter = 'right'
+            break
+          case 'nextPage':
+          default:
+            sectionBreakElement.style.breakAfter = 'page'
+            break
+        }
+        clipboardDom.append(sectionBreakElement)
       } else if (
         !element.type ||
         element.type === ElementType.LATEX ||

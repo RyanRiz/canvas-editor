@@ -48,6 +48,7 @@ import { Search } from './interactive/Search'
 import { Strikeout } from './richtext/Strikeout'
 import { Underline } from './richtext/Underline'
 import { ElementType } from '../../dataset/enum/Element'
+import { SectionBreakType } from '../../dataset/enum/SectionBreak'
 import { ImageParticle } from './particle/ImageParticle'
 import { LaTexParticle } from './particle/latex/LaTexParticle'
 import { TextParticle } from './particle/TextParticle'
@@ -63,6 +64,7 @@ import { SuperscriptParticle } from './particle/SuperscriptParticle'
 import { SubscriptParticle } from './particle/SubscriptParticle'
 import { SeparatorParticle } from './particle/SeparatorParticle'
 import { PageBreakParticle } from './particle/PageBreakParticle'
+import { SectionBreakParticle } from './particle/SectionBreakParticle'
 import { Watermark } from './frame/Watermark'
 import { WatermarkLayer } from '../../dataset/enum/Watermark'
 import {
@@ -349,6 +351,7 @@ export class Draw {
   private dateParticle: DateParticle
   private separatorParticle: SeparatorParticle
   private pageBreakParticle: PageBreakParticle
+  private sectionBreakParticle: SectionBreakParticle
   private superscriptParticle: SuperscriptParticle
   private subscriptParticle: SubscriptParticle
   private checkboxParticle: CheckboxParticle
@@ -470,6 +473,7 @@ export class Draw {
     this.dateParticle = new DateParticle(this)
     this.separatorParticle = new SeparatorParticle(this)
     this.pageBreakParticle = new PageBreakParticle(this)
+    this.sectionBreakParticle = new SectionBreakParticle(this)
     this.superscriptParticle = new SuperscriptParticle()
     this.subscriptParticle = new SubscriptParticle()
     this.checkboxParticle = new CheckboxParticle(this)
@@ -2342,7 +2346,8 @@ export class Draw {
         Math.abs(a.height - b.height) > 0.01 ||
         a.rowIndex !== b.rowIndex ||
         !!a.isPageBreak !== !!b.isPageBreak ||
-        !!a.isColumnBreak !== !!b.isColumnBreak
+        !!a.isColumnBreak !== !!b.isColumnBreak ||
+        !!a.isSectionBreak !== !!b.isSectionBreak
       ) {
         console.error(`[Phase2B/validate] row ${r} mismatch`, {
           full: a,
@@ -3177,7 +3182,14 @@ export class Draw {
             const rowOffsetY = row.offsetY || 0
             if (
               row.height + curPagePreHeight + rowOffsetY > height ||
-              rowList[r - 1]?.isPageBreak
+              rowList[r - 1]?.isPageBreak ||
+              // A page-starting section break behaves like a page break here.
+              (rowList[r - 1]?.isSectionBreak &&
+                rowList[r - 1]?.elementList.some(
+                  el =>
+                    el.type === ElementType.SECTION_BREAK &&
+                    el.sectionBreakType !== SectionBreakType.CONTINUOUS
+                ))
             ) {
               curPagePreHeight = marginHeight + row.height + rowOffsetY
             } else {
@@ -3188,10 +3200,18 @@ export class Draw {
           // 前面元素为换页符时重新计算高度
           const rowMarginHeight = rowMargin * 2 * scale
           const firstTrHeight = element.trList![0].height! * scale
+          // A section break that opens a new page (NEXT_PAGE / EVEN_PAGE /
+          // ODD_PAGE) also restarts table pagination accounting, just like a
+          // PAGE_BREAK; CONTINUOUS does not because layout stays on the page.
+          const prevEl = elementList[i - 1]
+          const isPriorPageStartingSectionBreak =
+            prevEl?.type === ElementType.SECTION_BREAK &&
+            prevEl.sectionBreakType !== SectionBreakType.CONTINUOUS
           if (
             curPagePreHeight + firstTrHeight + rowMarginHeight > height ||
             (element.pagingIndex !== 0 && element.trList![0].pagingRepeat) ||
-            elementList[i - 1]?.type === ElementType.PAGE_BREAK
+            prevEl?.type === ElementType.PAGE_BREAK ||
+            isPriorPageStartingSectionBreak
           ) {
             // 无可拆分行则切换至新页
             curPagePreHeight = marginHeight
@@ -3300,6 +3320,13 @@ export class Draw {
         metrics.width = availableWidth
         metrics.height = defaultSize
       } else if (element.type === ElementType.COLUMN_BREAK) {
+        element.width = availableWidth / scale
+        metrics.width = availableWidth
+        metrics.height = defaultSize
+      } else if (element.type === ElementType.SECTION_BREAK) {
+        // Section break occupies a placeholder row similar to PAGE_BREAK; the
+        // page-parity / page-flow side effects are applied later in
+        // _computePageList via row.isSectionBreak + element.sectionBreakType.
         element.width = availableWidth / scale
         metrics.width = availableWidth
         metrics.height = defaultSize
@@ -3522,7 +3549,8 @@ export class Draw {
             ? innerWidth
             : this.getColumnInnerWidth(currentPageColumns),
           isPageBreak: element.type === ElementType.PAGE_BREAK,
-          isColumnBreak: element.type === ElementType.COLUMN_BREAK
+          isColumnBreak: element.type === ElementType.COLUMN_BREAK,
+          isSectionBreak: element.type === ElementType.SECTION_BREAK
         }
         // 控件缩进
         if (
@@ -3645,12 +3673,18 @@ export class Draw {
       if (isWrap) {
         x = startX
         y += curRow.height
+        // NEXT_PAGE / EVEN_PAGE / ODD_PAGE all force a new page;
+        // CONTINUOUS deliberately does not (layout state changes mid-page).
+        const isPageStartingSectionBreak =
+          element.type === ElementType.SECTION_BREAK &&
+          element.sectionBreakType !== SectionBreakType.CONTINUOUS
         if (
           isPagingMode &&
           !isFromTable &&
           pageHeight &&
           (y - startY + mainOuterHeight + height > pageHeight ||
-            element.type === ElementType.PAGE_BREAK)
+            element.type === ElementType.PAGE_BREAK ||
+            isPageStartingSectionBreak)
         ) {
           y = startY
           // 删除多余四周环绕型元素
@@ -3973,6 +4007,43 @@ export class Draw {
       }
       return true
     }
+    // Extract the SectionBreakType (if any) carried by the section-break
+    // sentinel row preceding `row`. Section-break rows hold exactly one
+    // element of type SECTION_BREAK whose `sectionBreakType` is the flavour.
+    const getSectionBreakType = (row?: IRow): SectionBreakType | null => {
+      if (!row?.isSectionBreak) return null
+      const sentinel = row.elementList.find(
+        el => el.type === ElementType.SECTION_BREAK
+      )
+      return sentinel?.sectionBreakType ?? SectionBreakType.NEXT_PAGE
+    }
+    // Page parity helpers — pageNo is 0-indexed internally (pageNo 0 == page 1 == odd).
+    // EVEN_PAGE: next content lands on an even-numbered page (pageNo 1, 3, 5…).
+    // ODD_PAGE:  next content lands on an odd-numbered  page (pageNo 0, 2, 4…).
+    // When the natural next page already satisfies the parity rule, only one
+    // page advance is needed. Otherwise an extra blank page is inserted, just
+    // like Word does for duplex/book layouts.
+    const advanceForSectionBreak = (
+      type: SectionBreakType,
+      cutIndex: number
+    ): boolean => {
+      // CONTINUOUS does not advance pages here — it is handled below by
+      // simply not triggering nextPage at all.
+      // For NEXT_PAGE / EVEN_PAGE / ODD_PAGE, advance at least once.
+      if (!nextPage(cutIndex)) return false
+      if (type === SectionBreakType.EVEN_PAGE) {
+        // Even pages are pageNo 1, 3, 5… i.e. pageNo % 2 === 1.
+        if (pageNo % 2 === 0) {
+          if (!nextPage(cutIndex)) return false
+        }
+      } else if (type === SectionBreakType.ODD_PAGE) {
+        // Odd pages are pageNo 0, 2, 4… i.e. pageNo % 2 === 0.
+        if (pageNo % 2 === 1) {
+          if (!nextPage(cutIndex)) return false
+        }
+      }
+      return true
+    }
     if (pageMode === PageMode.CONTINUITY) {
       // 连续模式下保持单列行为：所有行注入第一列，列索引归零
       pageRowList[0] = this.rowList
@@ -4023,8 +4094,18 @@ export class Draw {
             const rowOffsetY = row.offsetY || 0
             const prev = this.rowList[row.rowIndex - 1]
             const forcePageBreak = !!prev?.isPageBreak
+            // Section break: NEXT_PAGE / EVEN_PAGE / ODD_PAGE all force a new
+            // page (with parity adjustment); CONTINUOUS keeps current page.
+            const sectionBreakType = getSectionBreakType(prev)
+            const forceSectionBreak =
+              sectionBreakType !== null &&
+              sectionBreakType !== SectionBreakType.CONTINUOUS
             const overflow = row.height + rowOffsetY + pageHeight > height
-            if (forcePageBreak || (overflow && pageHeight > marginHeight)) {
+            if (forceSectionBreak) {
+              if (!advanceForSectionBreak(sectionBreakType!, row.startIndex)) {
+                return pageRowList
+              }
+            } else if (forcePageBreak || (overflow && pageHeight > marginHeight)) {
               if (!nextPage(row.startIndex)) {
                 return pageRowList
               }
@@ -4071,7 +4152,23 @@ export class Draw {
           const prev = this.rowList[row.rowIndex - 1]
           const forcePageBreak = !!prev?.isPageBreak
           const forceColumnBreak = !!prev?.isColumnBreak
-          if (forcePageBreak) {
+          const sectionBreakType = getSectionBreakType(prev)
+          const forceSectionPageBreak =
+            sectionBreakType !== null &&
+            sectionBreakType !== SectionBreakType.CONTINUOUS
+          if (forceSectionPageBreak) {
+            if (!advanceForSectionBreak(sectionBreakType!, row.startIndex)) {
+              return pageRowList
+            }
+            sectionTop = pageHeight - trailingOuterHeight
+            columnIndex = 0
+            columnHeightList = new Array(columnCount).fill(sectionTop)
+            columnHasContentList = new Array(columnCount).fill(false)
+            balanceThreshold = computeBalanceThreshold(
+              sectionTop,
+              remainingSectionHeight
+            )
+          } else if (forcePageBreak) {
             if (!nextPage(row.startIndex)) {
               return pageRowList
             }
@@ -4307,6 +4404,10 @@ export class Draw {
         } else if (element.type === ElementType.COLUMN_BREAK) {
           if (this.mode !== EditorMode.CLEAN && !isPrintMode) {
             this.pageBreakParticle.render(ctx, element, x, y)
+          }
+        } else if (element.type === ElementType.SECTION_BREAK) {
+          if (this.mode !== EditorMode.CLEAN && !isPrintMode) {
+            this.sectionBreakParticle.render(ctx, element, x, y)
           }
         } else if (
           element.type === ElementType.CHECKBOX ||

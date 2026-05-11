@@ -24,6 +24,10 @@ export interface IRow {
   startIndex: number
   isPageBreak?: boolean
   isColumnBreak?: boolean
+  // MS Word style section break (NEXT_PAGE / CONTINUOUS / EVEN_PAGE / ODD_PAGE).
+  // Carried on the row so pagination can apply page-parity rules; the precise
+  // flavour lives on the source element's `sectionBreakType` field.
+  isSectionBreak?: boolean
   columnIndex?: number
   isList?: boolean
   listIndex?: number

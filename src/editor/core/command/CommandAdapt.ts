@@ -21,6 +21,7 @@ import {
   PaperDirection
 } from '../../dataset/enum/Editor'
 import { ElementType } from '../../dataset/enum/Element'
+import { SectionBreakType } from '../../dataset/enum/SectionBreak'
 import { ElementStyleKey } from '../../dataset/enum/ElementStyle'
 import { ListStyle, ListType } from '../../dataset/enum/List'
 import { MoveDirection } from '../../dataset/enum/Observer'
@@ -2017,6 +2018,31 @@ export class CommandAdapt {
       {
         type: ElementType.COLUMN_BREAK,
         value: WRAP
+      }
+    ])
+  }
+
+  /**
+   * Insert an MS Word style section break.
+   *
+   * The break is encoded as a single element with `type = SECTION_BREAK` and
+   * `sectionBreakType = NEXT_PAGE | CONTINUOUS | EVEN_PAGE | ODD_PAGE`. The
+   * pagination side effects (force new page / blank-page parity for EVEN/ODD,
+   * stay on page for CONTINUOUS) are applied in Draw._computePageList.
+   *
+   * Defaults to NEXT_PAGE — the most common Word flavour.
+   */
+  public sectionBreak(payload?: { type?: SectionBreakType }) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const activeControl = this.control.getActiveControl()
+    if (activeControl) return
+    const type = payload?.type ?? SectionBreakType.NEXT_PAGE
+    this.insertElementList([
+      {
+        type: ElementType.SECTION_BREAK,
+        value: WRAP,
+        sectionBreakType: type
       }
     ])
   }

@@ -582,6 +582,15 @@ ul {
   background-image: url('./assets/images/page-break.svg');
 }
 
+.menu-item__section-break {
+  position: relative;
+}
+
+.menu-item__section-break>i {
+  /* Reuse the page-break icon — sub-menu disambiguates the four flavours. */
+  background-image: url('./assets/images/page-break.svg');
+}
+
 .menu-item__control {
   position: relative;
 }

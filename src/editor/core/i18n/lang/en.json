@@ -85,6 +85,13 @@
   "pageBreak": {
     "displayName": "Page Break"
   },
+  "sectionBreak": {
+    "displayName": "Section Break",
+    "nextPage": "Next Page",
+    "continuous": "Continuous",
+    "evenPage": "Even Page",
+    "oddPage": "Odd Page"
+  },
   "zone": {
     "headerTip": "Double click to edit header",
     "footerTip": "Double click to edit footer"

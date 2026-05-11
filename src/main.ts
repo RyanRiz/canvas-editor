@@ -10,6 +10,7 @@ import Editor, {
   EditorMode,
   EditorZone,
   ElementType,
+  SectionBreakType,
   IBlock,
   ICatalogItem,
   IElement,
@@ -781,6 +782,24 @@ window.onload = function () {
   pageBreakDom.onclick = function () {
     console.log('pageBreak')
     instance.command.executePageBreak()
+  }
+
+  const sectionBreakDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__section-break'
+  )!
+  const sectionBreakOptionDom =
+    sectionBreakDom.querySelector<HTMLDivElement>('.options')!
+  sectionBreakDom.onclick = function () {
+    console.log('sectionBreak')
+    sectionBreakOptionDom.classList.toggle('visible')
+  }
+  sectionBreakOptionDom.onmousedown = function (evt) {
+    const li = evt.target as HTMLLIElement
+    const raw = li.dataset.sectionBreak
+    sectionBreakOptionDom.classList.toggle('visible')
+    if (!raw) return
+    const type = raw as SectionBreakType
+    instance.command.executeSectionBreak({ type })
   }
 
   const watermarkDom = document.querySelector<HTMLDivElement>(

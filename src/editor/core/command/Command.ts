@@ -73,6 +73,7 @@ export class Command {
   public executeSeparator: CommandAdapt['separator']
   public executePageBreak: CommandAdapt['pageBreak']
   public executeColumnBreak: CommandAdapt['columnBreak']
+  public executeSectionBreak: CommandAdapt['sectionBreak']
   public executeColumnLayout: CommandAdapt['columnLayout']
   public executeAddWatermark: CommandAdapt['addWatermark']
   public executeDeleteWatermark: CommandAdapt['deleteWatermark']
@@ -249,6 +250,7 @@ export class Command {
     this.executeSeparator = adapt.separator.bind(adapt)
     this.executePageBreak = adapt.pageBreak.bind(adapt)
     this.executeColumnBreak = adapt.columnBreak.bind(adapt)
+    this.executeSectionBreak = adapt.sectionBreak.bind(adapt)
     this.executeColumnLayout = adapt.columnLayout.bind(adapt)
     this.executeAddWatermark = adapt.addWatermark.bind(adapt)
     this.executeDeleteWatermark = adapt.deleteWatermark.bind(adapt)

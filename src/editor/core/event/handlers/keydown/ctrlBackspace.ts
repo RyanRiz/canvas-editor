@@ -13,6 +13,7 @@ const BLOCK_TYPES = new Set([
   ElementType.SEPARATOR,
   ElementType.PAGE_BREAK,
   ElementType.COLUMN_BREAK,
+  ElementType.SECTION_BREAK,
   ElementType.BLOCK,
   ElementType.LATEX
 ])
