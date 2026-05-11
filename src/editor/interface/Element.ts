@@ -41,6 +41,9 @@ export interface IElementStyle {
   rowMargin?: number
   letterSpacing?: number
   textDecoration?: ITextDecoration
+  indent?: number
+  spaceBefore?: number
+  spaceAfter?: number
 }
 
 export interface IElementRule {

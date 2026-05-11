@@ -1332,6 +1332,69 @@ export class CommandAdapt {
     this.draw.recomputeRowProperties(curIndex)
   }
 
+  public increaseIndent() {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const rowElementList = this.range.getRangeRowElementList()
+    if (!rowElementList) return
+    rowElementList.forEach(element => {
+      element.indent = (element.indent || 0) + 1
+    })
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.render({ curIndex, isSetCursor })
+  }
+
+  public spaceBefore(payload: number) {
+    const isReadonly = this.draw.isReadonly()
+    if (isReadonly) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const rowElementList = this.range.getRangeRowElementList()
+    if (!rowElementList) return
+    rowElementList.forEach(element => {
+      element.spaceBefore = payload
+    })
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.render({ curIndex, isSetCursor })
+  }
+
+  public spaceAfter(payload: number) {
+    const isReadonly = this.draw.isReadonly()
+    if (isReadonly) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const rowElementList = this.range.getRangeRowElementList()
+    if (!rowElementList) return
+    rowElementList.forEach(element => {
+      element.spaceAfter = payload
+    })
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.render({ curIndex, isSetCursor })
+  }
+
+  public decreaseIndent() {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const rowElementList = this.range.getRangeRowElementList()
+    if (!rowElementList) return
+    rowElementList.forEach(element => {
+      const currentIndent = element.indent || 0
+      if (currentIndent > 0) {
+        element.indent = currentIndent - 1
+      }
+    })
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.render({ curIndex, isSetCursor })
+  }
+
   public insertTable(row: number, col: number) {
     const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
     if (isDisabled) return

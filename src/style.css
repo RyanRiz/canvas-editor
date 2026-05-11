@@ -369,12 +369,36 @@ ul {
   background-image: url('./assets/images/justify.svg');
 }
 
+.menu-item__increase-indent i {
+  background-image: url('./assets/images/increase-indent.svg');
+}
+
+.menu-item__decrease-indent i {
+  background-image: url('./assets/images/decrease-indent.svg');
+}
+
 .menu-item__row-margin {
   position: relative;
 }
 
 .menu-item__row-margin i {
   background-image: url('./assets/images/row-margin.svg');
+}
+
+.menu-item__space-before i {
+  background-image: url('./assets/images/space-before.svg');
+}
+
+.menu-item__space-before .options {
+  width: 50px;
+}
+
+.menu-item__space-after i {
+  background-image: url('./assets/images/space-after.svg');
+}
+
+.menu-item__space-after .options {
+  width: 50px;
 }
 
 .menu-item__list {
