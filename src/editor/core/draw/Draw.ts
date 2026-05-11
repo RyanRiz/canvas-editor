@@ -49,6 +49,7 @@ import { Strikeout } from './richtext/Strikeout'
 import { Underline } from './richtext/Underline'
 import { ElementType } from '../../dataset/enum/Element'
 import { SectionBreakType } from '../../dataset/enum/SectionBreak'
+import { ISectionProperties } from '../../interface/SectionBreak'
 import { ImageParticle } from './particle/ImageParticle'
 import { LaTexParticle } from './particle/latex/LaTexParticle'
 import { TextParticle } from './particle/TextParticle'
@@ -372,6 +373,19 @@ export class Draw {
   private WORD_LIKE_REG: RegExp
   private rowList: IRow[]
   private pageRowList: IRow[][]
+  // Per-page geometry (one entry per page) populated by `_computePageList`.
+  // Each page resolves its width / height / margins from the section the
+  // page's first row belongs to. `_resizePages` and `_resizePageBacking`
+  // consume this so each page DOM can have its own dimensions.
+  private _pageGeometryList: Array<{
+    width: number
+    height: number
+    margins: IMargin
+    mainOuterHeight: number
+    contentStartY: number
+    trailingOuterHeight: number
+    contentBottomY: number
+  }> = []
   private painterStyle: IElementStyle | null
   private painterOptions: IPainterOption | null
   private visiblePageNoList: number[]
@@ -658,6 +672,138 @@ export class Draw {
     return Math.floor(this.getOriginalHeight() * this.options.scale)
   }
 
+  /**
+   * Per-section variants of getOriginalWidth / getOriginalHeight / getWidth /
+   * getHeight — return the page geometry implied by a resolved section
+   * properties bag (paperDirection + paperSize). Used by the wrap pass and
+   * `_computePageList` so each page can have its own width/height when
+   * sections override the defaults.
+   */
+  public getOriginalWidthForSection(
+    section: Required<ISectionProperties>
+  ): number {
+    const { paperDirection } = section
+    const { width, height } = section.paperSize
+    return paperDirection === PaperDirection.VERTICAL ? width : height
+  }
+
+  public getOriginalHeightForSection(
+    section: Required<ISectionProperties>
+  ): number {
+    const { paperDirection } = section
+    const { width, height } = section.paperSize
+    return paperDirection === PaperDirection.VERTICAL ? height : width
+  }
+
+  public getWidthForSection(section: Required<ISectionProperties>): number {
+    return Math.floor(
+      this.getOriginalWidthForSection(section) * this.options.scale
+    )
+  }
+
+  public getHeightForSection(section: Required<ISectionProperties>): number {
+    return Math.floor(
+      this.getOriginalHeightForSection(section) * this.options.scale
+    )
+  }
+
+  public getMarginsForSection(
+    section: Required<ISectionProperties>
+  ): IMargin {
+    const scale = this.options.scale
+    return <IMargin>section.margins.map(m => m * scale)
+  }
+
+  public getInnerWidthForSection(
+    section: Required<ISectionProperties>
+  ): number {
+    const width = this.getWidthForSection(section)
+    const margins = this.getMarginsForSection(section)
+    return width - margins[1] - margins[3]
+  }
+
+  public getMainOuterHeightForSection(
+    section: Required<ISectionProperties>
+  ): number {
+    const margins = this.getMarginsForSection(section)
+    const headerExtraHeight = this.header.getExtraHeight()
+    const footerExtraHeight = this.footer.getExtraHeight()
+    return margins[0] + margins[2] + headerExtraHeight + footerExtraHeight
+  }
+
+  /**
+   * Per-page paint geometry — resolved from `_pageGeometryList` (populated
+   * by `_computePageList`) so each page's clearRect / clip / decoration
+   * canvas math uses its own section's dimensions, not editor globals.
+   *
+   * Multi-section docs without these would clip / clear / cache the WRONG
+   * rect: e.g. a portrait page following a landscape one would only have
+   * the leftmost portrait-width region cleared, leaving stale landscape
+   * pixels on the right (exactly the visual artifact you'd see right after
+   * undoing an orientation change).
+   *
+   * Falls back to the editor globals when geometry isn't yet populated
+   * (constructor's initial `_createPage(0)` runs before `_computePageList`).
+   */
+  public getCanvasWidthForPage(pageNo: number): number {
+    return this._pageGeometryList[pageNo]?.width ?? this.getWidth()
+  }
+
+  public getCanvasHeightForPage(pageNo: number): number {
+    return this._pageGeometryList[pageNo]?.height ?? this.getHeight()
+  }
+
+  public getCanvasInnerWidthForPage(pageNo: number): number {
+    const geo = this._pageGeometryList[pageNo]
+    if (!geo) return this.getInnerWidth()
+    return geo.width - geo.margins[1] - geo.margins[3]
+  }
+
+  /**
+   * Read-only access to a page's resolved geometry (width / height /
+   * margins / etc.) for frame renderers (margin indicators, header / footer,
+   * page number, page border, watermark) so they can draw against the
+   * correct section dimensions on multi-section docs.
+   *
+   * Returns `null` when the page hasn't been computed yet — callers should
+   * fall back to the editor-global helpers.
+   */
+  public getPageGeometryForPage(pageNo: number): {
+    width: number
+    height: number
+    margins: IMargin
+    mainOuterHeight: number
+    contentStartY: number
+    trailingOuterHeight: number
+    contentBottomY: number
+  } | null {
+    return this._pageGeometryList[pageNo] ?? null
+  }
+
+  /**
+   * Cumulative top offset of page `pageNo` within the page container,
+   * accounting for per-page heights and page gaps. The legacy formula
+   * `pageNo * (height + pageGap)` assumes uniform pages — when sections
+   * override paperDirection / paperSize the page heights diverge and the
+   * cursor / page-number / any DOM overlay positioned by that formula ends
+   * up on the wrong page.
+   *
+   * Falls back to the uniform-page formula when no geometry has been
+   * computed yet (e.g. constructor's initial `_createPage(0)`).
+   */
+  public getPageOffsetY(pageNo: number): number {
+    const pageGap = this.getPageGap()
+    if (!this._pageGeometryList.length) {
+      return pageNo * (this.getHeight() + pageGap)
+    }
+    let y = 0
+    for (let i = 0; i < pageNo; i++) {
+      const geo = this._pageGeometryList[i]
+      y += (geo?.height ?? this.getHeight()) + pageGap
+    }
+    return y
+  }
+
   public getMainHeight(): number {
     const pageHeight = this.getHeight()
     return pageHeight - this.getMainOuterHeight()
@@ -752,6 +898,123 @@ export class Draw {
       }
     }
     return pageColumns
+  }
+
+  /**
+   * Resolve section properties (paperDirection / paperSize / margins) at a
+   * given element index. Walks forward 0..index merging each set of overrides
+   * onto the accumulator so the most recent override wins per field. Fields
+   * not overridden fall back to the editor options — preserves zero-config
+   * behaviour for docs with no `sectionProperties` overrides.
+   *
+   * Mirrors `getPageColumnsAtIndex`: run-length encoded properties on the
+   * element list, resolved on demand.
+   */
+  public getSectionPropertiesAtIndex(
+    index: number
+  ): Required<ISectionProperties> {
+    const {
+      paperDirection: defaultDirection,
+      width: defaultWidth,
+      height: defaultHeight,
+      margins: defaultMargins
+    } = this.options
+    const makeDefaults = (): Required<ISectionProperties> => ({
+      paperDirection: defaultDirection,
+      paperSize: { width: defaultWidth, height: defaultHeight },
+      margins: [
+        defaultMargins[0],
+        defaultMargins[1],
+        defaultMargins[2],
+        defaultMargins[3]
+      ]
+    })
+    let acc = makeDefaults()
+    const maxIndex = Math.min(index, this.elementList.length - 1)
+    if (maxIndex < 0) return acc
+    for (let i = 0; i <= maxIndex; i++) {
+      const el = this.elementList[i]
+      // Word semantics: page-forcing section breaks end the previous section,
+      // so any cascading override stops at the break. The next section starts
+      // fresh from the editor defaults until one of its own elements opts in
+      // again. Without this reset, applying landscape on section 1 would
+      // bleed into section 2 (and so on through the doc).
+      if (
+        el.type === ElementType.SECTION_BREAK &&
+        el.sectionBreakType !== SectionBreakType.CONTINUOUS
+      ) {
+        acc = makeDefaults()
+        continue
+      }
+      const overrides = el.sectionProperties
+      if (!overrides) continue
+      if (overrides.paperDirection !== undefined) {
+        acc.paperDirection = overrides.paperDirection
+      }
+      if (overrides.paperSize) {
+        acc.paperSize = {
+          width: overrides.paperSize.width,
+          height: overrides.paperSize.height
+        }
+      }
+      if (overrides.margins) {
+        acc.margins = [
+          overrides.margins[0],
+          overrides.margins[1],
+          overrides.margins[2],
+          overrides.margins[3]
+        ]
+      }
+    }
+    return acc
+  }
+
+  /** Resolve effective paper direction at an element index. */
+  public getEffectivePaperDirectionAtIndex(index: number): PaperDirection {
+    return this.getSectionPropertiesAtIndex(index).paperDirection
+  }
+
+  /**
+   * Editor-default section properties: paperDirection / paperSize / margins
+   * straight out of `this.options`. Used as the reset value whenever a
+   * page-forcing section break ends the previous section's cascade — every
+   * new section starts fresh from these defaults until one of its own
+   * elements re-introduces an override.
+   */
+  public getDefaultSectionProperties(): Required<ISectionProperties> {
+    const {
+      paperDirection,
+      width,
+      height,
+      margins
+    } = this.options
+    return {
+      paperDirection,
+      paperSize: { width, height },
+      margins: [margins[0], margins[1], margins[2], margins[3]]
+    }
+  }
+
+  /**
+   * Compare two section-property bags for full equality. Used by the wrap
+   * pass to decide whether transitioning into a new element should create a
+   * new section context.
+   */
+  public isSameSectionProperties(
+    left: Required<ISectionProperties>,
+    right: Required<ISectionProperties>
+  ): boolean {
+    if (left.paperDirection !== right.paperDirection) return false
+    if (
+      left.paperSize.width !== right.paperSize.width ||
+      left.paperSize.height !== right.paperSize.height
+    ) {
+      return false
+    }
+    for (let m = 0; m < 4; m++) {
+      if (left.margins[m] !== right.margins[m]) return false
+    }
+    return true
   }
 
   public getColumnCount(pageColumns?: IPageColumns | null): number {
@@ -1744,8 +2007,17 @@ export class Draw {
     const width = this.getWidth()
     const height = this.getHeight()
     this.container.style.width = `${width}px`
+    // Each page may carry its own section geometry — resize accordingly.
+    // Pages without recorded geometry (e.g. before first compute) fall back
+    // to the editor-global width/height.
     for (let i = 0; i < this.pageList.length; i++) {
-      this._resizePageBacking(i, width, height, dpr)
+      const geo = this._pageGeometryList[i]
+      this._resizePageBacking(
+        i,
+        geo ? geo.width : width,
+        geo ? geo.height : height,
+        dpr
+      )
     }
     if (canFastPath) {
       this._scaleLayoutInPlace(this.rowList, ratio, payload)
@@ -1915,7 +2187,13 @@ export class Draw {
     const width = this.getWidth()
     const height = this.getHeight()
     for (let i = 0; i < this.pageList.length; i++) {
-      this._resizePageBacking(i, width, height, dpr)
+      const geo = this._pageGeometryList[i]
+      this._resizePageBacking(
+        i,
+        geo ? geo.width : width,
+        geo ? geo.height : height,
+        dpr
+      )
     }
     this.render({
       isSubmitHistory: false,
@@ -1924,42 +2202,301 @@ export class Draw {
   }
 
   public setPaperSize(width: number, height: number) {
-    this.options.width = width
-    this.options.height = height
-    const dpr = this.getPagePixelRatio()
-    const realWidth = this.getWidth()
-    const realHeight = this.getHeight()
-    this.container.style.width = `${realWidth}px`
-    for (let i = 0; i < this.pageList.length; i++) {
-      this._resizePageBacking(i, realWidth, realHeight, dpr)
-    }
-    this.render({
-      isSubmitHistory: false,
-      isSetCursor: false
-    })
+    // Apply to the section containing the cursor; falls back to the doc-level
+    // option when the cursor's section is the final/body section.
+    // Wrapped in `_submitSectionGeometryDelta` so undo restores the prior
+    // paper size (matches the section-properties undo story).
+    this._submitSectionGeometryDelta(
+      { paperSize: { width, height } },
+      { paperSize: { width, height } }
+    )
   }
 
   public setPaperDirection(payload: PaperDirection) {
-    const dpr = this.getPagePixelRatio()
-    this.options.paperDirection = payload
-    const width = this.getWidth()
-    const height = this.getHeight()
-    this.container.style.width = `${width}px`
-    for (let i = 0; i < this.pageList.length; i++) {
-      this._resizePageBacking(i, width, height, dpr)
+    this._submitSectionGeometryDelta(
+      { paperDirection: payload },
+      { paperDirection: payload }
+    )
+  }
+
+  public setPaperMargin(payload: IMargin) {
+    this._submitSectionGeometryDelta(
+      { margins: payload },
+      { margins: payload }
+    )
+  }
+
+  /**
+   * Find the boundaries of the section containing element index `idx`. A
+   * section is delimited by SECTION_BREAK elements with a page-forcing type
+   * (NEXT_PAGE / EVEN_PAGE / ODD_PAGE); CONTINUOUS breaks don't reset the
+   * page so they're treated as in-section. Returns [start, end] where
+   * `start` is the first element of the section and `end` is one past the
+   * last (so [start, end) is the half-open slice).
+   */
+  private _findSectionBoundsAt(idx: number): { start: number; end: number } {
+    const list = this.elementList
+    const len = list.length
+    if (len === 0) return { start: 0, end: 0 }
+    const isPageStartingBreak = (el: IElement): boolean =>
+      el.type === ElementType.SECTION_BREAK &&
+      el.sectionBreakType !== SectionBreakType.CONTINUOUS
+    let start = 0
+    for (let i = idx - 1; i >= 0; i--) {
+      if (isPageStartingBreak(list[i])) {
+        start = i + 1
+        break
+      }
+    }
+    let end = len
+    for (let i = Math.max(0, idx); i < len; i++) {
+      if (isPageStartingBreak(list[i])) {
+        end = i
+        break
+      }
+    }
+    return { start, end }
+  }
+
+  /**
+   * Apply paper-direction / paper-size / margins change for the cursor's
+   * section AND push a delta to history so Ctrl+Z restores the prior
+   * geometry. Mirrors Word's "Apply to: This Section" behaviour:
+   *
+   *   - Doc has elements → write override to the section's start element
+   *     (the element following the previous page-forcing SECTION_BREAK, or
+   *     index 0). `optionFallback` is ignored in this branch — the option
+   *     stays untouched so other sections that inherit it aren't disturbed.
+   *
+   *   - Doc is empty → no element to attach to, fall back to mutating the
+   *     editor-level options as captured in `optionFallback`.
+   *
+   * The first half of `setPaperDirection` (etc.) used to do this inline
+   * with `isSubmitHistory: false`, which meant undo couldn't restore the
+   * prior value. Now both branches capture before/after state and push a
+   * delta via `historyManager.executeDelta` so the change is undoable.
+   */
+  private _submitSectionGeometryDelta(
+    sectionOverrides: Partial<ISectionProperties>,
+    optionFallback: Partial<{
+      paperDirection: PaperDirection
+      paperSize: { width: number; height: number }
+      margins: IMargin
+    }>
+  ): void {
+    const hasElements = !!this.elementList.length
+    let target: 'element' | 'options' | 'root-section'
+    let elementIndex = -1
+    let beforeElementProps: ISectionProperties | undefined
+    let afterElementProps: ISectionProperties | undefined
+    const beforeOptionValues: typeof optionFallback = {}
+    const afterOptionValues: typeof optionFallback = {}
+    const stripSectionOverrideFields = (
+      props: ISectionProperties | undefined
+    ): ISectionProperties | undefined => {
+      if (!props) return undefined
+      const next: ISectionProperties = { ...props }
+      if (sectionOverrides.paperDirection !== undefined) {
+        delete next.paperDirection
+      }
+      if (sectionOverrides.paperSize !== undefined) {
+        delete next.paperSize
+      }
+      if (sectionOverrides.margins !== undefined) {
+        delete next.margins
+      }
+      return Object.keys(next).length ? next : undefined
+    }
+    if (hasElements) {
+      const range = this.range.getRange()
+      const cursorIndex = range.startIndex >= 0 ? range.startIndex : 0
+      const { start } = this._findSectionBoundsAt(cursorIndex)
+      elementIndex = start
+      const el = this.elementList[elementIndex]
+      if (!el) return
+      beforeElementProps = el.sectionProperties
+        ? deepClone(el.sectionProperties)
+        : undefined
+      if (start === 0) {
+        target = 'root-section'
+        if (optionFallback.paperDirection !== undefined) {
+          beforeOptionValues.paperDirection = this.options.paperDirection
+          afterOptionValues.paperDirection = optionFallback.paperDirection
+        }
+        if (optionFallback.paperSize !== undefined) {
+          beforeOptionValues.paperSize = {
+            width: this.options.width,
+            height: this.options.height
+          }
+          afterOptionValues.paperSize = optionFallback.paperSize
+        }
+        if (optionFallback.margins !== undefined) {
+          beforeOptionValues.margins = [
+            this.options.margins[0],
+            this.options.margins[1],
+            this.options.margins[2],
+            this.options.margins[3]
+          ]
+          afterOptionValues.margins = [
+            optionFallback.margins[0],
+            optionFallback.margins[1],
+            optionFallback.margins[2],
+            optionFallback.margins[3]
+          ]
+        }
+        afterElementProps = stripSectionOverrideFields(beforeElementProps)
+      } else {
+        target = 'element'
+        afterElementProps = {
+          ...(el.sectionProperties ?? {}),
+          ...sectionOverrides
+        }
+      }
+    } else {
+      target = 'options'
+      // Snapshot affected option fields so undo restores exactly what
+      // changed and nothing else.
+      if (optionFallback.paperDirection !== undefined) {
+        beforeOptionValues.paperDirection = this.options.paperDirection
+        afterOptionValues.paperDirection = optionFallback.paperDirection
+      }
+      if (optionFallback.paperSize !== undefined) {
+        beforeOptionValues.paperSize = {
+          width: this.options.width,
+          height: this.options.height
+        }
+        afterOptionValues.paperSize = optionFallback.paperSize
+      }
+      if (optionFallback.margins !== undefined) {
+        beforeOptionValues.margins = [
+          this.options.margins[0],
+          this.options.margins[1],
+          this.options.margins[2],
+          this.options.margins[3]
+        ]
+        afterOptionValues.margins = [
+          optionFallback.margins[0],
+          optionFallback.margins[1],
+          optionFallback.margins[2],
+          optionFallback.margins[3]
+        ]
+      }
+    }
+    // Closures capture target / index / before / after by closure so the
+    // same arrow functions can be replayed on each undo/redo cycle. We
+    // re-resolve the section's end on each apply (elements may have shifted
+    // since capture) so the markDirty range stays current.
+    const applyElementMutation = (
+      props: ISectionProperties | undefined
+    ): void => {
+      const el = this.elementList[elementIndex]
+      if (!el) return
+      if (props === undefined) {
+        delete el.sectionProperties
+      } else {
+        el.sectionProperties = deepClone(props)
+      }
+      const { end } = this._findSectionBoundsAt(elementIndex)
+      // PERF-PLAN §2.2: direct property mutation bypasses spliceElementList,
+      // so the incremental layout path has no _dirtyRange to seed from —
+      // that's what would force a 2-second full computeRowList for a 33-
+      // page doc. Mark just this section dirty so rows outside it stay on
+      // their existing checkpoints.
+      this.markDirty(elementIndex, Math.max(elementIndex, end - 1))
+    }
+    const applyOptionMutation = (
+      values: typeof optionFallback
+    ): void => {
+      if (values.paperDirection !== undefined) {
+        this.options.paperDirection = values.paperDirection
+      }
+      if (values.paperSize !== undefined) {
+        this.options.width = values.paperSize.width
+        this.options.height = values.paperSize.height
+      }
+      if (values.margins !== undefined) {
+        this.options.margins = values.margins
+      }
+    }
+    const applyRootSectionMutation = (
+      values: typeof optionFallback,
+      props: ISectionProperties | undefined
+    ): void => {
+      applyOptionMutation(values)
+      const el = this.elementList[elementIndex]
+      if (!el) return
+      if (props === undefined) {
+        delete el.sectionProperties
+      } else {
+        el.sectionProperties = deepClone(props)
+      }
+    }
+    const applyForward = () => {
+      if (target === 'element') {
+        applyElementMutation(afterElementProps)
+      } else if (target === 'root-section') {
+        applyRootSectionMutation(afterOptionValues, afterElementProps)
+      } else {
+        applyOptionMutation(afterOptionValues)
+      }
+      this.render({
+        isSubmitHistory: false,
+        isSourceHistory: true,
+        isSetCursor: false
+      })
+    }
+    const applyBackward = () => {
+      if (target === 'element') {
+        applyElementMutation(beforeElementProps)
+      } else if (target === 'root-section') {
+        applyRootSectionMutation(beforeOptionValues, beforeElementProps)
+      } else {
+        applyOptionMutation(beforeOptionValues)
+      }
+      this.render({
+        isSubmitHistory: false,
+        isSourceHistory: true,
+        isSetCursor: false
+      })
+    }
+    // No-op guard: clicking the same paper-direction / margin button twice
+    // shouldn't push duplicate undo entries (matches the typing batch's
+    // "collapse identical states" intuition).
+    const isNoOp = (): boolean => {
+      if (target === 'element') {
+        return (
+          JSON.stringify(beforeElementProps ?? null) ===
+          JSON.stringify(afterElementProps ?? null)
+        )
+      }
+      if (target === 'root-section') {
+        return (
+          JSON.stringify(beforeOptionValues) ===
+            JSON.stringify(afterOptionValues) &&
+          JSON.stringify(beforeElementProps ?? null) ===
+            JSON.stringify(afterElementProps ?? null)
+        )
+      }
+      return (
+        JSON.stringify(beforeOptionValues) ===
+        JSON.stringify(afterOptionValues)
+      )
+    }
+    if (isNoOp()) return
+    // Apply forward once for the user-triggered call (without isSourceHistory
+    // so external listeners can distinguish a fresh action from a replay).
+    if (target === 'element') {
+      applyElementMutation(afterElementProps)
+    } else if (target === 'root-section') {
+      applyRootSectionMutation(afterOptionValues, afterElementProps)
+    } else {
+      applyOptionMutation(afterOptionValues)
     }
     this.render({
       isSubmitHistory: false,
       isSetCursor: false
     })
-  }
-
-  public setPaperMargin(payload: IMargin) {
-    this.options.margins = payload
-    this.render({
-      isSubmitHistory: false,
-      isSetCursor: false
-    })
+    this.historyManager.executeDelta({ applyForward, applyBackward })
   }
 
   public getOriginValue(
@@ -2228,6 +2765,9 @@ export class Draw {
         listIndex: 0,
         controlRealWidth: 0,
         currentPageColumns: this.normalizePageColumns(undefined),
+        // Document-start checkpoint: the active section is the body default
+        // (no element-level overrides have been applied yet at index < 0).
+        currentSectionProperties: this.getSectionPropertiesAtIndex(-1),
         surroundElementList: []
       }
     }
@@ -2392,8 +2932,12 @@ export class Draw {
   }
 
   private _createPage(pageNo: number) {
-    const width = this.getWidth()
-    const height = this.getHeight()
+    // If `_computePageList` has populated geometry for this page (multi-
+    // section docs), use the per-page size; otherwise fall back to the
+    // editor-global getWidth/getHeight for backwards compat.
+    const geo = this._pageGeometryList[pageNo]
+    const width = geo ? geo.width : this.getWidth()
+    const height = geo ? geo.height : this.getHeight()
     const dpr = this.getPagePixelRatio()
     const isLayered = this._isPageLayered()
 
@@ -2535,6 +3079,50 @@ export class Draw {
     }
   }
 
+  /**
+   * Per-page DOM resize. After `_computePageList` has populated
+   * `_pageGeometryList`, walk every existing page DOM and resize it if its
+   * size disagrees with the geometry assigned to that page's section. Idem-
+   * potent: pages already at the right size skip the resize (so we don't
+   * spuriously clear canvas bitmaps).
+   *
+   * This is the second half of the "per-section paper geometry" feature —
+   * the first half (`_computePageList`) tells us *what* size each page
+   * should be; this method makes the DOM agree.
+   */
+  private _syncPageGeometryToDom() {
+    if (!this._pageGeometryList.length) return
+    const dpr = this.getPagePixelRatio()
+    // Editor container width: track the widest page so horizontal scrollbar
+    // appears when even one section has landscape sized content.
+    let widest = 0
+    for (let i = 0; i < this.pageList.length; i++) {
+      const geo = this._pageGeometryList[i]
+      if (!geo) continue
+      if (geo.width > widest) widest = geo.width
+      const base = this.pageList[i]
+      const currentW = Number(base.style.width.replace('px', ''))
+      const currentH = Number(base.style.height.replace('px', ''))
+      if (currentW !== geo.width || currentH !== geo.height) {
+        this._resizePageBacking(i, geo.width, geo.height, dpr)
+        // Invalidate cached paints + chrome for this page — its geometry
+        // changed, so the cached bitmap is stale even if the rendered
+        // content would be identical. The chrome cache key already includes
+        // pageWidth/height/margins, so it would invalidate on its own next
+        // time — but we null it eagerly here so a partial-paint optimization
+        // can't accidentally reuse the stale chrome canvas.
+        this._drawnPages.delete(i)
+        this._decorationDrawnPages.delete(i)
+        if (this.chromeCacheKeyList[i] !== undefined) {
+          this.chromeCacheKeyList[i] = null
+        }
+      }
+    }
+    if (widest > 0) {
+      this.container.style.width = `${widest}px`
+    }
+  }
+
   private _initPageContext(ctx: CanvasRenderingContext2D) {
     const dpr = this.getPagePixelRatio()
     ctx.scale(dpr, dpr)
@@ -2658,6 +3246,7 @@ export class Draw {
     }
     // 重算页列表和位置
     this.pageRowList = this._computePageList()
+    this._syncPageGeometryToDom()
     this.position.computePositionList()
     this.area.compute()
     // 清空挂起的 rAF 渲染队列——否则 render() 的 OR 合并会将
@@ -2680,11 +3269,18 @@ export class Draw {
       isFromTable = false,
       startX = 0,
       startY = 0,
-      pageHeight = 0,
-      mainOuterHeight = 0,
+      pageHeight: payloadPageHeight = 0,
+      mainOuterHeight: payloadMainOuterHeight = 0,
       checkpointSink,
       resumeFrom
     } = payload
+    // PER-SECTION GEOMETRY: payload-supplied pageHeight / mainOuterHeight are
+    // editor-globals captured before this call. When section-properties
+    // overrides exist in the element list, the wrap pass switches to the
+    // section-resolved values; these locals are the live "current" view.
+    // For nested tables we keep the table-cell innerWidth bypass intact.
+    let pageHeight = payloadPageHeight
+    let mainOuterHeight = payloadMainOuterHeight
     // surroundElementList 在循环里会就地裁剪（deleteSurroundElementList），
     // 因此在 resumeFrom 路径下不能继续沿用调用方传入的引用——
     // 必须从 checkpoint 快照恢复一份独立拷贝。
@@ -2702,6 +3298,7 @@ export class Draw {
     const listStyleMap = this.listParticle.computeListStyle(ctx, elementList)
     let rowList: IRow[]
     let currentPageColumns: Required<IPageColumns>
+    let currentSectionProperties: Required<ISectionProperties>
     let x: number
     let y: number
     let pageNo: number
@@ -2709,6 +3306,35 @@ export class Draw {
     let listIndex: number
     let controlRealWidth: number
     let i: number
+    // Helper: when the active section flips (paperDirection / paperSize /
+    // margins), the wrap pass's pageHeight + mainOuterHeight + the row's
+    // effective inner-width all have to track the new section. We avoid
+    // touching the table-cell path (isFromTable=true) — tables keep their
+    // caller-supplied innerWidth.
+    const recomputeSectionGeometry = () => {
+      if (isFromTable) return
+      pageHeight = this.getHeightForSection(currentSectionProperties)
+      mainOuterHeight = this.getMainOuterHeightForSection(
+        currentSectionProperties
+      )
+    }
+    const sectionPageInnerWidth = (): number =>
+      isFromTable
+        ? innerWidth
+        : this.getInnerWidthForSection(currentSectionProperties)
+    // Inner width for the current section + current column layout (used as
+    // each row's `innerWidth`). Mirrors the existing getColumnInnerWidth but
+    // pulls the page innerWidth from the active section instead of globals.
+    const sectionColumnInnerWidth = (
+      pageColumns: Required<IPageColumns>
+    ): number => {
+      if (isFromTable) return innerWidth
+      const baseInner = sectionPageInnerWidth()
+      const count = this.getColumnCount(pageColumns)
+      if (count <= 1) return baseInner
+      const totalGap = this.getColumnGap(pageColumns) * (count - 1)
+      return Math.floor((baseInner - totalGap) / count)
+    }
 
     if (resumeFrom) {
       // PERF-PLAN §2.2 / Phase 2B：从已捕获的 checkpoint 恢复布局。
@@ -2723,6 +3349,21 @@ export class Draw {
       listIndex = ckpt.listIndex
       controlRealWidth = ckpt.controlRealWidth
       currentPageColumns = ckpt.currentPageColumns
+      // Section properties have to be re-resolved from the *current* element
+      // list rather than trusted from the checkpoint: when an undo / redo
+      // toggles a `sectionProperties` override on the resume-point element,
+      // the cached value reflects the previous render's state, but the
+      // wrap-pass switch below only fires on `if (element.sectionProperties)`
+      // — so a deleted override would silently leak the old section's
+      // geometry forward. Walking the element list to (startIndex - 1) gives
+      // us the geometry that was active just before the resume element, which
+      // is the correct seed for the next iteration.
+      currentSectionProperties = isFromTable
+        ? this.getSectionPropertiesAtIndex(-1)
+        : this.getSectionPropertiesAtIndex(
+            Math.max(-1, resumeFrom.startElementIndex - 1)
+          )
+      recomputeSectionGeometry()
       // surround 列表使用 checkpoint 快照的副本——后续循环里 deleteSurroundElementList
       // 会就地裁剪，不能直接绑回原数组。
       surroundElementList = ckpt.surroundElementList.slice()
@@ -2741,6 +3382,13 @@ export class Draw {
           ? { columnCount: 1, columnGap: 0 }
           : elementList[0]?.pageColumns
       )
+      // Seed currentSectionProperties from the first element's resolved bag.
+      // For table cells we ignore section overrides (cells render inside their
+      // owning page's section) so the cell's own width math stays untouched.
+      currentSectionProperties = isFromTable
+        ? this.getSectionPropertiesAtIndex(-1)
+        : this.getSectionPropertiesAtIndex(0)
+      recomputeSectionGeometry()
       if (elementList.length) {
         rowList.push({
           width: 0,
@@ -2753,9 +3401,20 @@ export class Draw {
           rowIndex: 0,
           rowFlex: elementList?.[0]?.rowFlex || elementList?.[1]?.rowFlex,
           pageColumns: currentPageColumns,
-          innerWidth: isFromTable
-            ? innerWidth
-            : this.getColumnInnerWidth(currentPageColumns)
+          innerWidth: sectionColumnInnerWidth(currentPageColumns),
+          pageDirection: currentSectionProperties.paperDirection,
+          pageWidth: isFromTable
+            ? this.getWidth()
+            : this.getWidthForSection(currentSectionProperties),
+          pageHeight: isFromTable
+            ? this.getHeight()
+            : this.getHeightForSection(currentSectionProperties),
+          pageMargins: isFromTable
+            ? this.getMargins()
+            : this.getMarginsForSection(currentSectionProperties),
+          pageMainOuterHeight: isFromTable
+            ? this.getMainOuterHeight()
+            : this.getMainOuterHeightForSection(currentSectionProperties)
         })
       }
       // 起始位置及页码计算
@@ -2781,6 +3440,7 @@ export class Draw {
             listIndex,
             controlRealWidth,
             currentPageColumns,
+            currentSectionProperties,
             surroundElementList: surroundElementList.length
               ? surroundElementList.slice()
               : []
@@ -2802,6 +3462,7 @@ export class Draw {
             listIndex,
             controlRealWidth,
             currentPageColumns,
+            currentSectionProperties,
             surroundElementList: surroundElementList.length
               ? surroundElementList.slice()
               : []
@@ -2821,13 +3482,97 @@ export class Draw {
           rowIndex: 0,
           rowFlex: elementList[i]?.rowFlex || elementList[i + 1]?.rowFlex,
           pageColumns: currentPageColumns,
-          innerWidth: isFromTable
-            ? innerWidth
-            : this.getColumnInnerWidth(currentPageColumns)
+          innerWidth: sectionColumnInnerWidth(currentPageColumns),
+          pageDirection: currentSectionProperties.paperDirection,
+          pageWidth: isFromTable
+            ? this.getWidth()
+            : this.getWidthForSection(currentSectionProperties),
+          pageHeight: isFromTable
+            ? this.getHeight()
+            : this.getHeightForSection(currentSectionProperties),
+          pageMargins: isFromTable
+            ? this.getMargins()
+            : this.getMarginsForSection(currentSectionProperties),
+          pageMainOuterHeight: isFromTable
+            ? this.getMainOuterHeight()
+            : this.getMainOuterHeightForSection(currentSectionProperties)
         })
       }
       let curRow: IRow = rowList[rowList.length - 1]
       const element = elementList[i]
+      // Section boundary reset: the element right after a page-forcing
+      // section break starts a brand-new section, so the previous section's
+      // override cascade has to stop here. Without this, applying landscape
+      // on section 1 would leak into section 2 (and undo of section 2's
+      // own override would inherit landscape from section 1 instead of
+      // reverting to defaults).
+      const prevEl = i > 0 ? elementList[i - 1] : undefined
+      if (
+        !isFromTable &&
+        prevEl?.type === ElementType.SECTION_BREAK &&
+        prevEl.sectionBreakType !== SectionBreakType.CONTINUOUS
+      ) {
+        const defaults = this.getDefaultSectionProperties()
+        if (
+          !this.isSameSectionProperties(currentSectionProperties, defaults)
+        ) {
+          currentSectionProperties = defaults
+          recomputeSectionGeometry()
+        }
+      }
+      // Section-properties transition (paperDirection / paperSize / margins).
+      // When an override appears mid-flow we update the active section
+      // state and force a wrap on the current element below — that way the
+      // current element gets a fresh row tagged with the new geometry, and
+      // we don't leave a stale empty-row sentinel behind in the row list
+      // (which would otherwise wedge the page-right-after-the-section-break
+      // at the old geometry on subsequent toggles — the binary search in
+      // `_tryBuildResumeFrom` picks the *last* row whose `startIndex <= K`,
+      // so the empty row stays in the prefix and `_computePageList` reads
+      // its stale `pageWidth/Height` when sizing the new page).
+      //
+      // Skipped for table-cell layout: sections only apply to the main flow.
+      let sectionPropertiesChanged = false
+      if (!isFromTable && element.sectionProperties) {
+        const merged: Required<ISectionProperties> = {
+          paperDirection:
+            element.sectionProperties.paperDirection ??
+            currentSectionProperties.paperDirection,
+          paperSize: element.sectionProperties.paperSize
+            ? { ...element.sectionProperties.paperSize }
+            : { ...currentSectionProperties.paperSize },
+          margins: element.sectionProperties.margins
+            ? <IMargin>[...element.sectionProperties.margins]
+            : <IMargin>[...currentSectionProperties.margins]
+        }
+        if (!this.isSameSectionProperties(currentSectionProperties, merged)) {
+          currentSectionProperties = merged
+          recomputeSectionGeometry()
+          sectionPropertiesChanged = true
+          if (!curRow.elementList.length) {
+            // Seed row hasn't been filled yet — safe to retag its geometry
+            // in place. Used by the doc-start path and the row that the
+            // wrap branch is about to create for the new section's first
+            // element.
+            curRow.innerWidth = sectionColumnInnerWidth(currentPageColumns)
+            curRow.pageDirection = currentSectionProperties.paperDirection
+            curRow.pageWidth = this.getWidthForSection(currentSectionProperties)
+            curRow.pageHeight = this.getHeightForSection(
+              currentSectionProperties
+            )
+            curRow.pageMargins = this.getMarginsForSection(
+              currentSectionProperties
+            )
+            curRow.pageMainOuterHeight = this.getMainOuterHeightForSection(
+              currentSectionProperties
+            )
+          }
+          // When curRow already has elements, intentionally do NOT push a
+          // placeholder row — the wrap below sees `sectionPropertiesChanged`
+          // via `isForceBreak` and pushes a single row for this element
+          // with the new geometry baked in.
+        }
+      }
       if (!isFromTable && element.pageColumns) {
         const nextPageColumns = this.normalizePageColumns(element.pageColumns)
         if (!this.isSamePageColumns(currentPageColumns, nextPageColumns)) {
@@ -2845,9 +3590,14 @@ export class Draw {
               rowFlex:
                 elementList?.[i]?.rowFlex || elementList?.[i + 1]?.rowFlex,
               pageColumns: currentPageColumns,
-              innerWidth: isFromTable
-                ? innerWidth
-                : this.getColumnInnerWidth(currentPageColumns)
+              innerWidth: sectionColumnInnerWidth(currentPageColumns),
+              pageDirection: currentSectionProperties.paperDirection,
+              pageWidth: this.getWidthForSection(currentSectionProperties),
+              pageHeight: this.getHeightForSection(currentSectionProperties),
+              pageMargins: this.getMarginsForSection(currentSectionProperties),
+              pageMainOuterHeight: this.getMainOuterHeightForSection(
+                currentSectionProperties
+              )
             })
             // 新行 checkpoint 落盘：与 rowList 长度保持平行
             if (checkpointSink && iterStartCkpt) {
@@ -2858,9 +3608,7 @@ export class Draw {
             y += rowList[rowList.length - 2].height
           } else {
             curRow.pageColumns = currentPageColumns
-            curRow.innerWidth = isFromTable
-              ? innerWidth
-              : this.getColumnInnerWidth(currentPageColumns)
+            curRow.innerWidth = sectionColumnInnerWidth(currentPageColumns)
           }
         }
       }
@@ -3528,7 +4276,13 @@ export class Draw {
           (element.controlComponent === ControlComponent.CHECKBOX ||
             element.controlComponent === ControlComponent.RADIO) &&
           preElement?.controlComponent === ControlComponent.VALUE) ||
-        (i !== 0 && element.value === ZERO && !element.area?.hide)
+        (i !== 0 && element.value === ZERO && !element.area?.hide) ||
+        // Section-properties just changed on this element (paperDirection /
+        // paperSize / margins). The new section's first element must start
+        // a fresh row tagged with the new geometry; without this, a wider
+        // section (landscape) would absorb the current element into the
+        // section break's row instead of opening a new line.
+        sectionPropertiesChanged
       // 是否宽度不足导致换行
       const isWidthNotEnough = curRowWidth > availableWidth
       const isWrap = isForceBreak || isWidthNotEnough
@@ -3545,9 +4299,20 @@ export class Draw {
           rowIndex: curRow.rowIndex + 1,
           rowFlex: elementList[i]?.rowFlex || elementList[i + 1]?.rowFlex,
           pageColumns: currentPageColumns,
-          innerWidth: isFromTable
-            ? innerWidth
-            : this.getColumnInnerWidth(currentPageColumns),
+          innerWidth: sectionColumnInnerWidth(currentPageColumns),
+          pageDirection: currentSectionProperties.paperDirection,
+          pageWidth: isFromTable
+            ? this.getWidth()
+            : this.getWidthForSection(currentSectionProperties),
+          pageHeight: isFromTable
+            ? this.getHeight()
+            : this.getHeightForSection(currentSectionProperties),
+          pageMargins: isFromTable
+            ? this.getMargins()
+            : this.getMarginsForSection(currentSectionProperties),
+          pageMainOuterHeight: isFromTable
+            ? this.getMainOuterHeight()
+            : this.getMainOuterHeightForSection(currentSectionProperties),
           isPageBreak: element.type === ElementType.PAGE_BREAK,
           isColumnBreak: element.type === ElementType.COLUMN_BREAK,
           isSectionBreak: element.type === ElementType.SECTION_BREAK
@@ -3980,33 +4745,92 @@ export class Draw {
       pageMode,
       pageNumber: { maxPageNo }
     } = this.options
-    const height = this.getHeight()
-    const margins = this.getMargins()
     const headerExtraHeight = this.header.getExtraHeight()
-    const marginHeight = this.getMainOuterHeight()
-    const contentStartY = margins[0] + headerExtraHeight
-    const trailingOuterHeight = marginHeight - contentStartY
-    const contentBottomY = height - trailingOuterHeight
+    // Per-section geometry: rather than reading editor globals once, derive
+    // the page-geometry from each row's section-resolved fields baked during
+    // the wrap pass. Rows without baked fields (legacy callers) fall back to
+    // the globals so docs without section overrides keep their behaviour.
+    const defaultGeometry = {
+      width: this.getWidth(),
+      height: this.getHeight(),
+      margins: this.getMargins(),
+      mainOuterHeight: this.getMainOuterHeight()
+    }
+    type PageGeometry = {
+      width: number
+      height: number
+      margins: IMargin
+      mainOuterHeight: number
+      contentStartY: number
+      trailingOuterHeight: number
+      contentBottomY: number
+    }
+    const resolveRowGeometry = (row: IRow): PageGeometry => {
+      const w = row.pageWidth ?? defaultGeometry.width
+      const h = row.pageHeight ?? defaultGeometry.height
+      const m = row.pageMargins ?? defaultGeometry.margins
+      const moh = row.pageMainOuterHeight ?? defaultGeometry.mainOuterHeight
+      const contentStartY = m[0] + headerExtraHeight
+      const trailingOuterHeight = moh - contentStartY
+      return {
+        width: w,
+        height: h,
+        margins: m,
+        mainOuterHeight: moh,
+        contentStartY,
+        trailingOuterHeight,
+        contentBottomY: h - trailingOuterHeight
+      }
+    }
+    // Per-page geometry — index aligned with pageRowList so the page-DOM
+    // resize pass (right after this returns) can size each page canvas
+    // according to its section, not the editor globals.
+    const pageGeometryList: PageGeometry[] = []
+    const firstRowGeometry = this.rowList[0]
+      ? resolveRowGeometry(this.rowList[0])
+      : ({
+          ...defaultGeometry,
+          contentStartY:
+            defaultGeometry.margins[0] + headerExtraHeight,
+          trailingOuterHeight:
+            defaultGeometry.mainOuterHeight -
+            (defaultGeometry.margins[0] + headerExtraHeight),
+          contentBottomY:
+            defaultGeometry.height -
+            (defaultGeometry.mainOuterHeight -
+              (defaultGeometry.margins[0] + headerExtraHeight))
+        } as PageGeometry)
+    pageGeometryList[0] = firstRowGeometry
+    let activeGeometry = firstRowGeometry
     let pageNo = 0
-    let pageHeight = marginHeight
+    // pageHeight here tracks the y-cursor *within* the current page (legacy
+    // naming — confusing but preserved to keep the diff focused). The actual
+    // page outer-dimensions come from activeGeometry.
+    let pageHeight = activeGeometry.mainOuterHeight
     const pushRow = (row: IRow) => {
       if (!pageRowList[pageNo]) {
         pageRowList[pageNo] = []
       }
       pageRowList[pageNo].push(row)
     }
-    const nextPage = (cutIndex: number): boolean => {
+    const nextPage = (cutIndex: number, nextRow?: IRow): boolean => {
       if (Number.isInteger(maxPageNo) && pageNo >= maxPageNo!) {
         this.elementList = this.elementList.slice(0, cutIndex)
         return false
       }
       pageNo++
-      pageHeight = marginHeight
+      // Resolve the new page's geometry from the row that's about to land on
+      // it. This is what makes a NEXT_PAGE section break with a different
+      // paperDirection actually flip dimensions starting on the new page.
+      activeGeometry = nextRow ? resolveRowGeometry(nextRow) : activeGeometry
+      pageGeometryList[pageNo] = activeGeometry
+      pageHeight = activeGeometry.mainOuterHeight
       if (!pageRowList[pageNo]) {
         pageRowList[pageNo] = []
       }
       return true
     }
+    this._pageGeometryList = pageGeometryList
     // Extract the SectionBreakType (if any) carried by the section-break
     // sentinel row preceding `row`. Section-break rows hold exactly one
     // element of type SECTION_BREAK whose `sectionBreakType` is the flavour.
@@ -4025,46 +4849,50 @@ export class Draw {
     // like Word does for duplex/book layouts.
     const advanceForSectionBreak = (
       type: SectionBreakType,
-      cutIndex: number
+      cutIndex: number,
+      nextRow?: IRow
     ): boolean => {
       // CONTINUOUS does not advance pages here — it is handled below by
       // simply not triggering nextPage at all.
       // For NEXT_PAGE / EVEN_PAGE / ODD_PAGE, advance at least once.
-      if (!nextPage(cutIndex)) return false
+      if (!nextPage(cutIndex, nextRow)) return false
       if (type === SectionBreakType.EVEN_PAGE) {
         // Even pages are pageNo 1, 3, 5… i.e. pageNo % 2 === 1.
         if (pageNo % 2 === 0) {
-          if (!nextPage(cutIndex)) return false
+          if (!nextPage(cutIndex, nextRow)) return false
         }
       } else if (type === SectionBreakType.ODD_PAGE) {
         // Odd pages are pageNo 0, 2, 4… i.e. pageNo % 2 === 0.
         if (pageNo % 2 === 1) {
-          if (!nextPage(cutIndex)) return false
+          if (!nextPage(cutIndex, nextRow)) return false
         }
       }
       return true
     }
     if (pageMode === PageMode.CONTINUITY) {
-      // 连续模式下保持单列行为：所有行注入第一列，列索引归零
+      // CONTINUITY mode renders all content into a single tall page. Multi-
+      // section docs with mixed paperDirection don't have a well-defined
+      // continuity geometry, so we fall back to the document-level globals
+      // here (matches pre-section-properties behaviour).
       pageRowList[0] = this.rowList
-      let continuityContentY = contentStartY
+      let continuityContentY = activeGeometry.contentStartY
       for (let i = 0; i < this.rowList.length; i++) {
         const row = this.rowList[i]
         row.columnIndex = 0
         row.innerWidth = this.getInnerWidth()
-        row.pageStartX = margins[3]
+        row.pageStartX = activeGeometry.margins[3]
         row.pageStartY = continuityContentY
         continuityContentY += row.height + (row.offsetY || 0)
       }
-      pageHeight = continuityContentY + trailingOuterHeight
+      pageHeight = continuityContentY + activeGeometry.trailingOuterHeight
       const dpr = this.getPagePixelRatio()
       const pageDom = this.pageList[0]
       const pageDomHeight = Number(pageDom.style.height.replace('px', ''))
       const targetHeight =
         pageHeight > pageDomHeight
           ? pageHeight
-          : pageHeight < height
-            ? height
+          : pageHeight < activeGeometry.height
+            ? activeGeometry.height
             : pageHeight
       // PERF-PLAN — Strategy B：连续模式动态高度调整也必须同步 wrapper /
       // decoration——否则 decoration canvas 会保持创建时的初始高度，下方
@@ -4100,26 +4928,39 @@ export class Draw {
             const forceSectionBreak =
               sectionBreakType !== null &&
               sectionBreakType !== SectionBreakType.CONTINUOUS
-            const overflow = row.height + rowOffsetY + pageHeight > height
+            const overflow =
+              row.height + rowOffsetY + pageHeight > activeGeometry.height
             if (forceSectionBreak) {
-              if (!advanceForSectionBreak(sectionBreakType!, row.startIndex)) {
+              if (
+                !advanceForSectionBreak(
+                  sectionBreakType!,
+                  row.startIndex,
+                  row
+                )
+              ) {
                 return pageRowList
               }
-            } else if (forcePageBreak || (overflow && pageHeight > marginHeight)) {
-              if (!nextPage(row.startIndex)) {
+            } else if (
+              forcePageBreak ||
+              (overflow && pageHeight > activeGeometry.mainOuterHeight)
+            ) {
+              if (!nextPage(row.startIndex, row)) {
                 return pageRowList
               }
             }
+            // Refresh local column innerWidth — the page may have flipped
+            // direction (and thus innerWidth) inside nextPage / advance.
+            const rowInnerWidthForPage = row.innerWidth ?? columnInnerWidth
             row.columnIndex = 0
-            row.innerWidth = columnInnerWidth
-            row.pageStartX = this.getColumnStartX(0, pageColumns)
-            row.pageStartY = pageHeight - trailingOuterHeight
+            row.innerWidth = rowInnerWidthForPage
+            row.pageStartX = activeGeometry.margins[3]
+            row.pageStartY = pageHeight - activeGeometry.trailingOuterHeight
             pushRow(row)
             pageHeight += row.height + rowOffsetY
           }
           continue
         }
-        let sectionTop = pageHeight - trailingOuterHeight
+        let sectionTop = pageHeight - activeGeometry.trailingOuterHeight
         let columnIndex = 0
         let columnHeightList = new Array(columnCount).fill(sectionTop)
         let columnHasContentList = new Array(columnCount).fill(false)
@@ -4132,6 +4973,7 @@ export class Draw {
             sectionRows[i].height + (sectionRows[i].offsetY || 0)
         }
         const computeBalanceThreshold = (top: number, remaining: number) => {
+          const contentBottomY = activeGeometry.contentBottomY
           if (remaining <= 0) return contentBottomY
           const available = contentBottomY - top
           if (available <= 0) return contentBottomY
@@ -4157,10 +4999,12 @@ export class Draw {
             sectionBreakType !== null &&
             sectionBreakType !== SectionBreakType.CONTINUOUS
           if (forceSectionPageBreak) {
-            if (!advanceForSectionBreak(sectionBreakType!, row.startIndex)) {
+            if (
+              !advanceForSectionBreak(sectionBreakType!, row.startIndex, row)
+            ) {
               return pageRowList
             }
-            sectionTop = pageHeight - trailingOuterHeight
+            sectionTop = pageHeight - activeGeometry.trailingOuterHeight
             columnIndex = 0
             columnHeightList = new Array(columnCount).fill(sectionTop)
             columnHasContentList = new Array(columnCount).fill(false)
@@ -4169,10 +5013,10 @@ export class Draw {
               remainingSectionHeight
             )
           } else if (forcePageBreak) {
-            if (!nextPage(row.startIndex)) {
+            if (!nextPage(row.startIndex, row)) {
               return pageRowList
             }
-            sectionTop = pageHeight - trailingOuterHeight
+            sectionTop = pageHeight - activeGeometry.trailingOuterHeight
             columnIndex = 0
             columnHeightList = new Array(columnCount).fill(sectionTop)
             columnHasContentList = new Array(columnCount).fill(false)
@@ -4182,10 +5026,10 @@ export class Draw {
             )
           } else if (forceColumnBreak && columnHasContentList[columnIndex]) {
             if (columnIndex === columnCount - 1) {
-              if (!nextPage(row.startIndex)) {
+              if (!nextPage(row.startIndex, row)) {
                 return pageRowList
               }
-              sectionTop = pageHeight - trailingOuterHeight
+              sectionTop = pageHeight - activeGeometry.trailingOuterHeight
               columnIndex = 0
               columnHeightList = new Array(columnCount).fill(sectionTop)
               columnHasContentList = new Array(columnCount).fill(false)
@@ -4196,25 +5040,25 @@ export class Draw {
             } else {
               columnIndex++
               // 用户主动分列：之后不再做平衡
-              balanceThreshold = contentBottomY
+              balanceThreshold = activeGeometry.contentBottomY
             }
           }
           const projectedHeight =
             columnHeightList[columnIndex] + rowOffsetY + row.height
-          const overflowHard = projectedHeight > contentBottomY
+          const overflowHard = projectedHeight > activeGeometry.contentBottomY
           // 软溢出：以行的中点作判断（"四舍五入"式平衡），
           // 让 col 0 略高于 col 1，与 Google Docs 行为一致；
           // 否则因 Math.ceil + 行高离散，col 0 总是少一行。
           const overflowBalance =
-            balanceThreshold < contentBottomY &&
+            balanceThreshold < activeGeometry.contentBottomY &&
             columnHeightList[columnIndex] + rowOffsetY + row.height / 2 >
               balanceThreshold
           if (overflowHard && columnHasContentList[columnIndex]) {
             if (columnIndex === columnCount - 1) {
-              if (!nextPage(row.startIndex)) {
+              if (!nextPage(row.startIndex, row)) {
                 return pageRowList
               }
-              sectionTop = pageHeight - trailingOuterHeight
+              sectionTop = pageHeight - activeGeometry.trailingOuterHeight
               columnIndex = 0
               columnHeightList = new Array(columnCount).fill(sectionTop)
               columnHasContentList = new Array(columnCount).fill(false)
@@ -4242,7 +5086,8 @@ export class Draw {
           columnHasContentList[columnIndex] = true
           remainingSectionHeight -= row.height + rowOffsetY
         }
-        pageHeight = Math.max(...columnHeightList) + trailingOuterHeight
+        pageHeight =
+          Math.max(...columnHeightList) + activeGeometry.trailingOuterHeight
       }
     }
     return pageRowList
@@ -4713,8 +5558,11 @@ export class Draw {
     if (!this.pageList[pageNo]) {
       // noop
     }
-    const w = this.getWidth()
-    const h = this.getHeight()
+    // Per-page geometry: section overrides mean different pages may have
+    // different dims. Clearing with the global getWidth/Height would leave
+    // stale pixels on pages whose section is larger than the default.
+    const w = this.getCanvasWidthForPage(pageNo)
+    const h = this.getCanvasHeightForPage(pageNo)
     const safeTop = Math.max(0, Math.min(clipTop, h))
     ctx.clearRect(0, safeTop, w, h - safeTop)
     if (decoCtx && decoCtx !== ctx) {
@@ -4737,6 +5585,12 @@ export class Draw {
       height,
       scale
     } = this.options
+    // Per-page geometry: a section override means this specific page's
+    // chrome (page borders / margins indicator / header / footer / page
+    // number / watermark) is laid out against different dims than the doc
+    // default. Including the resolved dims here invalidates the cached
+    // chrome bitmap whenever its section geometry differs from globals.
+    const pageGeo = this._pageGeometryList[pageNo]
     return JSON.stringify({
       pageNo,
       pageCount: this.pageRowList.length,
@@ -4744,6 +5598,9 @@ export class Draw {
       height,
       scale,
       pageMode,
+      pageWidth: pageGeo?.width ?? width,
+      pageHeight: pageGeo?.height ?? height,
+      pageMargins: pageGeo?.margins ?? margins,
       alpha: !this.zone.isMainActive() ? inactiveAlpha : 1,
       isPrintMode: this.mode === EditorMode.PRINT,
       printBackgroundDisabled:
@@ -4780,7 +5637,13 @@ export class Draw {
     const chromeCtx = this.chromeCacheCtxList[pageNo]
     const chromeCanvas = this.chromeCacheCanvasList[pageNo]
     if (!chromeCtx || !chromeCanvas) return
-    chromeCtx.clearRect(0, 0, this.getWidth(), this.getHeight())
+    // Per-page clear (multi-section page geometry).
+    chromeCtx.clearRect(
+      0,
+      0,
+      this.getCanvasWidthForPage(pageNo),
+      this.getCanvasHeightForPage(pageNo)
+    )
     chromeCtx.globalAlpha = !this.zone.isMainActive() ? inactiveAlpha : 1
     if (
       !isPrintMode ||
@@ -4810,7 +5673,7 @@ export class Draw {
       }
     }
     if (!pageBorder.disabled) {
-      this.pageBorder.render(chromeCtx)
+      this.pageBorder.render(chromeCtx, pageNo)
     }
     if (
       !isContinuityMode &&
@@ -4841,7 +5704,11 @@ export class Draw {
     const { elementList, positionList, rowList, pageNo } = payload
     const { inactiveAlpha, lineNumber } = this.options
     const isPrintMode = this.mode === EditorMode.PRINT
-    const innerWidth = this.getInnerWidth()
+    // Per-page innerWidth: a page in a section with a different paperDirection
+    // or margins has a different content-area width than the doc default. The
+    // page-level innerWidth in the drawRow payload influences alignment math
+    // (e.g. justify) for the page header chrome.
+    const innerWidth = this.getCanvasInnerWidthForPage(pageNo)
     const canPartialPaint =
       !suppressDecorationPaint &&
       this._dirtyRange !== null &&
@@ -4857,8 +5724,10 @@ export class Draw {
     const rowListToPaint = partialInfo
       ? rowList.slice(partialInfo.fromRowIndex)
       : rowList
-    const w = this.getWidth()
-    const h = this.getHeight()
+    // Per-page width/height — global getWidth/Height misclips pages whose
+    // section overrides paperDirection / paperSize / margins.
+    const w = this.getCanvasWidthForPage(pageNo)
+    const h = this.getCanvasHeightForPage(pageNo)
     // PERF-PLAN — Strategy B：drawRow 内部 range / table-cross-row paint 时
     // 取这个 ctx 作为目标。打印模式不需要选区——保留 null，落到 base ctx 上
     // 保持原行为（实际打印模式下 startIndex===endIndex，不会画选区）。
@@ -4966,7 +5835,15 @@ export class Draw {
     decoCtx.globalAlpha = !this.zone.isMainActive()
       ? this.options.inactiveAlpha
       : 1
-    decoCtx.clearRect(0, 0, this.getWidth(), this.getHeight())
+    // Per-page clear (multi-section paperDirection). Globals would leave
+    // stale pixels on landscape pages or under-clear portrait ones following
+    // a wider section.
+    decoCtx.clearRect(
+      0,
+      0,
+      this.getCanvasWidthForPage(pageNo),
+      this.getCanvasHeightForPage(pageNo)
+    )
     if (!this._isDecorationActive()) {
       return
     }
@@ -4976,7 +5853,7 @@ export class Draw {
       rowList,
       pageNo,
       startIndex: rowList[0]?.startIndex ?? 0,
-      innerWidth: this.getInnerWidth(),
+      innerWidth: this.getCanvasInnerWidthForPage(pageNo),
       zone: EditorZone.MAIN
     })
     if (this.search.getSearchKeyword()) {
@@ -5020,7 +5897,13 @@ export class Draw {
     decoCtx.globalAlpha = !this.zone.isMainActive()
       ? this.options.inactiveAlpha
       : 1
-    decoCtx.clearRect(0, 0, this.getWidth(), this.getHeight())
+    // Per-page clear; see _recordDecorationOnly for rationale.
+    decoCtx.clearRect(
+      0,
+      0,
+      this.getCanvasWidthForPage(pageNo),
+      this.getCanvasHeightForPage(pageNo)
+    )
     // B-β.1：装饰层逻辑「空状态」——选区收起、无搜索、非跨行表格选区时直接
     // 跳过整轮行遍历。clearRect 已经把上一帧的内容擦掉，绘制阶段无事可做。
     if (!this._isDecorationActive()) {
@@ -5780,6 +6663,7 @@ export class Draw {
         // 在新 scale 下重建。
         this.position.setFloatPositionList([])
         this.pageRowList = this._computePageList()
+        this._syncPageGeometryToDom()
         this.position.computePositionList()
         this.area.compute()
         if (!this.isPrintMode()) {
@@ -6001,6 +6885,7 @@ export class Draw {
         this._mainLayoutSig = this._buildLayoutSig({ isPagingMode, innerWidth })
         // 页面信息
         this.pageRowList = this._computePageList()
+        this._syncPageGeometryToDom()
         trace?.mark('_computePageList')
         // 位置信息——PERF-PLAN §2.3 增量分支：仅当 §2.2 的增量路径成立时启用，
         // 与 row prefix 同步保留 positionList prefix，省下 ~O(N) 对象构造。

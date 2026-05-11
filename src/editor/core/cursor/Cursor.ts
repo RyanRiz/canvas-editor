@@ -119,9 +119,6 @@ export class Cursor {
       isFocus = true,
       hitLineStartIndex
     } = { ...cursor, ...payload }
-    // 设置光标代理
-    const height = this.draw.getHeight()
-    const pageGap = this.draw.getPageGap()
     // 光标位置
     this.hitLineStartIndex = hitLineStartIndex
     if (hitLineStartIndex) {
@@ -138,7 +135,13 @@ export class Cursor {
     const curPageNo = zoneManager.isMainActive()
       ? pageNo
       : this.draw.getPageNo()
-    const preY = curPageNo * (height + pageGap)
+    // Multi-section docs may have pages of different heights, so the cursor's
+    // cumulative top offset can't be `curPageNo * (pageHeight + gap)` — that
+    // would place the cursor on the wrong page whenever an earlier section
+    // overrode paperDirection / paperSize. `getPageOffsetY` walks the
+    // per-page geometry list (with fall-back to the uniform formula for
+    // single-section docs).
+    const preY = this.draw.getPageOffsetY(curPageNo)
     // 默认偏移高度
     const defaultOffsetHeight = CURSOR_AGENT_OFFSET_HEIGHT * scale
     // Keep the caret close to the glyph box after custom baseline adjustments.

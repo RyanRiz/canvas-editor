@@ -13,12 +13,17 @@ export class Margin {
 
   public render(ctx: CanvasRenderingContext2D, pageNo: number) {
     const { marginIndicatorColor, pageMode } = this.options
-    const width = this.draw.getWidth()
+    // Per-page geometry: in multi-section docs, this page's paperDirection /
+    // paperSize / margins may differ from the editor-global defaults. Draw
+    // the corner markers against the page's own dimensions so they line up
+    // with the actual content area on landscape / oversized sections.
+    const width = this.draw.getCanvasWidthForPage(pageNo)
     const height =
       pageMode === PageMode.CONTINUITY
         ? this.draw.getCanvasHeight(pageNo) / this.draw.getPagePixelRatio()
-        : this.draw.getHeight()
-    const margins = this.draw.getMargins()
+        : this.draw.getCanvasHeightForPage(pageNo)
+    const pageGeo = this.draw.getPageGeometryForPage(pageNo)
+    const margins = pageGeo?.margins ?? this.draw.getMargins()
     const marginIndicatorSize = this.draw.getMarginIndicatorSize()
     ctx.save()
     ctx.translate(0.5, 0.5)

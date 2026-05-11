@@ -17,7 +17,7 @@ export class PageBorder {
     this.options = draw.getOptions()
   }
 
-  public render(ctx: CanvasRenderingContext2D) {
+  public render(ctx: CanvasRenderingContext2D, pageNo?: number) {
     const {
       scale,
       pageBorder: { color, lineWidth, padding }
@@ -26,16 +26,29 @@ export class PageBorder {
     ctx.translate(0.5, 0.5)
     ctx.strokeStyle = color
     ctx.lineWidth = lineWidth * scale
-    const margins = this.draw.getMargins()
+    // Per-page geometry: multi-section docs may put this page on a section
+    // with its own margins / paper dims. Resolve from the page geometry
+    // when available; fall back to globals for legacy callers.
+    const pageGeo =
+      pageNo !== undefined ? this.draw.getPageGeometryForPage(pageNo) : null
+    const margins = pageGeo?.margins ?? this.draw.getMargins()
+    const innerWidth =
+      pageNo !== undefined
+        ? this.draw.getCanvasInnerWidthForPage(pageNo)
+        : this.draw.getInnerWidth()
+    const pageHeight =
+      pageNo !== undefined
+        ? this.draw.getCanvasHeightForPage(pageNo)
+        : this.draw.getHeight()
     // x：左边距 - 左距离正文距离
     const x = margins[3] - padding[3] * scale
     // y：页眉上边距 + 页眉高度 - 上距离正文距离
     const y = margins[0] + this.header.getExtraHeight() - padding[0] * scale
     // width：页面宽度 + 左右距离正文距离
-    const width = this.draw.getInnerWidth() + (padding[1] + padding[3]) * scale
+    const width = innerWidth + (padding[1] + padding[3]) * scale
     // height：页面高度 - 正文起始位置 - 页脚高度 - 下边距 - 下距离正文距离
     const height =
-      this.draw.getHeight() -
+      pageHeight -
       y -
       this.footer.getExtraHeight() -
       margins[2] +

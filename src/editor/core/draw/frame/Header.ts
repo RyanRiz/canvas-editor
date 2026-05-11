@@ -131,7 +131,9 @@ export class Header {
     ctx.globalAlpha = this.zone.isHeaderActive()
       ? 1
       : this.options.header.inactiveAlpha
-    const innerWidth = this.draw.getInnerWidth()
+    // Per-page inner width so header text aligns to the actual page's
+    // content area on multi-section docs.
+    const innerWidth = this.draw.getCanvasInnerWidthForPage(pageNo)
     const maxHeight = this.getMaxHeight()
     // 超出最大高度不渲染
     const rowList: IRow[] = []

@@ -3,6 +3,7 @@ import { EditorMode, EditorZone } from '../dataset/enum/Editor'
 import { IElement, IElementPosition } from './Element'
 import { IPageColumns } from './PageColumns'
 import { IRow } from './Row'
+import { ISectionProperties } from './SectionBreak'
 
 /**
  * 本帧渲染所需的「输入」信号——告诉 render 哪里发生了什么变化。
@@ -162,6 +163,11 @@ export interface ILayoutCheckpoint {
   listIndex: number
   controlRealWidth: number
   currentPageColumns: Required<IPageColumns>
+  // Section-scoped page geometry effective at the iteration boundary. The
+  // resume path needs this so the wrap pass keeps using the section's
+  // pageHeight / innerWidth / margins instead of falling back to the
+  // editor-global ones recovered from elementList[0] alone.
+  currentSectionProperties: Required<ISectionProperties>
   // 浮动元素表的浅快照——在恢复时由 computeRowList 复制回工作数组。
   surroundElementList: IElement[]
 }

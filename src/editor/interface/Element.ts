@@ -2,6 +2,7 @@ import { ImageDisplay } from '../dataset/enum/Common'
 import { ControlComponent } from '../dataset/enum/Control'
 import { ElementType } from '../dataset/enum/Element'
 import { SectionBreakType } from '../dataset/enum/SectionBreak'
+import { ISectionProperties } from './SectionBreak'
 import { ListStyle, ListType } from '../dataset/enum/List'
 import { RowFlex } from '../dataset/enum/Row'
 import { TitleLevel } from '../dataset/enum/Title'
@@ -121,6 +122,12 @@ export interface ISectionBreakElement {
   // dedicated node so the existing block-break plumbing (row.isPageBreak,
   // ctrl-backspace atomic delete, clipboard serialization) can be reused.
   sectionBreakType?: SectionBreakType
+  // Section-scoped page geometry (paperDirection / paperSize / margins). Any
+  // element can carry this — run-length encoded the same way `pageColumns` is
+  // — but a SECTION_BREAK is the natural authoring boundary. Setting this on
+  // the first element of a section is equivalent to Word attaching a `sectPr`
+  // to the previous section break.
+  sectionProperties?: ISectionProperties
 }
 
 export interface IControlElement {

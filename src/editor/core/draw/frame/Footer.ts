@@ -128,7 +128,9 @@ export class Footer {
     ctx.globalAlpha = this.zone.isFooterActive()
       ? 1
       : this.options.footer.inactiveAlpha
-    const innerWidth = this.draw.getInnerWidth()
+    // Per-page inner width so footer content aligns to the actual page's
+    // content area on multi-section docs (landscape sections wider, etc.).
+    const innerWidth = this.draw.getCanvasInnerWidthForPage(pageNo)
     const maxHeight = this.getMaxHeight()
     // 超出最大高度不渲染
     const rowList: IRow[] = []
