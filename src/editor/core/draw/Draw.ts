@@ -2856,14 +2856,28 @@ export class Draw {
         boundingBoxDescent: 0
       }
       // 实际可用宽度
+      // When the second slot of a row is about to be filled (isStartElement),
+      // lock curRow.offsetX from the row's existing first element's indent.
+      // This ensures every element in the row sees the same availableWidth,
+      // preventing mixed-indent rows (e.g. first-line-Tab + wrapped elements)
+      // from producing a wider layout than the rendered curRow.offsetX allows.
+      const isStartElement = curRow.elementList.length === 1
+      if (isStartElement && !curRow.offsetX && !element.listId) {
+        const firstEl = curRow.elementList[0]
+        if (firstEl?.indent) {
+          curRow.offsetX = firstEl.indent * defaultTabWidth * scale
+        }
+      }
+      const indentOffsetX = element.indent
+        ? element.indent * defaultTabWidth * scale
+        : 0
       const offsetX =
         curRow.offsetX ||
         (element.listId && listStyleMap.get(element.listId)) ||
-        0
+        indentOffsetX
       const rowInnerWidth = curRow.innerWidth || innerWidth
       const availableWidth = rowInnerWidth - offsetX
       // 增加起始位置坐标偏移量
-      const isStartElement = curRow.elementList.length === 1
       x += isStartElement ? offsetX : 0
       y += isStartElement ? curRow.offsetY || 0 : 0
       if (
@@ -3656,11 +3670,21 @@ export class Draw {
         el => el.value !== ZERO && el.value !== WRAP
       )
       if (repEl?.indent) {
-        curRow.offsetX =
-          (curRow.offsetX || 0) + repEl.indent * defaultTabWidth * scale
+        // Always compute from a fresh base to avoid double-counting when
+        // incremental layout convergence reuses old row objects that already
+        // had curRow.offsetX set by a previous post-processing pass.
+        // List rows use the current list offset as base; plain rows use 0.
+        const listBase = curRow.isList
+          ? (listStyleMap.get(curRow.elementList.find(e => e.listId)?.listId ?? '') || 0)
+          : 0
+        curRow.offsetX = listBase + repEl.indent * defaultTabWidth * scale
       }
     }
     // 段前段后间距
+    // paragraphZero tracks the ZERO element of the current paragraph so its
+    // spaceBefore/spaceAfter (paragraph-level properties) are accessible from
+    // every row in the paragraph, including the last row.
+    let paragraphZero: (typeof elementList)[0] | undefined
     for (let r = 0; r < rowList.length; r++) {
       const curRow = rowList[r]
       const prevRow = rowList[r - 1]
@@ -3679,19 +3703,28 @@ export class Draw {
         elementList[
           curRow.startIndex + curRow.elementList.length
         ]?.value === ZERO
+      if (isFirstOfParagraph) {
+        // The first element of the first row is always the paragraph's ZERO delimiter.
+        paragraphZero = curRow.elementList.find(el => el.value === ZERO)
+      }
       if (!isFirstOfParagraph && !isLastOfParagraph) continue
+      // Use the paragraph ZERO for spacing (paragraph-level property).
+      // Fall back to repEl for documents that stored spacing on text elements.
       const repEl = curRow.elementList.find(
         el => el.value !== ZERO && el.value !== WRAP
       )
-      if (!repEl) continue
-      const extraPixel = defaultBasicRowMarginHeight * scale
-      if (isFirstOfParagraph && repEl.spaceBefore) {
-        const spaceBeforePx = extraPixel * repEl.spaceBefore
+      const spacingEl = paragraphZero ?? repEl
+      if (!spacingEl) continue
+      // extraPixel: defaultBasicRowMarginHeight is already scaled by options.scale,
+      // so no additional scale factor is needed.
+      const extraPixel = defaultBasicRowMarginHeight
+      if (isFirstOfParagraph && spacingEl.spaceBefore) {
+        const spaceBeforePx = extraPixel * spacingEl.spaceBefore
         curRow.height += spaceBeforePx
         curRow.ascent += spaceBeforePx
       }
-      if (isLastOfParagraph && repEl.spaceAfter) {
-        curRow.height += extraPixel * repEl.spaceAfter
+      if (isLastOfParagraph && spacingEl.spaceAfter) {
+        curRow.height += extraPixel * spacingEl.spaceAfter
       }
     }
     return rowList

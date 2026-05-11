@@ -31,6 +31,9 @@ export interface IRangeStyle {
   groupIds: string[] | null
   textDecoration: ITextDecoration | null
   extension?: unknown | null
+  indent?: number | null
+  spaceBefore?: number | null
+  spaceAfter?: number | null
 }
 
 export type IRangeStyleChange = (payload: IRangeStyle) => void

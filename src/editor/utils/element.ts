@@ -1813,9 +1813,22 @@ export function getTextFromElementList(elementList: IElement[]) {
 }
 
 export function getSlimCloneElementList(elementList: IElement[]) {
-  return deepCloneOmitKeys<IElement[], IRowElement>(elementList, [
+  // Strip metrics/style and per-cell derived layout cache. Without this, a
+  // snapshot-restore (e.g. undo of indent / space-after, which mutate element
+  // props in place and go through _submitSnapshotHistory) would re-hydrate
+  // td.rowList whose row elements have no .metrics, while td._dirty / _cache*
+  // still read as fresh — causing the next render's cell cache branch
+  // (Draw.ts: canReuseCell) to reuse the metric-less rowList and crash in
+  // computePageRowPosition at "x + metrics.width".
+  return deepCloneOmitKeys<IElement[], IRowElement & Partial<ITd>>(elementList, [
     'metrics',
-    'style'
+    'style',
+    'rowList',
+    'positionList',
+    '_dirty',
+    '_cacheInnerWidth',
+    '_cacheScale',
+    '_cacheIsPagingMode'
   ])
 }
 

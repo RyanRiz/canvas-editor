@@ -15,7 +15,7 @@ export function tab(evt: KeyboardEvent, host: CanvasEvent) {
     })
     return
   }
-  // 缩进/减少缩进
+  // 缩进/减少缩进（Tab = 首行缩进：仅当前视觉行）
   const rangeManager = draw.getRange()
   const { startIndex, endIndex } = rangeManager.getRange()
   if (!~startIndex && !~endIndex) return
@@ -33,5 +33,6 @@ export function tab(evt: KeyboardEvent, host: CanvasEvent) {
   })
   const isSetCursor = startIndex === endIndex
   const curIndex = isSetCursor ? endIndex : startIndex
+  draw.markDirty(startIndex, endIndex)
   draw.render({ curIndex, isSetCursor })
 }

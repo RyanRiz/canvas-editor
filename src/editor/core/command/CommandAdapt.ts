@@ -1337,43 +1337,94 @@ export class CommandAdapt {
     if (isDisabled) return
     const { startIndex, endIndex } = this.range.getRange()
     if (!~startIndex && !~endIndex) return
-    const rowElementList = this.range.getRangeRowElementList()
-    if (!rowElementList) return
-    rowElementList.forEach(element => {
+    // indent is paragraph-level: apply to all elements in the paragraph so every
+    // visual row has a consistent indentOffsetX. Partial application (visual-row
+    // only) leaves mixed-indent rows that overflow after re-wrapping.
+    const paragraphInfo = this.range.getRangeParagraphInfo()
+    if (!paragraphInfo) return
+    paragraphInfo.elementList.forEach(element => {
       element.indent = (element.indent || 0) + 1
     })
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
+    // Dirty from paragraph start so incremental layout recomputes all rows.
+    this.draw.markDirty(paragraphInfo.startIndex, endIndex)
     this.draw.render({ curIndex, isSetCursor })
   }
 
   public spaceBefore(payload: number) {
-    const isReadonly = this.draw.isReadonly()
-    if (isReadonly) return
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
     const { startIndex, endIndex } = this.range.getRange()
     if (!~startIndex && !~endIndex) return
-    const rowElementList = this.range.getRangeRowElementList()
-    if (!rowElementList) return
-    rowElementList.forEach(element => {
-      element.spaceBefore = payload
-    })
+    const elementList = this.draw.getElementList()
+    // Paragraph-level property: set on each paragraph's ZERO delimiter element.
+    // Scan backward from startIndex to find the first affected paragraph's ZERO.
+    let pz = startIndex
+    while (pz > 0 && elementList[pz]?.value !== ZERO) pz--
+    for (let i = pz; i <= endIndex; i++) {
+      if (elementList[i]?.value === ZERO) {
+        elementList[i].spaceBefore = payload
+      }
+    }
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
+    // markDirty operates on the main element list. When cursor is inside a
+    // table cell, pz/endIndex are cell-local indices — passing them to
+    // markDirty corrupts the main dirty range and causes a crash in
+    // computePageRowPosition (metrics undefined). Mark the TABLE element
+    // itself dirty instead so the whole table is re-laid-out.
+    const posCtxBefore = this.position.getPositionContext()
+    if (posCtxBefore.isTable && posCtxBefore.index !== undefined) {
+      this.draw.markDirty(posCtxBefore.index, posCtxBefore.index)
+    } else {
+      // spaceBefore is rendered on the first row of the paragraph; dirty range
+      // must start at pz so the incremental renderer includes that row.
+      this.draw.markDirty(pz, endIndex)
+    }
     this.draw.render({ curIndex, isSetCursor })
   }
 
   public spaceAfter(payload: number) {
-    const isReadonly = this.draw.isReadonly()
-    if (isReadonly) return
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
     const { startIndex, endIndex } = this.range.getRange()
     if (!~startIndex && !~endIndex) return
-    const rowElementList = this.range.getRangeRowElementList()
-    if (!rowElementList) return
-    rowElementList.forEach(element => {
-      element.spaceAfter = payload
-    })
+    const elementList = this.draw.getElementList()
+    // Paragraph-level property: set on each paragraph's ZERO delimiter element.
+    // Scan backward from startIndex to find the first affected paragraph's ZERO.
+    let pz = startIndex
+    while (pz > 0 && elementList[pz]?.value !== ZERO) pz--
+    for (let i = pz; i <= endIndex; i++) {
+      if (elementList[i]?.value === ZERO) {
+        elementList[i].spaceAfter = payload
+      }
+    }
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
+    // markDirty operates on the main element list. When cursor is inside a
+    // table cell, pz/paragraphEnd are cell-local indices — passing them to
+    // markDirty corrupts the main dirty range and causes a crash in
+    // computePageRowPosition (metrics undefined). Mark the TABLE element
+    // itself dirty instead so the whole table is re-laid-out.
+    const posCtxAfter = this.position.getPositionContext()
+    if (posCtxAfter.isTable && posCtxAfter.index !== undefined) {
+      this.draw.markDirty(posCtxAfter.index, posCtxAfter.index)
+    } else {
+      // spaceAfter is rendered on the LAST row of the paragraph. The incremental
+      // renderer converges as soon as a completed row surpasses dirtyEndAbs, so
+      // if endIndex is within an early visual row the last row is never re-laid-
+      // out. Extend the dirty end to the last element of the final affected
+      // paragraph so the renderer is forced through the last row.
+      let paragraphEnd = endIndex
+      while (
+        paragraphEnd + 1 < elementList.length &&
+        elementList[paragraphEnd + 1]?.value !== ZERO
+      ) {
+        paragraphEnd++
+      }
+      this.draw.markDirty(pz, paragraphEnd)
+    }
     this.draw.render({ curIndex, isSetCursor })
   }
 
@@ -1382,9 +1433,9 @@ export class CommandAdapt {
     if (isDisabled) return
     const { startIndex, endIndex } = this.range.getRange()
     if (!~startIndex && !~endIndex) return
-    const rowElementList = this.range.getRangeRowElementList()
-    if (!rowElementList) return
-    rowElementList.forEach(element => {
+    const paragraphInfo = this.range.getRangeParagraphInfo()
+    if (!paragraphInfo) return
+    paragraphInfo.elementList.forEach(element => {
       const currentIndent = element.indent || 0
       if (currentIndent > 0) {
         element.indent = currentIndent - 1
@@ -1392,6 +1443,7 @@ export class CommandAdapt {
     })
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.markDirty(paragraphInfo.startIndex, endIndex)
     this.draw.render({ curIndex, isSetCursor })
   }
 

@@ -543,6 +543,10 @@ export class RangeManager {
     const groupIds = curElement.groupIds || null
     // 扩展字段
     const extension = curElement.extension ?? null
+    // 行级属性（缩进、段前段后间距）
+    const indent = (rowIndexElement ?? curElement).indent ?? 0
+    const spaceBefore = (rowIndexElement ?? curElement).spaceBefore ?? 0
+    const spaceAfter = (rowIndexElement ?? curElement).spaceAfter ?? 0
     const rangeStyle: IRangeStyle = {
       type,
       undo,
@@ -564,7 +568,10 @@ export class RangeManager {
       listStyle,
       groupIds,
       textDecoration,
-      extension
+      extension,
+      indent,
+      spaceBefore,
+      spaceAfter
     }
     if (rangeStyleChangeListener) {
       rangeStyleChangeListener(rangeStyle)
@@ -606,7 +613,10 @@ export class RangeManager {
       listStyle: null,
       groupIds: null,
       textDecoration: null,
-      extension: null
+      extension: null,
+      indent: null,
+      spaceBefore: null,
+      spaceAfter: null
     }
     if (rangeStyleChangeListener) {
       rangeStyleChangeListener(rangeStyle)
