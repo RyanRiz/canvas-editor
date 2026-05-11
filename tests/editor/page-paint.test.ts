@@ -98,6 +98,41 @@ describe('Draw page paint policy', () => {
     expect(Array.from(plan.deferredPages as Set<number>).sort((a, b) => a - b)).toEqual([1, 2, 3])
   })
 
+  it('page-geometry changes keep sync paint scoped to the intersection page even if visiblePageNoList is broad', () => {
+    ctx = createTestEditor()
+    const draw = ctx.editor.draw as any
+    draw.pageRowList = [
+      [makeRow(0, 0)],
+      [makeRow(10, 1)],
+      [makeRow(20, 2)],
+      [makeRow(30, 3)]
+    ]
+    draw._prevPageLayoutSignatures = draw._getPageLayoutSignatures([
+      [makeRow(0, 0)],
+      [makeRow(11, 1)],
+      [makeRow(21, 2)],
+      [makeRow(31, 3)]
+    ])
+    draw.visiblePageNoList = [0, 1, 2, 3]
+    draw.intersectionPageNo = 1
+    draw.options.pagePaintOverscan = 0
+    draw._dirtyRange = { start: 0, end: 30 }
+    vi.spyOn(draw.position, 'getOriginalMainPositionList').mockReturnValue([
+      { pageNo: 0 } as any,
+      { pageNo: 1 } as any,
+      { pageNo: 2 } as any,
+      { pageNo: 3 } as any
+    ])
+
+    const plan = draw._buildPagePaintPlan(null, {
+      isPageGeometryChange: true
+    })
+
+    expect(plan.firstShiftedPage).toBe(1)
+    expect(Array.from(plan.syncPages as Set<number>).sort((a, b) => a - b)).toEqual([1])
+    expect(Array.from(plan.deferredPages as Set<number>).sort((a, b) => a - b)).toEqual([0, 2, 3])
+  })
+
   it('falls back to full repaint when visible-page info is unavailable', () => {
     ctx = createTestEditor()
     const draw = ctx.editor.draw as any
