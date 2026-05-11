@@ -12,6 +12,14 @@ export interface IRow {
   width: number
   height: number
   ascent: number
+  // PERF-PLAN §2.2 — pre-spacing row geometry. Captured at row construction so
+  // the paragraph-spacing post-process can re-apply spaceBefore/spaceAfter
+  // idempotently across incremental renders (prefix rows are iterated again on
+  // each frame, so a naive `height += spaceBefore` would compound). Also used
+  // by `_tryConvergeIncrementalRowList` to compare a freshly computed (pre-
+  // spacing) row against an old row that has already had spacing applied.
+  baseHeight?: number
+  baseAscent?: number
   rowFlex?: RowFlex
   startIndex: number
   isPageBreak?: boolean

@@ -1842,6 +1842,11 @@ export class Draw {
       row.width *= ratio
       row.height *= ratio
       row.ascent *= ratio
+      // Pre-spacing geometry travels with the row through scale changes — both
+      // values must move together so spacing post-process and convergence
+      // comparisons stay consistent after _skipMainRowCompute reuses these rows.
+      if (row.baseHeight !== undefined) row.baseHeight *= ratio
+      if (row.baseAscent !== undefined) row.baseAscent *= ratio
       if (row.offsetX !== undefined) row.offsetX *= ratio
       if (row.offsetY !== undefined) row.offsetY *= ratio
       if (row.innerWidth !== undefined) row.innerWidth *= ratio
@@ -2735,7 +2740,9 @@ export class Draw {
         rowList.push({
           width: 0,
           height: 0,
+          baseHeight: 0,
           ascent: 0,
+          baseAscent: 0,
           elementList: [],
           startIndex: 0,
           rowIndex: 0,
@@ -2801,7 +2808,9 @@ export class Draw {
         rowList.push({
           width: 0,
           height: 0,
+          baseHeight: 0,
           ascent: 0,
+          baseAscent: 0,
           elementList: [],
           startIndex: i,
           rowIndex: 0,
@@ -2822,7 +2831,9 @@ export class Draw {
             rowList.push({
               width: 0,
               height: 0,
+              baseHeight: 0,
               ascent: 0,
+              baseAscent: 0,
               elementList: [],
               startIndex: i,
               rowIndex: curRow.rowIndex + 1,
@@ -3485,9 +3496,11 @@ export class Draw {
         const row: IRow = {
           width: metrics.width,
           height,
+          baseHeight: height,
           startIndex: i,
           elementList: [rowElement],
           ascent,
+          baseAscent: ascent,
           rowIndex: curRow.rowIndex + 1,
           rowFlex: elementList[i]?.rowFlex || elementList[i + 1]?.rowFlex,
           pageColumns: currentPageColumns,
@@ -3548,9 +3561,16 @@ export class Draw {
         ) {
           curRow.height = defaultBasicRowMarginHeight
           curRow.ascent = defaultBasicRowMarginHeight
+          // baseHeight/baseAscent track natural (pre-spacing) row geometry —
+          // keep in sync with every height write so spacing post-process can
+          // re-derive idempotently and convergence can compare like-for-like.
+          curRow.baseHeight = defaultBasicRowMarginHeight
+          curRow.baseAscent = defaultBasicRowMarginHeight
         } else if (curRow.height < height) {
           curRow.height = height
           curRow.ascent = ascent
+          curRow.baseHeight = height
+          curRow.baseAscent = ascent
         }
         curRow.elementList.push(rowElement)
       }
@@ -3684,9 +3704,28 @@ export class Draw {
     // paragraphZero tracks the ZERO element of the current paragraph so its
     // spaceBefore/spaceAfter (paragraph-level properties) are accessible from
     // every row in the paragraph, including the last row.
+    //
+    // PERF-PLAN §2.2 — Idempotency: incremental renders reuse prefix row
+    // objects from `this.rowList`. Naive `curRow.height += spaceBefore` would
+    // compound on every frame, bloating prefix heights and breaking the
+    // convergence check (`old.height !== completed.height`) because the old
+    // row's height drifts above the freshly-computed natural height.
+    // We reset each row to its captured natural geometry (baseHeight/baseAscent)
+    // before applying spacing, so the result is a pure function of the current
+    // (isFirst/isLast, spaceBefore/spaceAfter) and never accumulates.
     let paragraphZero: (typeof elementList)[0] | undefined
     for (let r = 0; r < rowList.length; r++) {
       const curRow = rowList[r]
+      // Reset to natural geometry. baseHeight is set at every row construction
+      // and every in-loop height write — should always be defined here; the
+      // fallback covers legacy row objects from before this field existed.
+      if (curRow.baseHeight !== undefined) {
+        curRow.height = curRow.baseHeight
+        curRow.ascent = curRow.baseAscent ?? curRow.ascent
+      } else {
+        curRow.baseHeight = curRow.height
+        curRow.baseAscent = curRow.ascent
+      }
       const prevRow = rowList[r - 1]
       const nextRow = rowList[r + 1]
       const hasTextContent = curRow.elementList.some(
@@ -3757,25 +3796,109 @@ export class Draw {
     const last = len - 1
     const firstEl = completed.elementList[0]
     const lastEl = last >= 0 ? completed.elementList[last] : firstEl
+    // PERF-PLAN follow-up：诊断桩——开启 __perfTraceRender 时若收敛全程未命中，
+    // 把第一次「首尾元素 ref 匹配但其它字段不等」的差异打到 console，给用户
+    // 一条具体的失败原因（heights/widths/ascents/lengths/element refs）。
+    const traceConverge = (this.options as unknown as Record<string, unknown>)
+      .__perfTraceRender === true
+    let diagFirstNearMiss:
+      | {
+          oj: number
+          why: string
+          oldLen?: number
+          newLen?: number
+          oldH?: number
+          newH?: number
+          oldW?: number
+          newW?: number
+          oldA?: number
+          newA?: number
+          kMismatch?: number
+        }
+      | null = null
     for (let oj = 0; oj < oldRows.length; oj++) {
       const old = oldRows[oj]
-      if (old.elementList.length !== len) continue
+      if (old.elementList.length !== len) {
+        if (
+          traceConverge &&
+          !diagFirstNearMiss &&
+          old.elementList[0] === firstEl
+        ) {
+          diagFirstNearMiss = {
+            oj,
+            why: 'len',
+            oldLen: old.elementList.length,
+            newLen: len
+          }
+        }
+        continue
+      }
       // 廉价的早期剔除：首尾元素引用必须相等（refs 经过 splice 也保留）。
       if (old.elementList[0] !== firstEl) continue
-      if (old.elementList[last] !== lastEl) continue
+      if (old.elementList[last] !== lastEl) {
+        if (traceConverge && !diagFirstNearMiss) {
+          diagFirstNearMiss = { oj, why: 'lastRef' }
+        }
+        continue
+      }
       // 行布局必须全等——任何漂移都意味着后续行也会不同。
-      if (old.height !== completed.height) continue
-      if (old.width !== completed.width) continue
-      if (old.ascent !== completed.ascent) continue
+      // 比较 baseHeight/baseAscent（natural pre-spacing geometry）——
+      // `completed` 是循环内刚 push 的新行，paragraph spacing post-process
+      // 还没跑过，所以 .height/.ascent 仍是自然值。`old` 来自上一帧的
+      // post-process 结果，.height/.ascent 已包含 spaceBefore/spaceAfter。
+      // 若直接比较 .height，凡是 paragraph 带 spaceBefore 的下段首行都不会
+      // 命中收敛，回退到 walk-to-end-of-doc。
+      const oldBaseHeight = old.baseHeight ?? old.height
+      const oldBaseAscent = old.baseAscent ?? old.ascent
+      if (oldBaseHeight !== completed.height) {
+        if (traceConverge && !diagFirstNearMiss) {
+          diagFirstNearMiss = {
+            oj,
+            why: 'height',
+            oldH: oldBaseHeight,
+            newH: completed.height
+          }
+        }
+        continue
+      }
+      if (old.width !== completed.width) {
+        if (traceConverge && !diagFirstNearMiss) {
+          diagFirstNearMiss = {
+            oj,
+            why: 'width',
+            oldW: old.width,
+            newW: completed.width
+          }
+        }
+        continue
+      }
+      if (oldBaseAscent !== completed.ascent) {
+        if (traceConverge && !diagFirstNearMiss) {
+          diagFirstNearMiss = {
+            oj,
+            why: 'ascent',
+            oldA: oldBaseAscent,
+            newA: completed.ascent
+          }
+        }
+        continue
+      }
       // 完整 ref 比对——保险起见，避免首尾相同但中间被改的极端情形。
       let allMatch = true
+      let kMismatch = -1
       for (let k = 1; k < last; k++) {
         if (old.elementList[k] !== completed.elementList[k]) {
           allMatch = false
+          kMismatch = k
           break
         }
       }
-      if (!allMatch) continue
+      if (!allMatch) {
+        if (traceConverge && !diagFirstNearMiss) {
+          diagFirstNearMiss = { oj, why: 'midRef', kMismatch }
+        }
+        continue
+      }
       target.matched = { atOldIdx: oj }
       // 丢弃刚 push 的下一行种子——调用方会从 oldRowsAfterCut[oj+1] 接驳，
       // 那里已经包含 element[i]，避免双重计入。
@@ -3784,6 +3907,15 @@ export class Draw {
         checkpointSink.pop()
       }
       return true
+    }
+    if (traceConverge && diagFirstNearMiss) {
+      console.log('[PerfTrace] converge near-miss', {
+        completedStart: completed.startIndex,
+        completedLen: len,
+        dirtyEndAbs: target.dirtyEndAbs,
+        oldRowsLen: oldRows.length,
+        ...diagFirstNearMiss
+      })
     }
     return false
   }
@@ -6271,6 +6403,10 @@ export class Draw {
         this.footer.setElementList(deepClone(oldFooterElementList))
         this.elementList = deepClone(oldElementList)
         this.range.replaceRange(deepClone(oldRange))
+        // 整个文档被快照全量替换——标脏全文以启用增量布局。
+        // _tryBuildResumeFrom 在 dirtyRowIndex===0 时构造空前缀 + 初始
+        // checkpoint 并从元素 0 恢复重排（PERF-PLAN §2.8）。
+        this.markDirty(0, this.elementList.length)
       } finally {
         this._isReplayingHistory = false
       }

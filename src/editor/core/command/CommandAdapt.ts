@@ -389,7 +389,9 @@ export class CommandAdapt {
     if (selection?.length) {
       const { startIndex, endIndex } = this.range.getRange()
       const oldValues = selection.map(el => ({ el, font: el.font }))
-      selection.forEach(el => { el.font = payload })
+      selection.forEach(el => {
+        el.font = payload
+      })
       this.draw.getHistoryManager().executeDelta({
         applyForward: () => {
           for (const item of oldValues) item.el.font = payload
@@ -671,7 +673,9 @@ export class CommandAdapt {
       const { startIndex, endIndex } = this.range.getRange()
       const newValue = !selection.every(s => s.bold)
       const oldValues = selection.map(el => ({ el, bold: el.bold }))
-      selection.forEach(el => { el.bold = newValue })
+      selection.forEach(el => {
+        el.bold = newValue
+      })
       this.draw.getHistoryManager().executeDelta({
         applyForward: () => {
           for (const item of oldValues) item.el.bold = newValue
@@ -722,7 +726,9 @@ export class CommandAdapt {
       const { startIndex, endIndex } = this.range.getRange()
       const newValue = !selection.every(s => s.italic)
       const oldValues = selection.map(el => ({ el, italic: el.italic }))
-      selection.forEach(el => { el.italic = newValue })
+      selection.forEach(el => {
+        el.italic = newValue
+      })
       this.draw.getHistoryManager().executeDelta({
         applyForward: () => {
           for (const item of oldValues) item.el.italic = newValue
@@ -862,7 +868,9 @@ export class CommandAdapt {
     if (selection?.length) {
       const newValue = !selection.every(s => s.strikeout)
       const oldValues = selection.map(el => ({ el, strikeout: el.strikeout }))
-      selection.forEach(el => { el.strikeout = newValue })
+      selection.forEach(el => {
+        el.strikeout = newValue
+      })
       this.draw.getHistoryManager().executeDelta({
         applyForward: () => {
           for (const item of oldValues) item.el.strikeout = newValue
@@ -917,7 +925,9 @@ export class CommandAdapt {
       type: el.type,
       actualSize: el.actualSize
     }))
-    const isActivating = !selection.some(s => s.type === ElementType.SUPERSCRIPT)
+    const isActivating = !selection.some(
+      s => s.type === ElementType.SUPERSCRIPT
+    )
     selection.forEach(el => {
       // 取消上标
       if (!isActivating) {
@@ -945,26 +955,31 @@ export class CommandAdapt {
               delete item.el.actualSize
             }
           } else {
-            if (!item.type || item.type === ElementType.TEXT || item.type === ElementType.SUBSCRIPT) {
+            if (
+              !item.type ||
+              item.type === ElementType.TEXT ||
+              item.type === ElementType.SUBSCRIPT
+            ) {
               item.el.type = ElementType.SUPERSCRIPT
             }
           }
         }
-          this.draw.markDirty(startIndex, endIndex)
-          this.draw.cancelScheduledRender()
-          this.draw.render({ isSetCursor: false, isSubmitHistory: false })
-        },
-        applyBackward: () => {
-          for (const item of oldValues) {
-            item.el.type = item.type
-            if (item.actualSize !== undefined) item.el.actualSize = item.actualSize
-            else delete item.el.actualSize
-          }
-          this.draw.markDirty(startIndex, endIndex)
-          this.draw.cancelScheduledRender()
-          this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+        this.draw.markDirty(startIndex, endIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          item.el.type = item.type
+          if (item.actualSize !== undefined)
+            item.el.actualSize = item.actualSize
+          else delete item.el.actualSize
         }
-      })
+        this.draw.markDirty(startIndex, endIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+      }
+    })
     this.draw.markDirty(startIndex, endIndex)
     this.draw.cancelScheduledRender()
     this.draw.render({ isSetCursor: false, isSubmitHistory: false })
@@ -1012,26 +1027,31 @@ export class CommandAdapt {
               delete item.el.actualSize
             }
           } else {
-            if (!item.type || item.type === ElementType.TEXT || item.type === ElementType.SUPERSCRIPT) {
+            if (
+              !item.type ||
+              item.type === ElementType.TEXT ||
+              item.type === ElementType.SUPERSCRIPT
+            ) {
               item.el.type = ElementType.SUBSCRIPT
             }
           }
         }
-          this.draw.markDirty(startIndex, endIndex)
-          this.draw.cancelScheduledRender()
-          this.draw.render({ isSetCursor: false, isSubmitHistory: false })
-        },
-        applyBackward: () => {
-          for (const item of oldValues) {
-            item.el.type = item.type
-            if (item.actualSize !== undefined) item.el.actualSize = item.actualSize
-            else delete item.el.actualSize
-          }
-          this.draw.markDirty(startIndex, endIndex)
-          this.draw.cancelScheduledRender()
-          this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+        this.draw.markDirty(startIndex, endIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          item.el.type = item.type
+          if (item.actualSize !== undefined)
+            item.el.actualSize = item.actualSize
+          else delete item.el.actualSize
         }
-      })
+        this.draw.markDirty(startIndex, endIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+      }
+    })
     this.draw.markDirty(startIndex, endIndex)
     this.draw.cancelScheduledRender()
     this.draw.render({ isSetCursor: false, isSubmitHistory: false })
@@ -1337,19 +1357,41 @@ export class CommandAdapt {
     if (isDisabled) return
     const { startIndex, endIndex } = this.range.getRange()
     if (!~startIndex && !~endIndex) return
-    // indent is paragraph-level: apply to all elements in the paragraph so every
-    // visual row has a consistent indentOffsetX. Partial application (visual-row
-    // only) leaves mixed-indent rows that overflow after re-wrapping.
     const paragraphInfo = this.range.getRangeParagraphInfo()
     if (!paragraphInfo) return
+    const paragraphEndIndex =
+      paragraphInfo.startIndex + paragraphInfo.elementList.length - 1
+    const oldValues = paragraphInfo.elementList.map(el => ({
+      el,
+      indent: el.indent
+    }))
     paragraphInfo.elementList.forEach(element => {
       element.indent = (element.indent || 0) + 1
     })
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
-    // Dirty from paragraph start so incremental layout recomputes all rows.
-    this.draw.markDirty(paragraphInfo.startIndex, endIndex)
-    this.draw.render({ curIndex, isSetCursor })
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldValues) {
+          item.el.indent = (item.indent || 0) + 1
+        }
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          if (item.indent !== undefined) item.el.indent = item.indent
+          else delete item.el.indent
+        }
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
 
   public spaceBefore(payload: number) {
@@ -1435,6 +1477,12 @@ export class CommandAdapt {
     if (!~startIndex && !~endIndex) return
     const paragraphInfo = this.range.getRangeParagraphInfo()
     if (!paragraphInfo) return
+    const paragraphEndIndex =
+      paragraphInfo.startIndex + paragraphInfo.elementList.length - 1
+    const oldValues = paragraphInfo.elementList.map(el => ({
+      el,
+      indent: el.indent
+    }))
     paragraphInfo.elementList.forEach(element => {
       const currentIndent = element.indent || 0
       if (currentIndent > 0) {
@@ -1443,8 +1491,29 @@ export class CommandAdapt {
     })
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
-    this.draw.markDirty(paragraphInfo.startIndex, endIndex)
-    this.draw.render({ curIndex, isSetCursor })
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldValues) {
+          const v = item.indent || 0
+          if (v > 0) item.el.indent = v - 1
+        }
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          if (item.indent !== undefined) item.el.indent = item.indent
+          else delete item.el.indent
+        }
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
 
   public insertTable(row: number, col: number) {
