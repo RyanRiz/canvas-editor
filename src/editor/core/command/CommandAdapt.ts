@@ -1403,7 +1403,8 @@ export class CommandAdapt {
   }
 
   public setRightIndent(payload: number) {
-    const target = Math.max(0, Math.floor(Number(payload) || 0))
+    // Fractional tab-width counts are valid — pt-based UIs pass them in.
+    const target = Math.max(0, Number(payload) || 0)
     this._mutateRightIndent(() => target)
   }
 
@@ -1597,7 +1598,10 @@ export class CommandAdapt {
     paragraphInfo.elementList.forEach(element => {
       const currentIndent = element.indent || 0
       if (currentIndent > 0) {
-        element.indent = currentIndent - 1
+        // Clamp at 0 — `currentIndent` may be fractional (pt-based input
+        // produces e.g. 0.5 for 12pt with a 24pt tab width), and unclamped
+        // subtraction would slide the value negative.
+        element.indent = Math.max(0, currentIndent - 1)
       }
     })
     const isSetCursor = startIndex === endIndex
@@ -1606,7 +1610,7 @@ export class CommandAdapt {
       applyForward: () => {
         for (const item of oldValues) {
           const v = item.indent || 0
-          if (v > 0) item.el.indent = v - 1
+          if (v > 0) item.el.indent = Math.max(0, v - 1)
         }
         this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
         this.draw.cancelScheduledRender()
@@ -1628,14 +1632,15 @@ export class CommandAdapt {
   }
 
   /**
-   * Set the current paragraph's left indent to an absolute tab-width step
-   * count in a single history entry. Mirrors `setRightIndent` and pairs with
-   * `increaseIndent`/`decreaseIndent` for callers (e.g. the layout-tab number
-   * input) that need to jump from 0 → 5 (or 5 → 0) in one undoable step
-   * rather than queueing 5 separate delta entries.
+   * Set the current paragraph's left indent to an absolute tab-width count
+   * (fractional allowed — callers measuring in pt convert via
+   * `pt / pxToPt(defaultTabWidth)` and pass the resulting fraction here).
+   * Single history entry: pairs with `increaseIndent`/`decreaseIndent` for
+   * callers (e.g. the layout-tab number input) that need to jump from 0 → 5
+   * (or 5 → 0) in one undoable step rather than queueing 5 separate deltas.
    */
   public setIndent(payload: number) {
-    const target = Math.max(0, Math.floor(Number(payload) || 0))
+    const target = Math.max(0, Number(payload) || 0)
     const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
     if (isDisabled) return
     const { startIndex, endIndex } = this.range.getRange()
