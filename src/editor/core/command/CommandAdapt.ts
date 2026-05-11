@@ -1395,39 +1395,36 @@ export class CommandAdapt {
   }
 
   public spaceBefore(payload: number) {
-    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
-    if (isDisabled) return
-    const { startIndex, endIndex } = this.range.getRange()
-    if (!~startIndex && !~endIndex) return
-    const elementList = this.draw.getElementList()
-    // Paragraph-level property: set on each paragraph's ZERO delimiter element.
-    // Scan backward from startIndex to find the first affected paragraph's ZERO.
-    let pz = startIndex
-    while (pz > 0 && elementList[pz]?.value !== ZERO) pz--
-    for (let i = pz; i <= endIndex; i++) {
-      if (elementList[i]?.value === ZERO) {
-        elementList[i].spaceBefore = payload
-      }
-    }
-    const isSetCursor = startIndex === endIndex
-    const curIndex = isSetCursor ? endIndex : startIndex
-    // markDirty operates on the main element list. When cursor is inside a
-    // table cell, pz/endIndex are cell-local indices — passing them to
-    // markDirty corrupts the main dirty range and causes a crash in
-    // computePageRowPosition (metrics undefined). Mark the TABLE element
-    // itself dirty instead so the whole table is re-laid-out.
-    const posCtxBefore = this.position.getPositionContext()
-    if (posCtxBefore.isTable && posCtxBefore.index !== undefined) {
-      this.draw.markDirty(posCtxBefore.index, posCtxBefore.index)
-    } else {
-      // spaceBefore is rendered on the first row of the paragraph; dirty range
-      // must start at pz so the incremental renderer includes that row.
-      this.draw.markDirty(pz, endIndex)
-    }
-    this.draw.render({ curIndex, isSetCursor })
+    this._applyParagraphSpacing('spaceBefore', payload)
   }
 
   public spaceAfter(payload: number) {
+    this._applyParagraphSpacing('spaceAfter', payload)
+  }
+
+  /**
+   * Apply spaceBefore / spaceAfter as an in-place delta on each affected
+   * paragraph's ZERO delimiter, then push a delta history entry so undo /
+   * redo replays the same in-place mutation.
+   *
+   * Why a delta (not the default snapshot path):
+   *   the previous implementation called `draw.render({ curIndex, isSetCursor })`
+   *   with the default `isSubmitHistory: true`. Because the mutation is a
+   *   direct property write (not a splice), `submitHistory` had no delta
+   *   candidates and fell back to `_submitSnapshotHistory`, which does
+   *   `this.elementList = deepClone(oldElementList)` on undo. That replaces
+   *   every element reference, invalidating `this.rowList`'s elementList refs.
+   *   `_tryConvergeIncrementalRowList` then can't find any first-element-ref
+   *   match in `oldRowsAfterCut`, so the incremental layout walks to the end
+   *   of the document and all 34 pages repaint (~2.2 s on the user's doc).
+   *
+   * Delta replay mutates in place, so element identity is preserved across
+   * undo / redo and convergence holds.
+   */
+  private _applyParagraphSpacing(
+    field: 'spaceBefore' | 'spaceAfter',
+    payload: number
+  ) {
     const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
     if (isDisabled) return
     const { startIndex, endIndex } = this.range.getRange()
@@ -1437,27 +1434,39 @@ export class CommandAdapt {
     // Scan backward from startIndex to find the first affected paragraph's ZERO.
     let pz = startIndex
     while (pz > 0 && elementList[pz]?.value !== ZERO) pz--
+    // Capture the (element, old value) pairs *before* mutating so applyBackward
+    // can restore them exactly (including `undefined` → property absent).
+    const oldValues: Array<{
+      el: (typeof elementList)[number]
+      old: number | undefined
+    }> = []
     for (let i = pz; i <= endIndex; i++) {
-      if (elementList[i]?.value === ZERO) {
-        elementList[i].spaceAfter = payload
+      const el = elementList[i]
+      if (el?.value === ZERO) {
+        oldValues.push({ el, old: el[field] })
       }
     }
-    const isSetCursor = startIndex === endIndex
-    const curIndex = isSetCursor ? endIndex : startIndex
-    // markDirty operates on the main element list. When cursor is inside a
-    // table cell, pz/paragraphEnd are cell-local indices — passing them to
-    // markDirty corrupts the main dirty range and causes a crash in
-    // computePageRowPosition (metrics undefined). Mark the TABLE element
-    // itself dirty instead so the whole table is re-laid-out.
-    const posCtxAfter = this.position.getPositionContext()
-    if (posCtxAfter.isTable && posCtxAfter.index !== undefined) {
-      this.draw.markDirty(posCtxAfter.index, posCtxAfter.index)
-    } else {
-      // spaceAfter is rendered on the LAST row of the paragraph. The incremental
-      // renderer converges as soon as a completed row surpasses dirtyEndAbs, so
-      // if endIndex is within an early visual row the last row is never re-laid-
-      // out. Extend the dirty end to the last element of the final affected
-      // paragraph so the renderer is forced through the last row.
+    if (!oldValues.length) return
+    // Resolve the dirty range once. Same caveat as before: when the cursor is
+    // inside a table cell, pz/endIndex are cell-local indices which would
+    // corrupt the main dirty range (crash in computePageRowPosition with
+    // undefined metrics). Mark the TABLE element itself dirty instead so the
+    // whole table relayout fires.
+    const posCtx = this.position.getPositionContext()
+    const dirtyRange: { start: number; end: number } = (() => {
+      if (posCtx.isTable && posCtx.index !== undefined) {
+        return { start: posCtx.index, end: posCtx.index }
+      }
+      if (field === 'spaceBefore') {
+        // spaceBefore renders on the FIRST row of the paragraph; dirty range
+        // must start at pz so the incremental renderer includes that row.
+        return { start: pz, end: endIndex }
+      }
+      // spaceAfter renders on the LAST row of the paragraph. The incremental
+      // renderer converges as soon as a completed row surpasses dirtyEndAbs,
+      // so if endIndex sits inside an early visual row the last row is never
+      // re-laid-out. Extend the dirty end to the last element of the final
+      // affected paragraph so the renderer is forced through the last row.
       let paragraphEnd = endIndex
       while (
         paragraphEnd + 1 < elementList.length &&
@@ -1465,9 +1474,39 @@ export class CommandAdapt {
       ) {
         paragraphEnd++
       }
-      this.draw.markDirty(pz, paragraphEnd)
+      return { start: pz, end: paragraphEnd }
+    })()
+    const applyForward = () => {
+      for (const { el } of oldValues) {
+        el[field] = payload
+      }
     }
-    this.draw.render({ curIndex, isSetCursor })
+    const applyBackward = () => {
+      for (const { el, old } of oldValues) {
+        if (old !== undefined) el[field] = old
+        else delete el[field]
+      }
+    }
+    applyForward()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
+        this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
 
   public decreaseIndent() {
