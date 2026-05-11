@@ -38,6 +38,10 @@ export class Command {
   public executeRowMargin: CommandAdapt['rowMargin']
   public executeIncreaseIndent: CommandAdapt['increaseIndent']
   public executeDecreaseIndent: CommandAdapt['decreaseIndent']
+  public executeSetIndent: CommandAdapt['setIndent']
+  public executeIncreaseRightIndent: CommandAdapt['increaseRightIndent']
+  public executeDecreaseRightIndent: CommandAdapt['decreaseRightIndent']
+  public executeSetRightIndent: CommandAdapt['setRightIndent']
   public executeSpaceBefore: CommandAdapt['spaceBefore']
   public executeSpaceAfter: CommandAdapt['spaceAfter']
   public executeInsertTable: CommandAdapt['insertTable']
@@ -206,6 +210,10 @@ export class Command {
     this.executeRowMargin = adapt.rowMargin.bind(adapt)
     this.executeIncreaseIndent = adapt.increaseIndent.bind(adapt)
     this.executeDecreaseIndent = adapt.decreaseIndent.bind(adapt)
+    this.executeSetIndent = adapt.setIndent.bind(adapt)
+    this.executeIncreaseRightIndent = adapt.increaseRightIndent.bind(adapt)
+    this.executeDecreaseRightIndent = adapt.decreaseRightIndent.bind(adapt)
+    this.executeSetRightIndent = adapt.setRightIndent.bind(adapt)
     this.executeSpaceBefore = adapt.spaceBefore.bind(adapt)
     this.executeSpaceAfter = adapt.spaceAfter.bind(adapt)
     // 表格、图片上传、超链接、搜索、打印、图片操作

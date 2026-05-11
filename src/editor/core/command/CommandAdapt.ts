@@ -1394,6 +1394,78 @@ export class CommandAdapt {
     this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
 
+  public increaseRightIndent() {
+    this._mutateRightIndent(v => (v || 0) + 1)
+  }
+
+  public decreaseRightIndent() {
+    this._mutateRightIndent(v => Math.max(0, (v || 0) - 1))
+  }
+
+  public setRightIndent(payload: number) {
+    const target = Math.max(0, Math.floor(Number(payload) || 0))
+    this._mutateRightIndent(() => target)
+  }
+
+  /**
+   * Mutate the current paragraph's `rightIndent` (a tab-width integer step)
+   * in place and submit a delta history entry. Used by increase / decrease
+   * (per-step) and setRightIndent (absolute). 0 deletes the property so
+   * EDITOR_ELEMENT_COPY_ATTR / zip output stay tidy on round-trips.
+   *
+   * Why a delta and not a snapshot: same reason as `_applyParagraphSpacing` —
+   * snapshot undo (`deepClone`) replaces every element reference, which
+   * invalidates the incremental layout convergence check and forces a full
+   * document repaint. Delta replay preserves element identity.
+   */
+  private _mutateRightIndent(next: (cur: number | undefined) => number) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const paragraphInfo = this.range.getRangeParagraphInfo()
+    if (!paragraphInfo) return
+    const paragraphEndIndex =
+      paragraphInfo.startIndex + paragraphInfo.elementList.length - 1
+    const oldValues = paragraphInfo.elementList.map(el => ({
+      el,
+      rightIndent: el.rightIndent
+    }))
+    const applyForward = () => {
+      for (const item of oldValues) {
+        const n = next(item.rightIndent)
+        if (n === 0) delete item.el.rightIndent
+        else item.el.rightIndent = n
+      }
+    }
+    const applyBackward = () => {
+      for (const item of oldValues) {
+        if (item.rightIndent !== undefined) item.el.rightIndent = item.rightIndent
+        else delete item.el.rightIndent
+      }
+    }
+    applyForward()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+  }
+
   public spaceBefore(payload: number) {
     this._applyParagraphSpacing('spaceBefore', payload)
   }
@@ -1545,6 +1617,66 @@ export class CommandAdapt {
           if (item.indent !== undefined) item.el.indent = item.indent
           else delete item.el.indent
         }
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+  }
+
+  /**
+   * Set the current paragraph's left indent to an absolute tab-width step
+   * count in a single history entry. Mirrors `setRightIndent` and pairs with
+   * `increaseIndent`/`decreaseIndent` for callers (e.g. the layout-tab number
+   * input) that need to jump from 0 → 5 (or 5 → 0) in one undoable step
+   * rather than queueing 5 separate delta entries.
+   */
+  public setIndent(payload: number) {
+    const target = Math.max(0, Math.floor(Number(payload) || 0))
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const paragraphInfo = this.range.getRangeParagraphInfo()
+    if (!paragraphInfo) return
+    const paragraphEndIndex =
+      paragraphInfo.startIndex + paragraphInfo.elementList.length - 1
+    const oldValues = paragraphInfo.elementList.map(el => ({
+      el,
+      indent: el.indent
+    }))
+    // No-op when the target matches every element's current indent — avoids
+    // pushing a noise entry onto the history stack for inputs that re-emit
+    // the same value (Svelte fires `change` on blur even without a delta).
+    const allSame = oldValues.every(v => (v.indent || 0) === target)
+    if (allSame) return
+    const applyForward = () => {
+      for (const item of oldValues) {
+        if (target === 0) delete item.el.indent
+        else item.el.indent = target
+      }
+    }
+    const applyBackward = () => {
+      for (const item of oldValues) {
+        if (item.indent !== undefined) item.el.indent = item.indent
+        else delete item.el.indent
+      }
+    }
+    applyForward()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
         this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
         this.draw.cancelScheduledRender()
         this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })

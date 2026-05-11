@@ -2879,15 +2879,29 @@ export class Draw {
           curRow.offsetX = firstEl.indent * defaultTabWidth * scale
         }
       }
+      // Lock right indent off the row's first element too, by the same logic
+      // as the left-indent lock above. Right indent is a paragraph property,
+      // so all elements share the same value — locking just avoids depending
+      // on whichever element happens to be `element` when the row wraps.
+      if (isStartElement && !curRow.rightOffsetX) {
+        const firstEl = curRow.elementList[0]
+        if (firstEl?.rightIndent) {
+          curRow.rightOffsetX = firstEl.rightIndent * defaultTabWidth * scale
+        }
+      }
       const indentOffsetX = element.indent
         ? element.indent * defaultTabWidth * scale
+        : 0
+      const rightIndentOffsetX = element.rightIndent
+        ? element.rightIndent * defaultTabWidth * scale
         : 0
       const offsetX =
         curRow.offsetX ||
         (element.listId && listStyleMap.get(element.listId)) ||
         indentOffsetX
+      const rightOffsetX = curRow.rightOffsetX || rightIndentOffsetX
       const rowInnerWidth = curRow.innerWidth || innerWidth
-      const availableWidth = rowInnerWidth - offsetX
+      const availableWidth = rowInnerWidth - offsetX - rightOffsetX
       // 增加起始位置坐标偏移量
       x += isStartElement ? offsetX : 0
       y += isStartElement ? curRow.offsetY || 0 : 0
@@ -3699,6 +3713,12 @@ export class Draw {
           : 0
         curRow.offsetX = listBase + repEl.indent * defaultTabWidth * scale
       }
+      // Right indent: same fresh-base recompute so incremental layout reuse
+      // doesn't compound the value across frames. Right offset is independent
+      // of the list bullet base (lists don't take right-side gutter space).
+      curRow.rightOffsetX = repEl?.rightIndent
+        ? repEl.rightIndent * defaultTabWidth * scale
+        : 0
     }
     // 段前段后间距
     // paragraphZero tracks the ZERO element of the current paragraph so its

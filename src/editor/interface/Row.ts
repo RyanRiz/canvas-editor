@@ -28,6 +28,11 @@ export interface IRow {
   isList?: boolean
   listIndex?: number
   offsetX?: number
+  // Right-edge offset for paragraph right indent. Mirrors `offsetX` (left) and
+  // is consumed by both the wrap calculation (Draw) and the row alignment math
+  // (Position.computePageRowPosition) so right indent both trims line length
+  // and pulls right-aligned / centered content inward from the right margin.
+  rightOffsetX?: number
   offsetY?: number
   elementList: IRowElement[]
   isWidthNotEnough?: boolean

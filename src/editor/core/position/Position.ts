@@ -134,11 +134,16 @@ export class Position {
       // 行存在环绕的可能性均不设置行布局
       if (!curRow.isSurround) {
         // 计算行偏移量（行居中、居右）
+        // Right indent (curRow.rightOffsetX) trims the usable area from the
+        // right edge: centered rows center between left indent and the
+        // (innerWidth − rightIndent) point; right-aligned rows pin to that
+        // same inner-right point instead of the page's right edge.
         const curRowWidth = curRow.width + (curRow.offsetX || 0)
+        const rightOffsetX = curRow.rightOffsetX || 0
         if (curRow.rowFlex === RowFlex.CENTER) {
-          x += (innerWidth - curRowWidth) / 2
+          x += (innerWidth - curRowWidth - rightOffsetX) / 2
         } else if (curRow.rowFlex === RowFlex.RIGHT) {
-          x += innerWidth - curRowWidth
+          x += innerWidth - curRowWidth - rightOffsetX
         }
       }
       // 当前行X/Y轴偏移量

@@ -42,6 +42,7 @@ export interface IElementStyle {
   letterSpacing?: number
   textDecoration?: ITextDecoration
   indent?: number
+  rightIndent?: number
   spaceBefore?: number
   spaceAfter?: number
 }

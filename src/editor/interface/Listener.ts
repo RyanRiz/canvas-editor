@@ -32,6 +32,7 @@ export interface IRangeStyle {
   textDecoration: ITextDecoration | null
   extension?: unknown | null
   indent?: number | null
+  rightIndent?: number | null
   spaceBefore?: number | null
   spaceAfter?: number | null
 }
