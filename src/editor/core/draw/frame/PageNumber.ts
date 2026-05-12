@@ -63,12 +63,9 @@ export class PageNumber {
         numberType
       )
     }
-    // Per-page geometry: multi-section docs may have this page laid out
-    // against different dims than the editor globals; the page number has
-    // to anchor to the page's own bottom-right, not the doc default.
-    const width = this.draw.getCanvasWidthForPage(pageNo)
-    const height = this.draw.getCanvasHeightForPage(pageNo)
-    const pageGeo = this.draw.getPageGeometryForPage(pageNo)
+    const width = this.draw.getWidth()
+    // 计算y位置
+    const height = this.draw.getHeight()
     const pageNumberBottom = this.draw.getPageNumberBottom()
     const y = height - pageNumberBottom
     ctx.save()
@@ -76,7 +73,7 @@ export class PageNumber {
     ctx.font = `${size * scale}px ${font}`
     // 计算x位置-居左、居中、居右
     let x = 0
-    const margins = pageGeo?.margins ?? this.draw.getMargins()
+    const margins = this.draw.getMargins()
     const { width: textWidth } = ctx.measureText(text)
     if (rowFlex === RowFlex.CENTER) {
       x = (width - textWidth) / 2

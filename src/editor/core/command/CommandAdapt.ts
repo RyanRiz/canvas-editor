@@ -2045,23 +2045,6 @@ export class CommandAdapt {
         sectionBreakType: type
       }
     ])
-    // `insertElementList` parks the cursor at the SECTION_BREAK element's
-    // position — which renders on the previous page's last line. For
-    // page-forcing flavours (NEXT_PAGE / EVEN_PAGE / ODD_PAGE) the user
-    // expects to land on the new section's first line, mirroring Word and
-    // matching what Ctrl+Enter does for plain page breaks (see
-    // event/handlers/keydown/ctrlEnter.ts). insertElementList ran a
-    // synchronous render() so positions are already up to date — redraw
-    // the cursor at the start of the line containing the next element.
-    if (type === SectionBreakType.CONTINUOUS) return
-    const elementList = this.draw.getElementList()
-    const { startIndex } = this.range.getRange()
-    const nextIndex = startIndex + 1
-    if (nextIndex < elementList.length) {
-      this.draw.getCursor().drawCursor({
-        hitLineStartIndex: nextIndex
-      })
-    }
   }
 
   public columnLayout(payload: { columnCount?: number; columnGap?: number }) {

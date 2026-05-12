@@ -1,7 +1,5 @@
-import { PaperDirection } from '../dataset/enum/Editor'
 import { RowFlex } from '../dataset/enum/Row'
 import { IElement, IElementMetrics } from './Element'
-import { IMargin } from './Margin'
 import { IPageColumns } from './PageColumns'
 
 export type IRowElement = IElement & {
@@ -48,13 +46,4 @@ export interface IRow {
   innerWidth?: number
   pageStartX?: number
   pageStartY?: number
-  // Per-section page geometry — set during the wrap pass so downstream
-  // pagination (_computePageList) and DOM sizing can use this row's section
-  // rather than the editor-global options. Optional for backwards compat with
-  // callers that don't yet thread section properties through.
-  pageDirection?: PaperDirection
-  pageWidth?: number
-  pageHeight?: number
-  pageMargins?: IMargin
-  pageMainOuterHeight?: number
 }

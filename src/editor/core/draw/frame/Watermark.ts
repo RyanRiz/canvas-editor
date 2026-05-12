@@ -21,10 +21,8 @@ export class Watermark {
       watermark: { data, opacity, font, size, color, repeat, gap, numberType },
       scale
     } = this.options
-    // Per-page geometry so watermark tiles cover landscape pages fully on
-    // multi-section docs.
-    const width = this.draw.getCanvasWidthForPage(pageNo)
-    const height = this.draw.getCanvasHeightForPage(pageNo)
+    const width = this.draw.getWidth()
+    const height = this.draw.getHeight()
     // 开始绘制
     ctx.save()
     ctx.globalAlpha = opacity
@@ -104,7 +102,7 @@ export class Watermark {
     ctx.restore()
   }
 
-  public renderImage(ctx: CanvasRenderingContext2D, pageNo?: number) {
+  public renderImage(ctx: CanvasRenderingContext2D) {
     const {
       watermark: { width, height, data, opacity, repeat, gap },
       scale
@@ -123,16 +121,8 @@ export class Watermark {
       }
       return
     }
-    // Per-page geometry for multi-section docs; falls back to globals when
-    // the caller doesn't know which page (legacy call sites).
-    const docWidth =
-      pageNo !== undefined
-        ? this.draw.getCanvasWidthForPage(pageNo)
-        : this.draw.getWidth()
-    const docHeight =
-      pageNo !== undefined
-        ? this.draw.getCanvasHeightForPage(pageNo)
-        : this.draw.getHeight()
+    const docWidth = this.draw.getWidth()
+    const docHeight = this.draw.getHeight()
     const imageWidth = width * scale
     const imageHeight = height * scale
     // 开始绘制
@@ -190,7 +180,7 @@ export class Watermark {
 
   public render(ctx: CanvasRenderingContext2D, pageNo: number) {
     if (this.options.watermark.type === WatermarkType.IMAGE) {
-      this.renderImage(ctx, pageNo)
+      this.renderImage(ctx)
     } else {
       this.renderText(ctx, pageNo)
     }
