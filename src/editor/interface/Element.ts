@@ -2,6 +2,7 @@ import { ImageDisplay } from '../dataset/enum/Common'
 import { ControlComponent } from '../dataset/enum/Control'
 import { ElementType } from '../dataset/enum/Element'
 import { ListStyle, ListType } from '../dataset/enum/List'
+import { ListNumberStyle } from './List'
 import { RowFlex } from '../dataset/enum/Row'
 import { TitleLevel } from '../dataset/enum/Title'
 import { TableBorder, TableBorderStyle } from '../dataset/enum/table/Table'
@@ -64,6 +65,10 @@ export interface IListElement {
   listStyle?: ListStyle
   listId?: string
   listWrap?: boolean
+  listLevel?: number
+  listFormat?: string
+  listNumberStyle?: ListNumberStyle
+  listBulletChar?: string
 }
 
 export interface ITableAttr {
@@ -162,6 +167,7 @@ export interface IImgCaptionOption {
 
 export interface IListOption {
   inheritStyle?: boolean // 是否让列表序号继承文字样式
+  levelIndents?: number[] // px offset per level (length 9); index = level - 1
 }
 
 export interface IImageBasic {

@@ -119,7 +119,11 @@ export const TITLE_CONTEXT_ATTR: Array<keyof IElement> = [
 export const LIST_CONTEXT_ATTR: Array<keyof IElement> = [
   'listId',
   'listType',
-  'listStyle'
+  'listStyle',
+  'listLevel',
+  'listFormat',
+  'listNumberStyle',
+  'listBulletChar'
 ]
 
 export const CONTROL_CONTEXT_ATTR: Array<keyof IElement> = [

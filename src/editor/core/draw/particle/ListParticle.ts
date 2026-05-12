@@ -1,22 +1,32 @@
 import { ZERO } from '../../../dataset/constant/Common'
-import { ulStyleMapping } from '../../../dataset/constant/List'
+import { LIST_INDENT_STEP } from '../../../dataset/constant/listLevel'
 import { ElementType } from '../../../dataset/enum/Element'
 import { KeyMap } from '../../../dataset/enum/KeyMap'
-import { ListStyle, ListType, UlStyle } from '../../../dataset/enum/List'
+import { ListStyle, ListType } from '../../../dataset/enum/List'
 import { DeepRequired } from '../../../interface/Common'
 import { IEditorOption } from '../../../interface/Editor'
 import { IElement, IElementPosition } from '../../../interface/Element'
+import {
+  IListGlyphResult,
+  IListStyle,
+  LIST_MAX_LEVEL
+} from '../../../interface/List'
 import { IRow, IRowElement } from '../../../interface/Row'
 import { getUUID } from '../../../utils'
+import { computeListGlyphMap } from '../../../utils/listNumbering'
 import { RangeManager } from '../../range/RangeManager'
 import { Draw } from '../Draw'
+
+export interface IListLayoutInfo {
+  glyphMap: Map<number, IListGlyphResult>
+  gutterByListId: Map<string, number>
+}
 
 export class ListParticle {
   private draw: Draw
   private range: RangeManager
   private options: DeepRequired<IEditorOption>
 
-  // 非递增样式直接返回默认值
   private readonly UN_COUNT_STYLE_WIDTH = 20
   private readonly MEASURE_BASE_TEXT = '0'
   private readonly LIST_GAP = 10
@@ -32,10 +42,8 @@ export class ListParticle {
     if (isReadonly) return
     const { startIndex, endIndex } = this.range.getRange()
     if (!~startIndex && !~endIndex) return
-    // 需要改变的元素列表
     const changeElementList = this.range.getRangeParagraphElementList()
     if (!changeElementList || !changeElementList.length) return
-    // 如果包含列表则设置为取消列表
     const isUnsetList = changeElementList.find(
       el => el.listType === listType && el.listStyle === listStyle
     )
@@ -43,14 +51,13 @@ export class ListParticle {
       this.unsetList()
       return
     }
-    // 设置值
     const listId = getUUID()
     changeElementList.forEach(el => {
       el.listId = listId
       el.listType = listType
       el.listStyle = listStyle
+      el.listLevel = 1
     })
-    // 光标定位
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
     this.draw.render({ curIndex, isSetCursor })
@@ -61,12 +68,10 @@ export class ListParticle {
     if (isReadonly) return
     const { startIndex, endIndex } = this.range.getRange()
     if (!~startIndex && !~endIndex) return
-    // 需要改变的元素列表
     const changeElementList = this.range
       .getRangeParagraphElementList()
       ?.filter(el => el.listId)
     if (!changeElementList || !changeElementList.length) return
-    // 如果列表最后字符不是换行符则需插入换行符
     const elementList = this.draw.getElementList()
     const endElement = elementList[endIndex]
     if (endElement.listId) {
@@ -85,50 +90,252 @@ export class ListParticle {
         start++
       }
     }
-    // 取消设置
     changeElementList.forEach(el => {
       delete el.listId
       delete el.listType
       delete el.listStyle
       delete el.listWrap
+      delete el.listLevel
     })
-    // 光标定位
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
     this.draw.render({ curIndex, isSetCursor })
   }
 
+  public indent(): boolean {
+    if (this.draw.isReadonly()) return false
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return false
+    const changeElementList = this.range
+      .getRangeParagraphElementList()
+      ?.filter(el => el.listId)
+    if (!changeElementList || !changeElementList.length) return false
+    let mutated = false
+    changeElementList.forEach(el => {
+      const cur = el.listLevel ?? 1
+      const next = Math.min(cur + 1, LIST_MAX_LEVEL)
+      if (next !== cur) {
+        el.listLevel = next
+        mutated = true
+      }
+    })
+    if (!mutated) return false
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.render({ curIndex, isSetCursor })
+    return true
+  }
+
+  public setFormat(format: string | null): boolean {
+    if (this.draw.isReadonly()) return false
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return false
+    const changeElementList = this.range
+      .getRangeParagraphElementList()
+      ?.filter(el => el.listId)
+    if (!changeElementList || !changeElementList.length) return false
+    changeElementList.forEach(el => {
+      if (format) {
+        el.listFormat = format
+      } else {
+        delete el.listFormat
+      }
+    })
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.render({ curIndex, isSetCursor })
+    return true
+  }
+
+  public outdent(): boolean {
+    if (this.draw.isReadonly()) return false
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return false
+    const changeElementList = this.range
+      .getRangeParagraphElementList()
+      ?.filter(el => el.listId)
+    if (!changeElementList || !changeElementList.length) return false
+    let mutated = false
+    let needsExit = false
+    changeElementList.forEach(el => {
+      const cur = el.listLevel ?? 1
+      if (cur > 1) {
+        el.listLevel = cur - 1
+        mutated = true
+      } else {
+        needsExit = true
+      }
+    })
+    if (needsExit) {
+      this.unsetList()
+      return true
+    }
+    if (!mutated) return false
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.render({ curIndex, isSetCursor })
+    return true
+  }
+
+  public computeListLayout(
+    ctx: CanvasRenderingContext2D,
+    elementList: IElement[]
+  ): IListLayoutInfo {
+    const glyphMap = computeListGlyphMap(elementList)
+    const indicesByList = new Map<string, number[]>()
+    glyphMap.forEach((_res, idx) => {
+      const el = elementList[idx]
+      if (!el?.listId) return
+      const arr = indicesByList.get(el.listId) || []
+      arr.push(idx)
+      indicesByList.set(el.listId, arr)
+    })
+    const itemsByList = new Map<string, IElement[]>()
+    for (const el of elementList) {
+      if (!el.listId) continue
+      const bucket = itemsByList.get(el.listId) || []
+      bucket.push(el)
+      itemsByList.set(el.listId, bucket)
+    }
+    const gutterByListId = new Map<string, number>()
+    itemsByList.forEach((items, listId) => {
+      const indices = indicesByList.get(listId) || []
+      gutterByListId.set(
+        listId,
+        this.measureListGutter(ctx, items, glyphMap, indices)
+      )
+    })
+    return { glyphMap, gutterByListId }
+  }
+
+  private measureListGutter(
+    ctx: CanvasRenderingContext2D,
+    items: IElement[],
+    glyphMap: Map<number, IListGlyphResult>,
+    indices: number[]
+  ): number {
+    const { scale, checkbox } = this.options
+    const start = items[0]
+    if (start.listStyle === ListStyle.CHECKBOX) {
+      return (checkbox.width + this.LIST_GAP) * scale
+    }
+    if (start.listType === ListType.UL) {
+      return this.UN_COUNT_STYLE_WIDTH * scale
+    }
+    if (!indices.length) return 0
+    ctx.save()
+    ctx.font = this.getListFontStyle(items, scale)
+    let maxW = 0
+    for (const idx of indices) {
+      const g = glyphMap.get(idx)
+      if (!g) continue
+      const m = ctx.measureText(g.glyph)
+      if (m.width > maxW) maxW = m.width
+    }
+    ctx.restore()
+    return Math.ceil((maxW + this.LIST_GAP) * scale)
+  }
+
+  public getLevelIndent(level: number | undefined): number {
+    const { scale, list } = this.options
+    const lvl = Math.max(1, Math.min(level || 1, LIST_MAX_LEVEL))
+    const arr = list?.levelIndents
+    if (Array.isArray(arr) && arr.length > 0) {
+      const idx = Math.min(lvl - 1, arr.length - 1)
+      const px = Number(arr[idx]) || 0
+      return px * scale
+    }
+    return (lvl - 1) * LIST_INDENT_STEP * scale
+  }
+
+  public applyStyle(style: IListStyle): boolean {
+    if (this.draw.isReadonly()) return false
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return false
+    const changeElementList = this.range
+      .getRangeParagraphElementList()
+      ?.filter(el => el.listId)
+    if (!changeElementList || !changeElementList.length) return false
+    if (!style?.levels?.length) return false
+    const byLevel = new Map<number, (typeof style.levels)[number]>()
+    for (const lvl of style.levels) byLevel.set(lvl.level, lvl)
+    changeElementList.forEach(el => {
+      const lvl = el.listLevel ?? 1
+      const cfg = byLevel.get(lvl)
+      if (!cfg) return
+      if (cfg.format) el.listFormat = cfg.format
+      if (cfg.numberStyle === 'bullet') {
+        if (cfg.bulletChar) el.listBulletChar = cfg.bulletChar
+      } else if (cfg.numberStyle) {
+        el.listNumberStyle = cfg.numberStyle
+      }
+    })
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.render({ curIndex, isSetCursor })
+    return true
+  }
+
+  public setLevel(level: number): boolean {
+    if (this.draw.isReadonly()) return false
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return false
+    const changeElementList = this.range
+      .getRangeParagraphElementList()
+      ?.filter(el => el.listId)
+    if (!changeElementList || !changeElementList.length) return false
+    const clamped = Math.max(1, Math.min(Math.floor(level), LIST_MAX_LEVEL))
+    let mutated = false
+    changeElementList.forEach(el => {
+      if ((el.listLevel ?? 1) !== clamped) {
+        el.listLevel = clamped
+        mutated = true
+      }
+    })
+    if (!mutated) return false
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.render({ curIndex, isSetCursor })
+    return true
+  }
+
+  // Back-compat shim used by callers that only need gutter widths.
   public computeListStyle(
     ctx: CanvasRenderingContext2D,
     elementList: IElement[]
   ): Map<string, number> {
-    const listStyleMap = new Map<string, number>()
-    let start = 0
-    let curListId = elementList[start].listId
-    let curElementList: IElement[] = []
-    const elementLength = elementList.length
-    while (start < elementLength) {
-      const curElement = elementList[start]
-      if (curListId && curListId === curElement.listId) {
-        curElementList.push(curElement)
-      } else {
-        if (curElement.listId && curElement.listId !== curListId) {
-          // 列表结束
-          if (curElementList.length) {
-            const width = this.getListStyleWidth(ctx, curElementList)
-            listStyleMap.set(curListId!, width)
-          }
-          curListId = curElement.listId
-          curElementList = curListId ? [curElement] : []
-        }
+    return this.computeListLayout(ctx, elementList).gutterByListId
+  }
+
+  // Retained for legacy paths; new code should use computeListLayout.
+  public getListStyleWidth(
+    ctx: CanvasRenderingContext2D,
+    listElementList: IElement[]
+  ): number {
+    const { scale, checkbox } = this.options
+    const startElement = listElementList[0]
+    if (
+      startElement.listStyle &&
+      startElement.listStyle !== ListStyle.DECIMAL
+    ) {
+      if (startElement.listStyle === ListStyle.CHECKBOX) {
+        return (checkbox.width + this.LIST_GAP) * scale
       }
-      start++
+      return this.UN_COUNT_STYLE_WIDTH * scale
     }
-    if (curElementList.length) {
-      const width = this.getListStyleWidth(ctx, curElementList)
-      listStyleMap.set(curListId!, width)
-    }
-    return listStyleMap
+    const count = listElementList.reduce((pre, cur) => {
+      if (cur.value === ZERO) pre += 1
+      return pre
+    }, 0)
+    if (!count) return 0
+    ctx.save()
+    ctx.font = this.getListFontStyle(listElementList, scale)
+    const text = `${this.MEASURE_BASE_TEXT.repeat(
+      String(count).length - 1 || 1
+    )}${KeyMap.PERIOD}`
+    const textMetrics = ctx.measureText(text)
+    ctx.restore()
+    return Math.ceil((textMetrics.width + this.LIST_GAP) * scale)
   }
 
   private findStyledElement(elementList: IElement[]): IElement {
@@ -153,50 +360,14 @@ export class ListParticle {
     }
   }
 
-  public getListStyleWidth(
-    ctx: CanvasRenderingContext2D,
-    listElementList: IElement[]
-  ): number {
-    const { scale, checkbox } = this.options
-    const startElement = listElementList[0]
-    // 非递增样式返回固定值
-    if (
-      startElement.listStyle &&
-      startElement.listStyle !== ListStyle.DECIMAL
-    ) {
-      if (startElement.listStyle === ListStyle.CHECKBOX) {
-        return (checkbox.width + this.LIST_GAP) * scale
-      }
-      return this.UN_COUNT_STYLE_WIDTH * scale
-    }
-    // 计算列表数量
-    const count = listElementList.reduce((pre, cur) => {
-      if (cur.value === ZERO) {
-        pre += 1
-      }
-      return pre
-    }, 0)
-    if (!count) return 0
-    ctx.save()
-    ctx.font = this.getListFontStyle(listElementList, scale)
-    // 以递增样式最大宽度为准
-    const text = `${this.MEASURE_BASE_TEXT.repeat(String(count).length - 1 || 1)}${
-      KeyMap.PERIOD
-    }`
-    const textMetrics = ctx.measureText(text)
-    ctx.restore()
-    return Math.ceil((textMetrics.width + this.LIST_GAP) * scale)
-  }
-
   public drawListStyle(
     ctx: CanvasRenderingContext2D,
     row: IRow,
     position: IElementPosition
   ) {
-    const { elementList, offsetX, listIndex, ascent } = row
+    const { elementList, offsetX, ascent } = row
     const startElement = elementList[0]
     if (startElement.value !== ZERO || startElement.listWrap) return
-    // tab width
     let tabWidth = 0
     const { defaultTabWidth, scale } = this.options
     for (let i = 1; i < elementList.length; i++) {
@@ -204,15 +375,14 @@ export class ListParticle {
       if (element?.type !== ElementType.TAB) break
       tabWidth += defaultTabWidth * scale
     }
-    // 列表样式渲染
     const {
       coordinate: {
         leftTop: [startX, startY]
       }
     } = position
-    const x = startX - offsetX! + tabWidth
+    const levelIndent = this.getLevelIndent(row.listLevel)
+    const x = startX - offsetX! + tabWidth + levelIndent
     const y = startY + ascent
-    // 复选框样式特殊处理
     if (startElement.listStyle === ListStyle.CHECKBOX) {
       const { width, height, gap } = this.options.checkbox
       const checkboxRowElement: IRowElement = {
@@ -236,20 +406,13 @@ export class ListParticle {
           elementList: [checkboxRowElement, ...row.elementList]
         }
       })
-    } else {
-      let text = ''
-      if (startElement.listType === ListType.UL) {
-        text =
-          ulStyleMapping[<UlStyle>(<unknown>startElement.listStyle)] ||
-          ulStyleMapping[UlStyle.DISC]
-      } else {
-        text = `${listIndex! + 1}${KeyMap.PERIOD}`
-      }
-      if (!text) return
-      ctx.save()
-      ctx.font = this.getListFontStyle(elementList, scale)
-      ctx.fillText(text, x, y)
-      ctx.restore()
+      return
     }
+    const text = row.listGlyph || ''
+    if (!text) return
+    ctx.save()
+    ctx.font = this.getListFontStyle(elementList, scale)
+    ctx.fillText(text, x, y)
+    ctx.restore()
   }
 }

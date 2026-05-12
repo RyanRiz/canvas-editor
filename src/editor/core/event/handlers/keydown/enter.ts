@@ -20,15 +20,24 @@ export function enter(evt: KeyboardEvent, host: CanvasEvent) {
   const elementList = draw.getElementList()
   const startElement = elementList[startIndex]
   const endElement = elementList[endIndex]
-  // 最后一个列表项行首回车取消列表设置
-  if (
-    isCollapsed &&
-    endElement.listId &&
-    endElement.value === ZERO &&
-    elementList[endIndex + 1]?.listId !== endElement.listId
-  ) {
-    draw.getListParticle().unsetList()
-    return
+  // 空列表项回车: L>1 升级，L1 退出列表 (Word parity)
+  if (isCollapsed && endElement.listId && endElement.value === ZERO) {
+    const next = elementList[endIndex + 1]
+    const isEmptyItem =
+      !next ||
+      next.listId !== endElement.listId ||
+      (next.listId === endElement.listId && next.value === ZERO)
+    if (isEmptyItem) {
+      const listParticle = draw.getListParticle()
+      const level = endElement.listLevel ?? 1
+      if (level > 1) {
+        listParticle.outdent()
+      } else {
+        listParticle.unsetList()
+      }
+      evt.preventDefault()
+      return
+    }
   }
   // 列表块内换行
   let enterText: IElement = {

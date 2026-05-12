@@ -966,6 +966,7 @@ export class Draw {
           delete curElement.listId
           delete curElement.listType
           delete curElement.listStyle
+          delete curElement.listLevel
           startIndex++
         }
       }
@@ -1065,7 +1066,9 @@ export class Draw {
     return this.footer
   }
 
-  public setHeaderOption(payload: Partial<DeepRequired<IEditorOption>['header']>) {
+  public setHeaderOption(
+    payload: Partial<DeepRequired<IEditorOption>['header']>
+  ) {
     Object.assign(this.options.header, payload)
     this.render({
       isSubmitHistory: false,
@@ -1073,7 +1076,9 @@ export class Draw {
     })
   }
 
-  public setFooterOption(payload: Partial<DeepRequired<IEditorOption>['footer']>) {
+  public setFooterOption(
+    payload: Partial<DeepRequired<IEditorOption>['footer']>
+  ) {
     Object.assign(this.options.footer, payload)
     this.render({
       isSubmitHistory: false,
@@ -1622,7 +1627,8 @@ export class Draw {
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d') as CanvasRenderingContext2D
     // 计算列表偏移宽度
-    const listStyleMap = this.listParticle.computeListStyle(ctx, elementList)
+    const listLayout = this.listParticle.computeListLayout(ctx, elementList)
+    const listStyleMap = listLayout.gutterByListId
     const rowList: IRow[] = []
     let currentPageColumns = this.normalizePageColumns(
       isFromTable
@@ -1690,8 +1696,10 @@ export class Draw {
       // 实际可用宽度
       const offsetX =
         curRow.offsetX ||
-        (element.listId && listStyleMap.get(element.listId)) ||
-        0
+        ((element.listId && listStyleMap.get(element.listId)) || 0) +
+          (element.listId
+            ? this.listParticle.getLevelIndent(element.listLevel)
+            : 0)
       const rowInnerWidth = curRow.innerWidth || innerWidth
       const availableWidth = rowInnerWidth - offsetX
       // 增加起始位置坐标偏移量
@@ -2274,7 +2282,14 @@ export class Draw {
         // 列表缩进
         if (element.listId) {
           row.isList = true
-          row.offsetX = listStyleMap.get(element.listId!)
+          const baseGutter = listStyleMap.get(element.listId!) || 0
+          const levelIndent = this.listParticle.getLevelIndent(
+            element.listLevel
+          )
+          row.offsetX = baseGutter + levelIndent
+          row.listLevel = element.listLevel ?? 1
+          const glyph = listLayout.glyphMap.get(i)
+          if (glyph) row.listGlyph = glyph.glyph
           row.listIndex = listIndex
         }
         // Y轴偏移量

@@ -34,6 +34,7 @@ import {
 import { TitleLevel } from '../../dataset/enum/Title'
 import { VerticalAlign } from '../../dataset/enum/VerticalAlign'
 import { ICatalog } from '../../interface/Catalog'
+import { IListStyle } from '../../interface/List'
 import { DeepRequired } from '../../interface/Common'
 import {
   IGetControlValueOption,
@@ -979,6 +980,31 @@ export class CommandAdapt {
     const isReadonly = this.draw.isReadonly()
     if (isReadonly) return
     this.draw.getListParticle().setList(listType, listStyle)
+  }
+
+  public listIndent() {
+    if (this.draw.isReadonly()) return
+    this.draw.getListParticle().indent()
+  }
+
+  public listOutdent() {
+    if (this.draw.isReadonly()) return
+    this.draw.getListParticle().outdent()
+  }
+
+  public listFormat(format: string | null) {
+    if (this.draw.isReadonly()) return
+    this.draw.getListParticle().setFormat(format)
+  }
+
+  public listSetLevel(level: number) {
+    if (this.draw.isReadonly()) return
+    this.draw.getListParticle().setLevel(level)
+  }
+
+  public listStyle(style: IListStyle) {
+    if (this.draw.isReadonly()) return
+    this.draw.getListParticle().applyStyle(style)
   }
 
   public rowFlex(payload: RowFlex) {

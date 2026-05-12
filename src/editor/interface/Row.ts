@@ -19,6 +19,8 @@ export interface IRow {
   columnIndex?: number
   isList?: boolean
   listIndex?: number
+  listLevel?: number
+  listGlyph?: string
   offsetX?: number
   offsetY?: number
   elementList: IRowElement[]

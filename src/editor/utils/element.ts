@@ -147,11 +147,16 @@ export function formatElementList(
       // 追加节点
       if (valueList.length) {
         const listId = el.listId || getUUID()
+        const parentLevel = el.listLevel ?? 1
         for (let v = 0; v < valueList.length; v++) {
           const value = valueList[v]
           value.listId = listId
-          value.listType = el.listType
-          value.listStyle = el.listStyle
+          if (!value.listType) value.listType = el.listType
+          if (!value.listStyle) value.listStyle = el.listStyle
+          if (value.listLevel === undefined) value.listLevel = parentLevel
+          if (!value.listFormat && el.listFormat) {
+            value.listFormat = el.listFormat
+          }
           elementList.splice(i, 0, value)
           i++
         }
@@ -615,10 +620,7 @@ export function isSameElementExceptValue(
       continue
     }
     // extension对象引用不同但内容相等时不应判定为不同
-    if (
-      key === 'extension' &&
-      isObjectEqual(source[key], target[key])
-    ) {
+    if (key === 'extension' && isObjectEqual(source[key], target[key])) {
       continue
     }
     if (source[key] !== target[key]) {
@@ -1560,7 +1562,8 @@ export function getElementListByHTML(
           const listElement: IElement = {
             value: '',
             type: ElementType.LIST,
-            valueList: []
+            valueList: [],
+            listLevel: 1
           }
           if (node.nodeName === 'OL') {
             listElement.listType = ListType.OL
@@ -1570,8 +1573,17 @@ export function getElementListByHTML(
               (<unknown>listNode.style.listStyleType)
             )
           }
-          listNode.querySelectorAll('li').forEach(li => {
+          const bumpNestedListLevel = (els: IElement[]) => {
+            for (const e of els) {
+              if (e.type === ElementType.LIST) {
+                e.listLevel = (e.listLevel ?? 1) + 1
+              }
+              if (e.valueList) bumpNestedListLevel(e.valueList)
+            }
+          }
+          listNode.querySelectorAll(':scope > li').forEach(li => {
             const liValueList = getElementListByHTML(li.innerHTML, options)
+            bumpNestedListLevel(liValueList)
             liValueList.forEach(list => {
               if (list.value === '\n') {
                 list.listWrap = true

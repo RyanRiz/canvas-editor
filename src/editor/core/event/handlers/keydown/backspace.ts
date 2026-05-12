@@ -105,6 +105,20 @@ export function backspace(evt: KeyboardEvent, host: CanvasEvent) {
         return
       }
     }
+    // 列表项首位退格嵌套则升一级 (Word parity)
+    if (isCollapsed) {
+      const cursorEl = elementList[index]
+      if (
+        cursorEl &&
+        cursorEl.value === ZERO &&
+        cursorEl.listId &&
+        (cursorEl.listLevel ?? 1) > 1
+      ) {
+        draw.getListParticle().outdent()
+        evt.preventDefault()
+        return
+      }
+    }
     //  替换当前行对齐方式
     const startElement = elementList[startIndex]
     if (isCollapsed && startElement.rowFlex && startElement.value === ZERO) {

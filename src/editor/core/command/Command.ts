@@ -34,6 +34,11 @@ export class Command {
   public executeSetElementExtension: CommandAdapt['setElementExtension']
   public executeTitle: CommandAdapt['title']
   public executeList: CommandAdapt['list']
+  public executeListIndent: CommandAdapt['listIndent']
+  public executeListOutdent: CommandAdapt['listOutdent']
+  public executeListFormat: CommandAdapt['listFormat']
+  public executeListSetLevel: CommandAdapt['listSetLevel']
+  public executeListStyle: CommandAdapt['listStyle']
   public executeRowFlex: CommandAdapt['rowFlex']
   public executeRowMargin: CommandAdapt['rowMargin']
   public executeInsertTable: CommandAdapt['insertTable']
@@ -208,6 +213,11 @@ export class Command {
     // 标题、对齐方式、列表
     this.executeTitle = adapt.title.bind(adapt)
     this.executeList = adapt.list.bind(adapt)
+    this.executeListIndent = adapt.listIndent.bind(adapt)
+    this.executeListOutdent = adapt.listOutdent.bind(adapt)
+    this.executeListFormat = adapt.listFormat.bind(adapt)
+    this.executeListSetLevel = adapt.listSetLevel.bind(adapt)
+    this.executeListStyle = adapt.listStyle.bind(adapt)
     this.executeRowFlex = adapt.rowFlex.bind(adapt)
     this.executeRowMargin = adapt.rowMargin.bind(adapt)
     // 表格、图片上传、超链接、搜索、打印、图片操作
@@ -302,8 +312,10 @@ export class Command {
     this.executeDeleteGroup = adapt.deleteGroup.bind(adapt)
     this.executeLocationGroup = adapt.locationGroup.bind(adapt)
     this.executeSetZone = adapt.setZone.bind(adapt)
-    this.executeSetHeaderActiveVariant = adapt.setHeaderActiveVariant.bind(adapt)
-    this.executeSetFooterActiveVariant = adapt.setFooterActiveVariant.bind(adapt)
+    this.executeSetHeaderActiveVariant =
+      adapt.setHeaderActiveVariant.bind(adapt)
+    this.executeSetFooterActiveVariant =
+      adapt.setFooterActiveVariant.bind(adapt)
     this.executeSetHeaderFirstPageEnabled =
       adapt.setHeaderFirstPageEnabled.bind(adapt)
     this.executeSetHeaderOddEvenEnabled =
