@@ -130,6 +130,7 @@ import { Area } from './interactive/Area'
 import { Badge } from './frame/Badge'
 import { Graffiti } from './graffiti/Graffiti'
 import { Magnifier } from './interactive/Magnifier'
+import { Ruler } from './ruler/Ruler'
 import { IPageColumns } from '../../interface/PageColumns'
 import { IRange } from '../../interface/Range'
 import { IPositionContext } from '../../interface/Position'
@@ -371,6 +372,7 @@ export class Draw {
   private selectionObserver: SelectionObserver
   private imageObserver: ImageObserver
   private graffiti: Graffiti
+  private ruler: Ruler
 
   private LETTER_REG: RegExp
   private WORD_LIKE_REG: RegExp
@@ -525,12 +527,19 @@ export class Draw {
       this.setPrintData()
     }
     this.range.setRange(0, 0)
+    // Ruler must instantiate *before* the first render so the page wrappers
+    // are wrapped in `.ce-page-frame` grid cells and the first paint already
+    // accounts for the v-ruler's stolen left strip. Marker / tick drawing
+    // itself runs through the ruler's own `render()` (subscribed to the same
+    // page-size / scale / content / cursor events as the document repaint).
+    this.ruler = new Ruler(this)
     this.render({
       isInit: true,
       isSetCursor: true,
       isFirstRender: true,
       curIndex: 0
     })
+    this.ruler.render()
     this.cursor.focus()
   }
 
@@ -2928,8 +2937,21 @@ export class Draw {
       const isStartElement = curRow.elementList.length === 1
       if (isStartElement && !curRow.offsetX && !element.listId) {
         const firstEl = curRow.elementList[0]
-        if (firstEl?.indent) {
-          curRow.offsetX = firstEl.indent * defaultTabWidth * scale
+        // MS Word first-line indent: only applies to the *first* row of the
+        // paragraph. canvas-editor places the paragraph's ZERO (U+200B)
+        // delimiter as the FIRST element of each paragraph, so a row is the
+        // "first row of its paragraph" exactly when its first element is
+        // that ZERO. Wrapped rows of the same paragraph begin with a
+        // content character and therefore never see the firstLineIndent
+        // contribution.
+        const isFirstRowOfParagraph = firstEl?.value === ZERO
+        const indentSteps = firstEl?.indent || 0
+        const firstLineSteps = isFirstRowOfParagraph
+          ? firstEl?.firstLineIndent || 0
+          : 0
+        const totalSteps = indentSteps + firstLineSteps
+        if (totalSteps) {
+          curRow.offsetX = totalSteps * defaultTabWidth * scale
         }
       }
       // Lock right indent off the row's first element too, by the same logic
@@ -3397,7 +3419,49 @@ export class Draw {
         metrics.width = elementWidth * scale
         metrics.height = height * scale
       } else if (element.type === ElementType.TAB) {
-        metrics.width = defaultTabWidth * scale
+        // MS Word tab semantics: a TAB advances the cursor to the next tab
+        // stop ≥ current column, not by a fixed width. Two-tier lookup:
+        //   1. **Paragraph-explicit tab stops** (`element.tabStops`, set by
+        //      the ruler) — find the first stop > currentLogicalX.
+        //   2. **Implicit default grid** — `options.ruler.defaultTabStopInterval`
+        //      (Word's default is 0.5 inch = 48 px at scale=1). The legacy
+        //      `defaultTabWidth` fallback is used as a last resort so the
+        //      historical "fixed-width tab" behavior is preserved when the
+        //      ruler option is disabled.
+        //
+        // `x` here is the running layout cursor in screen px; by line 2980
+        // the row's offsetX has already been added to it (for the first
+        // element of the row), so `x - startX - offsetX` is the column
+        // position relative to the paragraph's content-left edge, in screen
+        // px. Divide by scale to compare with the logical-px tab stops.
+        let advance = defaultTabWidth * scale
+        const paragraphTabStops = element.tabStops
+        const currentLogicalX = (x - startX - offsetX) / scale
+        if (paragraphTabStops && paragraphTabStops.length) {
+          // tabStops is kept sorted by `position` on insert/move; pick the
+          // first one strictly past the current column. A small epsilon (0.5
+          // logical px) lets a tab parked exactly on a stop advance to the
+          // NEXT stop, matching Word's "Tab moves past, not onto, the
+          // current stop" behavior.
+          const next = paragraphTabStops.find(
+            t => t.position > currentLogicalX + 0.5
+          )
+          if (next) {
+            advance = (next.position - currentLogicalX) * scale
+          }
+        } else if (!this.options.ruler.disabled) {
+          // Word's default tab grid kicks in only when the ruler subsystem
+          // is enabled; otherwise we preserve the legacy fixed-step tab.
+          const grid = this.options.ruler.defaultTabStopInterval
+          if (grid > 0) {
+            const nextGridLogical =
+              Math.floor(currentLogicalX / grid + 1e-3 + 1) * grid
+            advance = (nextGridLogical - currentLogicalX) * scale
+          }
+        }
+        // Floor of one default-tab-width keeps the tab visually present even
+        // in pathological cases (e.g. a stop placed exactly at the caret).
+        metrics.width = Math.max(advance, defaultTabWidth * 0.25 * scale)
         metrics.height = defaultSize * scale
         metrics.boundingBoxDescent = 0
         metrics.boundingBoxAscent =
@@ -6640,6 +6704,9 @@ export class Draw {
     this._typingBatchActive = false
     this._typingBatchLastCurIndex = undefined
     this._invalidatePaintCache()
+    // Tear down ruler before the container is removed so its document-level
+    // mousemove/mouseup listeners don't outlive the editor.
+    this.ruler?.destroy()
     this.container.remove()
     this.globalEvent.removeEvent()
     this.scrollObserver.removeEvent()
