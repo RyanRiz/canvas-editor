@@ -22,6 +22,10 @@ export interface IRangeStyle {
   strikeout: boolean
   color: string | null
   highlight: string | null
+  // MS Word style paragraph shading — read off the caret's paragraph ZERO
+  // delimiter so the toolbar reflects the active paragraph's color regardless
+  // of where in the paragraph the caret sits.
+  paragraphShading: string | null
   rowFlex: RowFlex | null
   rowMargin: number
   dashArray: number[]

@@ -43,6 +43,7 @@ import { Position } from '../position/Position'
 import { RangeManager } from '../range/RangeManager'
 import { Background } from './frame/Background'
 import { Highlight } from './richtext/Highlight'
+import { ParagraphShading } from './richtext/ParagraphShading'
 import { Margin } from './frame/Margin'
 import { Search } from './interactive/Search'
 import { Strikeout } from './richtext/Strikeout'
@@ -332,6 +333,7 @@ export class Draw {
   private underline: Underline
   private strikeout: Strikeout
   private highlight: Highlight
+  private paragraphShading: ParagraphShading
   private historyManager: HistoryManager
   private previewer: Previewer
   private imageParticle: ImageParticle
@@ -455,6 +457,7 @@ export class Draw {
     this.underline = new Underline(this)
     this.strikeout = new Strikeout(this)
     this.highlight = new Highlight(this)
+    this.paragraphShading = new ParagraphShading(this)
     this.previewer = new Previewer(this)
     this.imageParticle = new ImageParticle(this)
     this.laTexParticle = new LaTexParticle(this)
@@ -4299,6 +4302,16 @@ export class Draw {
   }
 
   public drawRow(ctx: CanvasRenderingContext2D, payload: IDrawRowPayload) {
+    // Paragraph shading paints first — full-width band per row of each shaded
+    // paragraph, indent-aware, fragmenting across pages. Highlight overlays
+    // shading (character-level over block-level), text overlays both, then
+    // selection / search overlay on the decoration layer.
+    this.paragraphShading.render(ctx, {
+      rowList: payload.rowList,
+      elementList: payload.elementList,
+      positionList: payload.positionList,
+      innerWidth: payload.innerWidth
+    })
     // 优先绘制高亮元素
     this._drawHighlight(ctx, payload)
     // 绘制元素、下划线、删除线、选区

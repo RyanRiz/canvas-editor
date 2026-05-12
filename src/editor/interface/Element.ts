@@ -35,6 +35,13 @@ export interface IElementStyle {
   bold?: boolean
   color?: string
   highlight?: string
+  // MS Word paragraph shading — a paragraph-level background painted behind
+  // every row of the paragraph, indent-respecting and fragmenting across page
+  // boundaries. Distinct from `highlight` (character-level, glyph-tight). The
+  // value is stamped on the paragraph's ZERO delimiter element (see the
+  // `_applyParagraphSpacing` pattern) and read off the ZERO during render so
+  // any row in the paragraph sees the same color.
+  paragraphShading?: string
   italic?: boolean
   underline?: boolean
   strikeout?: boolean

@@ -1477,6 +1477,139 @@ export class CommandAdapt {
   }
 
   /**
+   * Set or clear MS Word style paragraph shading on each paragraph touched by
+   * the current selection.
+   *
+   * Stored on the paragraph's ZERO delimiter (the same location as
+   * spaceBefore / spaceAfter) so reads from any row of the paragraph
+   * converge on a single value, and so a Word-style "select half of two
+   * paragraphs" gesture paints both whole paragraphs (not just the spanned
+   * runs — that would be character-level highlight semantics).
+   *
+   * Pass `null` to clear; matches the toolbar's "Automatic" picker option.
+   *
+   * The history strategy here mirrors `_applyParagraphSpacing`: an in-place
+   * delta on each affected ZERO, never a snapshot. A snapshot path would
+   * deep-clone elementList on undo and bust `_tryConvergeIncrementalRowList`'s
+   * element-identity check, forcing a full document repaint. Paragraph
+   * shading is a layout-stable mutation (no metrics change), so the
+   * incremental renderer converges within the affected paragraphs.
+   *
+   * `options.clearOverlappingHighlight` — Word-faithful default is `false`:
+   * highlight and paragraph shading are independent. Toolbars that want the
+   * "single source of truth" UX (apply shading → existing character-level
+   * highlight in the same paragraph(s) disappears) pass `true`. Pass `null`
+   * to clear shading regardless of the flag — clearing should never erase
+   * unrelated highlight.
+   */
+  public paragraphShading(
+    payload: string | null,
+    options?: { clearOverlappingHighlight?: boolean }
+  ) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const elementList = this.draw.getElementList()
+    // Walk back from the selection start to its paragraph's ZERO so the
+    // first affected paragraph is fully covered. Same scan as in
+    // `_applyParagraphSpacing` (kept inlined here to avoid pulling that
+    // method's history wrapper, which embeds field-specific dirty-range
+    // logic that doesn't apply to shading).
+    let pz = startIndex
+    while (pz > 0 && elementList[pz]?.value !== ZERO) pz--
+    const oldValues: Array<{
+      el: (typeof elementList)[number]
+      old: string | undefined
+    }> = []
+    for (let i = pz; i <= endIndex; i++) {
+      const el = elementList[i]
+      if (el?.value === ZERO) {
+        oldValues.push({ el, old: el.paragraphShading })
+      }
+    }
+    if (!oldValues.length) return
+    // Extend the dirty end to the last element of the final affected
+    // paragraph so the incremental renderer doesn't converge before
+    // repainting the trailing row (shading touches every row, not just the
+    // first / last like spaceBefore / spaceAfter).
+    const posCtx = this.position.getPositionContext()
+    const paragraphEnd = (() => {
+      let end = endIndex
+      while (
+        end + 1 < elementList.length &&
+        elementList[end + 1]?.value !== ZERO
+      ) {
+        end++
+      }
+      return end
+    })()
+    const dirtyRange: { start: number; end: number } =
+      posCtx.isTable && posCtx.index !== undefined
+        ? { start: posCtx.index, end: posCtx.index }
+        : { start: pz, end: paragraphEnd }
+    // Optional: clear character-level highlight inside the affected
+    // paragraph range so the visual result is a single uniform band
+    // (Word-like UX). Captured before mutation so applyBackward can
+    // restore highlight exactly — including `undefined` → property absent,
+    // so undo doesn't accidentally stamp `highlight: undefined` and shadow
+    // a future default-style highlight.
+    const shouldClearHighlight =
+      options?.clearOverlappingHighlight === true && payload !== null
+    const oldHighlights: Array<{
+      el: (typeof elementList)[number]
+      old: string | undefined
+    }> = []
+    if (shouldClearHighlight) {
+      for (let i = pz; i <= paragraphEnd; i++) {
+        const el = elementList[i]
+        if (el && el.highlight !== undefined) {
+          oldHighlights.push({ el, old: el.highlight })
+        }
+      }
+    }
+    const applyForward = () => {
+      for (const { el } of oldValues) {
+        if (payload === null) delete el.paragraphShading
+        else el.paragraphShading = payload
+      }
+      for (const { el } of oldHighlights) {
+        delete el.highlight
+      }
+    }
+    const applyBackward = () => {
+      for (const { el, old } of oldValues) {
+        if (old !== undefined) el.paragraphShading = old
+        else delete el.paragraphShading
+      }
+      for (const { el, old } of oldHighlights) {
+        if (old !== undefined) el.highlight = old
+        else delete el.highlight
+      }
+    }
+    applyForward()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
+        this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+  }
+
+  /**
    * Apply spaceBefore / spaceAfter as an in-place delta on each affected
    * paragraph's ZERO delimiter, then push a delta history entry so undo /
    * redo replays the same in-place mutation.

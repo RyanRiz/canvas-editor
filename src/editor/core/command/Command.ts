@@ -44,6 +44,7 @@ export class Command {
   public executeSetRightIndent: CommandAdapt['setRightIndent']
   public executeSpaceBefore: CommandAdapt['spaceBefore']
   public executeSpaceAfter: CommandAdapt['spaceAfter']
+  public executeParagraphShading: CommandAdapt['paragraphShading']
   public executeInsertTable: CommandAdapt['insertTable']
   public executeInsertTableTopRow: CommandAdapt['insertTableTopRow']
   public executeInsertTableBottomRow: CommandAdapt['insertTableBottomRow']
@@ -217,6 +218,7 @@ export class Command {
     this.executeSetRightIndent = adapt.setRightIndent.bind(adapt)
     this.executeSpaceBefore = adapt.spaceBefore.bind(adapt)
     this.executeSpaceAfter = adapt.spaceAfter.bind(adapt)
+    this.executeParagraphShading = adapt.paragraphShading.bind(adapt)
     // 表格、图片上传、超链接、搜索、打印、图片操作
     this.executeInsertTable = adapt.insertTable.bind(adapt)
     this.executeInsertTableTopRow = adapt.insertTableTopRow.bind(adapt)

@@ -563,6 +563,10 @@ export class RangeManager {
     const rightIndent = paragraphZeroElement.rightIndent ?? 0
     const spaceBefore = paragraphZeroElement.spaceBefore ?? 0
     const spaceAfter = paragraphZeroElement.spaceAfter ?? 0
+    // Paragraph shading lives on the paragraph ZERO (same as spaceBefore /
+    // spaceAfter) — reading off the caret element would only see it when the
+    // caret happens to sit on the ZERO itself.
+    const paragraphShading = paragraphZeroElement.paragraphShading || null
     const rangeStyle: IRangeStyle = {
       type,
       undo,
@@ -576,6 +580,7 @@ export class RangeManager {
       strikeout,
       color,
       highlight,
+      paragraphShading,
       rowFlex,
       rowMargin,
       dashArray,
@@ -622,6 +627,7 @@ export class RangeManager {
       strikeout: false,
       color: null,
       highlight: null,
+      paragraphShading: null,
       rowFlex: null,
       rowMargin,
       dashArray: [],
