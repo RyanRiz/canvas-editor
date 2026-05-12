@@ -44,6 +44,7 @@ export class ControlSearch {
       }
     } = this.options
     const element = elementList[index]
+    if (!element) return ''
     const isPrintMode = this.draw.isPrintMode()
     const activeControlElement = this.control.getActiveControl()?.getElement()
     // 颜色配置：元素 > 控件激活 > 控件禁用 > 控件存在值 > 控件不存在值

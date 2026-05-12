@@ -167,6 +167,11 @@ export class Area {
 
   public compute() {
     this.areaInfoMap.clear()
+    // PERF-PLAN follow-up：当主列表无任何 areaId 元素时直接跳过 O(N) 扫描。
+    // 由 Draw 维护一个增量计数缓存（_mainAreaCount），spliceElementList 同步
+    // 增减；首次 / 失效时这里重新统计一次。绝大多数文档（含 jats-editor 默认
+    // 内容）没有 area，每帧省下 ~30k 次 element.areaId 查询。
+    if (this.draw.getMainAreaCount() === 0) return
     const elementList = this.draw.getOriginalMainElementList()
     const positionList = this.position.getOriginalMainPositionList()
     for (let e = 0; e < elementList.length; e++) {

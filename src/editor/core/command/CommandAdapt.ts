@@ -21,6 +21,7 @@ import {
   PaperDirection
 } from '../../dataset/enum/Editor'
 import { ElementType } from '../../dataset/enum/Element'
+import { SectionBreakType } from '../../dataset/enum/SectionBreak'
 import { ElementStyleKey } from '../../dataset/enum/ElementStyle'
 import { ListStyle, ListType } from '../../dataset/enum/List'
 import { MoveDirection } from '../../dataset/enum/Observer'
@@ -83,6 +84,7 @@ import {
   ITableInfoByEvent
 } from '../../interface/Event'
 import { IMargin } from '../../interface/Margin'
+import { IParagraphBorder } from '../../interface/ParagraphBorder'
 import { ILocationPosition, IPositionContext } from '../../interface/Position'
 import { IRange, RangeContext, RangeRect } from '../../interface/Range'
 import {
@@ -387,10 +389,28 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (selection?.length) {
+      const { startIndex, endIndex } = this.range.getRange()
+      const oldValues = selection.map(el => ({ el, font: el.font }))
       selection.forEach(el => {
         el.font = payload
       })
-      this.draw.render({ isSetCursor: false })
+      this.draw.getHistoryManager().executeDelta({
+        applyForward: () => {
+          for (const item of oldValues) item.el.font = payload
+          this.draw.markDirty(startIndex, endIndex)
+          this.draw.cancelScheduledRender()
+          this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+        },
+        applyBackward: () => {
+          for (const item of oldValues) item.el.font = item.font
+          this.draw.markDirty(startIndex, endIndex)
+          this.draw.cancelScheduledRender()
+          this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+        }
+      })
+      this.draw.markDirty(startIndex, endIndex)
+      this.draw.cancelScheduledRender()
+      this.draw.render({ isSetCursor: false, isSubmitHistory: false })
     } else {
       let isSubmitHistory = true
       const { endIndex } = this.range.getRange()
@@ -419,14 +439,21 @@ export class CommandAdapt {
       !isIgnoreDisabledRule &&
       (this.draw.isReadonly() || this.draw.isDisabled())
     if (isDisabled) return
+    // Non-text style commands must terminate any pending typing batch before
+    // mutating element properties, otherwise undo can replay stale text-input
+    // delta mutations together with the new style change.
+    this.draw.flushTypingBatch()
     const { minSize, maxSize, defaultSize } = this.options
     if (payload < minSize || payload > maxSize) return
     // 选区设置或设置换行处样式
     let renderOption: IDrawOption = {}
     let changeElementList: IElement[] = []
+    let oldValues: { el: IElement; size?: number }[] = []
+    const { startIndex, endIndex } = this.range.getRange()
     const selection = this.range.getTextLikeSelectionElementList()
     if (selection?.length) {
       changeElementList = selection
+      oldValues = selection.map(el => ({ el, size: el.size }))
       renderOption = { isSetCursor: false }
     } else {
       const { endIndex } = this.range.getRange()
@@ -460,7 +487,29 @@ export class CommandAdapt {
       isExistUpdate = true
     })
     if (isExistUpdate) {
-      this.draw.render(renderOption)
+      if (oldValues.length) {
+        const newSize = payload
+        this.draw.getHistoryManager().executeDelta({
+          applyForward: () => {
+            for (const item of oldValues) item.el.size = newSize
+            this.draw.markDirty(startIndex, endIndex)
+            this.draw.cancelScheduledRender()
+            this.draw.render({ ...renderOption, isSubmitHistory: false })
+          },
+          applyBackward: () => {
+            for (const item of oldValues) {
+              if (item.size !== undefined) item.el.size = item.size
+              else delete item.el.size
+            }
+            this.draw.markDirty(startIndex, endIndex)
+            this.draw.cancelScheduledRender()
+            this.draw.render({ ...renderOption, isSubmitHistory: false })
+          }
+        })
+      }
+      this.draw.markDirty(startIndex, endIndex)
+      this.draw.cancelScheduledRender()
+      this.draw.render({ ...renderOption, isSubmitHistory: false })
     }
   }
 
@@ -470,19 +519,23 @@ export class CommandAdapt {
       !isIgnoreDisabledRule &&
       (this.draw.isReadonly() || this.draw.isDisabled())
     if (isDisabled) return
+    this.draw.flushTypingBatch()
     const { defaultSize, maxSize } = this.options
     const selection = this.range.getTextLikeSelectionElementList()
     // 选区设置或设置换行处样式
     let renderOption: IDrawOption = {}
     let changeElementList: IElement[] = []
+    let oldValues: { el: IElement; size?: number }[] = []
+    const { startIndex, endIndex } = this.range.getRange()
     if (selection?.length) {
       changeElementList = selection
+      oldValues = selection.map(el => ({ el, size: el.size }))
       renderOption = { isSetCursor: false }
     } else {
-      const { endIndex } = this.range.getRange()
-      if (!~endIndex) return
+      const { endIndex: sizeAddEndIdx } = this.range.getRange()
+      if (!~sizeAddEndIdx) return
       const elementList = this.draw.getElementList()
-      const enterElement = elementList[endIndex]
+      const enterElement = elementList[sizeAddEndIdx]
       // 设置默认样式
       const style = this.range.getDefaultStyle()
       const anchorSize = style?.size || enterElement.size || defaultSize
@@ -491,10 +544,10 @@ export class CommandAdapt {
       })
       if (enterElement?.value === ZERO) {
         changeElementList.push(enterElement)
-        renderOption = { curIndex: endIndex }
+        renderOption = { curIndex: sizeAddEndIdx }
       } else {
         this.draw.render({
-          curIndex: endIndex,
+          curIndex: sizeAddEndIdx,
           isCompute: false,
           isSubmitHistory: false
         })
@@ -515,7 +568,25 @@ export class CommandAdapt {
       isExistUpdate = true
     })
     if (isExistUpdate) {
-      this.draw.render(renderOption)
+      if (oldValues.length) {
+        this.draw.getHistoryManager().executeDelta({
+          applyForward: () => {
+            // current state is already forward — only backward needs old values
+          },
+          applyBackward: () => {
+            for (const item of oldValues) {
+              if (item.size !== undefined) item.el.size = item.size
+              else delete item.el.size
+            }
+            this.draw.markDirty(startIndex, endIndex)
+            this.draw.cancelScheduledRender()
+            this.draw.render({ ...renderOption, isSubmitHistory: false })
+          }
+        })
+      }
+      this.draw.markDirty(startIndex, endIndex)
+      this.draw.cancelScheduledRender()
+      this.draw.render({ ...renderOption, isSubmitHistory: false })
     }
   }
 
@@ -525,19 +596,23 @@ export class CommandAdapt {
       !isIgnoreDisabledRule &&
       (this.draw.isReadonly() || this.draw.isDisabled())
     if (isDisabled) return
+    this.draw.flushTypingBatch()
     const { defaultSize, minSize } = this.options
     const selection = this.range.getTextLikeSelectionElementList()
     // 选区设置或设置换行处样式
     let renderOption: IDrawOption = {}
     let changeElementList: IElement[] = []
+    let oldValues: { el: IElement; size?: number }[] = []
+    const { startIndex, endIndex } = this.range.getRange()
     if (selection?.length) {
       changeElementList = selection
+      oldValues = selection.map(el => ({ el, size: el.size }))
       renderOption = { isSetCursor: false }
     } else {
-      const { endIndex } = this.range.getRange()
-      if (!~endIndex) return
+      const { endIndex: sizeMinusEndIdx } = this.range.getRange()
+      if (!~sizeMinusEndIdx) return
       const elementList = this.draw.getElementList()
-      const enterElement = elementList[endIndex]
+      const enterElement = elementList[sizeMinusEndIdx]
       const style = this.range.getDefaultStyle()
       const anchorSize = style?.size || enterElement.size || defaultSize
       this.range.setDefaultStyle({
@@ -545,10 +620,10 @@ export class CommandAdapt {
       })
       if (enterElement?.value === ZERO) {
         changeElementList.push(enterElement)
-        renderOption = { curIndex: endIndex }
+        renderOption = { curIndex: sizeMinusEndIdx }
       } else {
         this.draw.render({
-          curIndex: endIndex,
+          curIndex: sizeMinusEndIdx,
           isCompute: false,
           isSubmitHistory: false
         })
@@ -569,7 +644,23 @@ export class CommandAdapt {
       isExistUpdate = true
     })
     if (isExistUpdate) {
-      this.draw.render(renderOption)
+      if (oldValues.length) {
+        this.draw.getHistoryManager().executeDelta({
+          applyForward: () => {},
+          applyBackward: () => {
+            for (const item of oldValues) {
+              if (item.size !== undefined) item.el.size = item.size
+              else delete item.el.size
+            }
+            this.draw.markDirty(startIndex, endIndex)
+            this.draw.cancelScheduledRender()
+            this.draw.render({ ...renderOption, isSubmitHistory: false })
+          }
+        })
+      }
+      this.draw.markDirty(startIndex, endIndex)
+      this.draw.cancelScheduledRender()
+      this.draw.render({ ...renderOption, isSubmitHistory: false })
     }
   }
 
@@ -581,11 +672,29 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (selection?.length) {
-      const noBoldIndex = selection.findIndex(s => !s.bold)
+      const { startIndex, endIndex } = this.range.getRange()
+      const newValue = !selection.every(s => s.bold)
+      const oldValues = selection.map(el => ({ el, bold: el.bold }))
       selection.forEach(el => {
-        el.bold = !!~noBoldIndex
+        el.bold = newValue
       })
-      this.draw.render({ isSetCursor: false })
+      this.draw.getHistoryManager().executeDelta({
+        applyForward: () => {
+          for (const item of oldValues) item.el.bold = newValue
+          this.draw.markDirty(startIndex, endIndex)
+          this.draw.cancelScheduledRender()
+          this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+        },
+        applyBackward: () => {
+          for (const item of oldValues) item.el.bold = item.bold
+          this.draw.markDirty(startIndex, endIndex)
+          this.draw.cancelScheduledRender()
+          this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+        }
+      })
+      this.draw.markDirty(startIndex, endIndex)
+      this.draw.cancelScheduledRender()
+      this.draw.render({ isSetCursor: false, isSubmitHistory: false })
     } else {
       let isSubmitHistory = true
       const { endIndex } = this.range.getRange()
@@ -616,11 +725,29 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (selection?.length) {
-      const noItalicIndex = selection.findIndex(s => !s.italic)
+      const { startIndex, endIndex } = this.range.getRange()
+      const newValue = !selection.every(s => s.italic)
+      const oldValues = selection.map(el => ({ el, italic: el.italic }))
       selection.forEach(el => {
-        el.italic = !!~noItalicIndex
+        el.italic = newValue
       })
-      this.draw.render({ isSetCursor: false })
+      this.draw.getHistoryManager().executeDelta({
+        applyForward: () => {
+          for (const item of oldValues) item.el.italic = newValue
+          this.draw.markDirty(startIndex, endIndex)
+          this.draw.cancelScheduledRender()
+          this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+        },
+        applyBackward: () => {
+          for (const item of oldValues) item.el.italic = item.italic
+          this.draw.markDirty(startIndex, endIndex)
+          this.draw.cancelScheduledRender()
+          this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+        }
+      })
+      this.draw.markDirty(startIndex, endIndex)
+      this.draw.cancelScheduledRender()
+      this.draw.render({ isSetCursor: false, isSubmitHistory: false })
     } else {
       let isSubmitHistory = true
       const { endIndex } = this.range.getRange()
@@ -666,6 +793,11 @@ export class CommandAdapt {
             s.textDecoration &&
             !isObjectEqual(s.textDecoration, textDecoration))
       )
+      const oldValues = selection.map(el => ({
+        el,
+        underline: el.underline,
+        textDecoration: el.textDecoration
+      }))
       selection.forEach(el => {
         el.underline = isSetUnderline
         if (isSetUnderline && textDecoration) {
@@ -674,9 +806,35 @@ export class CommandAdapt {
           delete el.textDecoration
         }
       })
+      this.draw.getHistoryManager().executeDelta({
+        applyForward: () => {
+          for (const item of oldValues) {
+            item.el.underline = isSetUnderline
+            if (isSetUnderline && textDecoration) {
+              item.el.textDecoration = textDecoration
+            } else {
+              delete item.el.textDecoration
+            }
+          }
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        },
+        applyBackward: () => {
+          for (const item of oldValues) {
+            item.el.underline = item.underline
+            if (item.textDecoration !== undefined) {
+              item.el.textDecoration = item.textDecoration
+            } else {
+              delete item.el.textDecoration
+            }
+          }
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        }
+      })
+      this.draw.cancelScheduledRender()
       this.draw.render({
         isSetCursor: false,
-        isCompute: false
+        isCompute: false,
+        isSubmitHistory: false
       })
     } else {
       let isSubmitHistory = true
@@ -710,13 +868,26 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (selection?.length) {
-      const noStrikeoutIndex = selection.findIndex(s => !s.strikeout)
+      const newValue = !selection.every(s => s.strikeout)
+      const oldValues = selection.map(el => ({ el, strikeout: el.strikeout }))
       selection.forEach(el => {
-        el.strikeout = !!~noStrikeoutIndex
+        el.strikeout = newValue
       })
+      this.draw.getHistoryManager().executeDelta({
+        applyForward: () => {
+          for (const item of oldValues) item.el.strikeout = newValue
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        },
+        applyBackward: () => {
+          for (const item of oldValues) item.el.strikeout = item.strikeout
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        }
+      })
+      this.draw.cancelScheduledRender()
       this.draw.render({
         isSetCursor: false,
-        isCompute: false
+        isCompute: false,
+        isSubmitHistory: false
       })
     } else {
       let isSubmitHistory = true
@@ -750,12 +921,18 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (!selection) return
-    const superscriptIndex = selection.findIndex(
+    const { startIndex, endIndex } = this.range.getRange()
+    const oldValues = selection.map(el => ({
+      el,
+      type: el.type,
+      actualSize: el.actualSize
+    }))
+    const isActivating = !selection.some(
       s => s.type === ElementType.SUPERSCRIPT
     )
     selection.forEach(el => {
       // 取消上标
-      if (~superscriptIndex) {
+      if (!isActivating) {
         if (el.type === ElementType.SUPERSCRIPT) {
           el.type = ElementType.TEXT
           delete el.actualSize
@@ -771,7 +948,43 @@ export class CommandAdapt {
         }
       }
     })
-    this.draw.render({ isSetCursor: false })
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldValues) {
+          if (!isActivating) {
+            if (item.type === ElementType.SUPERSCRIPT) {
+              item.el.type = ElementType.TEXT
+              delete item.el.actualSize
+            }
+          } else {
+            if (
+              !item.type ||
+              item.type === ElementType.TEXT ||
+              item.type === ElementType.SUBSCRIPT
+            ) {
+              item.el.type = ElementType.SUPERSCRIPT
+            }
+          }
+        }
+        this.draw.markDirty(startIndex, endIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          item.el.type = item.type
+          if (item.actualSize !== undefined)
+            item.el.actualSize = item.actualSize
+          else delete item.el.actualSize
+        }
+        this.draw.markDirty(startIndex, endIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(startIndex, endIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ isSetCursor: false, isSubmitHistory: false })
   }
 
   public subscript(options?: IRichtextOption) {
@@ -782,12 +995,16 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (!selection) return
-    const subscriptIndex = selection.findIndex(
-      s => s.type === ElementType.SUBSCRIPT
-    )
+    const { startIndex, endIndex } = this.range.getRange()
+    const oldValues = selection.map(el => ({
+      el,
+      type: el.type,
+      actualSize: el.actualSize
+    }))
+    const isActivating = !selection.some(s => s.type === ElementType.SUBSCRIPT)
     selection.forEach(el => {
       // 取消下标
-      if (~subscriptIndex) {
+      if (!isActivating) {
         if (el.type === ElementType.SUBSCRIPT) {
           el.type = ElementType.TEXT
           delete el.actualSize
@@ -803,7 +1020,43 @@ export class CommandAdapt {
         }
       }
     })
-    this.draw.render({ isSetCursor: false })
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldValues) {
+          if (!isActivating) {
+            if (item.type === ElementType.SUBSCRIPT) {
+              item.el.type = ElementType.TEXT
+              delete item.el.actualSize
+            }
+          } else {
+            if (
+              !item.type ||
+              item.type === ElementType.TEXT ||
+              item.type === ElementType.SUPERSCRIPT
+            ) {
+              item.el.type = ElementType.SUBSCRIPT
+            }
+          }
+        }
+        this.draw.markDirty(startIndex, endIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          item.el.type = item.type
+          if (item.actualSize !== undefined)
+            item.el.actualSize = item.actualSize
+          else delete item.el.actualSize
+        }
+        this.draw.markDirty(startIndex, endIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(startIndex, endIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ isSetCursor: false, isSubmitHistory: false })
   }
 
   public color(payload: string | null, options?: IRichtextOption) {
@@ -814,6 +1067,10 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (selection?.length) {
+      const oldValues = selection.map(el => ({
+        el,
+        color: el.color
+      }))
       selection.forEach(el => {
         if (payload) {
           el.color = payload
@@ -821,9 +1078,27 @@ export class CommandAdapt {
           delete el.color
         }
       })
+      this.draw.getHistoryManager().executeDelta({
+        applyForward: () => {
+          for (const item of oldValues) {
+            if (payload) item.el.color = payload
+            else delete item.el.color
+          }
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        },
+        applyBackward: () => {
+          for (const item of oldValues) {
+            if (item.color !== undefined) item.el.color = item.color
+            else delete item.el.color
+          }
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        }
+      })
+      this.draw.cancelScheduledRender()
       this.draw.render({
         isSetCursor: false,
-        isCompute: false
+        isCompute: false,
+        isSubmitHistory: false
       })
     } else {
       let isSubmitHistory = true
@@ -859,6 +1134,10 @@ export class CommandAdapt {
     if (isDisabled) return
     const selection = this.range.getSelectionElementList()
     if (selection?.length) {
+      const oldValues = selection.map(el => ({
+        el,
+        highlight: el.highlight
+      }))
       selection.forEach(el => {
         if (payload) {
           el.highlight = payload
@@ -866,9 +1145,27 @@ export class CommandAdapt {
           delete el.highlight
         }
       })
+      this.draw.getHistoryManager().executeDelta({
+        applyForward: () => {
+          for (const item of oldValues) {
+            if (payload) item.el.highlight = payload
+            else delete item.el.highlight
+          }
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        },
+        applyBackward: () => {
+          for (const item of oldValues) {
+            if (item.highlight !== undefined) item.el.highlight = item.highlight
+            else delete item.el.highlight
+          }
+          this.draw.render({ isSetCursor: false, isCompute: false })
+        }
+      })
+      this.draw.cancelScheduledRender()
       this.draw.render({
         isSetCursor: false,
-        isCompute: false
+        isCompute: false,
+        isSubmitHistory: false
       })
     } else {
       let isSubmitHistory = true
@@ -972,6 +1269,7 @@ export class CommandAdapt {
     // 光标定位
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.markDirty(startIndex, endIndex)
     this.draw.render({ curIndex, isSetCursor })
   }
 
@@ -988,13 +1286,35 @@ export class CommandAdapt {
     if (!~startIndex && !~endIndex) return
     const rowElementList = this.range.getRangeRowElementList()
     if (!rowElementList) return
+    // 捕获旧值供 delta 历史逆操作
+    const oldValues = rowElementList.map(el => ({
+      el,
+      rowFlex: el.rowFlex
+    }))
+    const newValue = payload
+    // 应用新值
     rowElementList.forEach(element => {
       element.rowFlex = payload
     })
     // 光标定位
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
-    this.draw.render({ curIndex, isSetCursor })
+    // 推入轻量 delta 历史（仅记录属性变更，无需 28k 元素 snapshot）
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldValues) {
+          item.el.rowFlex = newValue
+        }
+        this.draw.recomputeRowProperties(curIndex)
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          item.el.rowFlex = item.rowFlex
+        }
+        this.draw.recomputeRowProperties(curIndex)
+      }
+    })
+    this.draw.recomputeRowProperties(curIndex)
   }
 
   public rowMargin(payload: number) {
@@ -1004,13 +1324,597 @@ export class CommandAdapt {
     if (!~startIndex && !~endIndex) return
     const rowElementList = this.range.getRangeRowElementList()
     if (!rowElementList) return
+    // 捕获旧值供 delta 历史逆操作
+    const oldValues = rowElementList.map(el => ({
+      el,
+      rowMargin: el.rowMargin
+    }))
+    const newValue = payload
+    // 应用新值
     rowElementList.forEach(element => {
       element.rowMargin = payload
     })
     // 光标定位
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
-    this.draw.render({ curIndex, isSetCursor })
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldValues) {
+          item.el.rowMargin = newValue
+        }
+        this.draw.recomputeRowProperties(curIndex)
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          item.el.rowMargin = item.rowMargin
+        }
+        this.draw.recomputeRowProperties(curIndex)
+      }
+    })
+    this.draw.recomputeRowProperties(curIndex)
+  }
+
+  public increaseIndent() {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const paragraphInfo = this.range.getRangeParagraphInfo()
+    if (!paragraphInfo) return
+    const paragraphEndIndex =
+      paragraphInfo.startIndex + paragraphInfo.elementList.length - 1
+    const oldValues = paragraphInfo.elementList.map(el => ({
+      el,
+      indent: el.indent
+    }))
+    paragraphInfo.elementList.forEach(element => {
+      element.indent = (element.indent || 0) + 1
+    })
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldValues) {
+          item.el.indent = (item.indent || 0) + 1
+        }
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          if (item.indent !== undefined) item.el.indent = item.indent
+          else delete item.el.indent
+        }
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+  }
+
+  public increaseRightIndent() {
+    this._mutateRightIndent(v => (v || 0) + 1)
+  }
+
+  public decreaseRightIndent() {
+    this._mutateRightIndent(v => Math.max(0, (v || 0) - 1))
+  }
+
+  public setRightIndent(payload: number) {
+    // Fractional tab-width counts are valid — pt-based UIs pass them in.
+    const target = Math.max(0, Number(payload) || 0)
+    this._mutateRightIndent(() => target)
+  }
+
+  /**
+   * Mutate the current paragraph's `rightIndent` (a tab-width integer step)
+   * in place and submit a delta history entry. Used by increase / decrease
+   * (per-step) and setRightIndent (absolute). 0 deletes the property so
+   * EDITOR_ELEMENT_COPY_ATTR / zip output stay tidy on round-trips.
+   *
+   * Why a delta and not a snapshot: same reason as `_applyParagraphSpacing` —
+   * snapshot undo (`deepClone`) replaces every element reference, which
+   * invalidates the incremental layout convergence check and forces a full
+   * document repaint. Delta replay preserves element identity.
+   */
+  private _mutateRightIndent(next: (cur: number | undefined) => number) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const paragraphInfo = this.range.getRangeParagraphInfo()
+    if (!paragraphInfo) return
+    const paragraphEndIndex =
+      paragraphInfo.startIndex + paragraphInfo.elementList.length - 1
+    const oldValues = paragraphInfo.elementList.map(el => ({
+      el,
+      rightIndent: el.rightIndent
+    }))
+    const applyForward = () => {
+      for (const item of oldValues) {
+        const n = next(item.rightIndent)
+        if (n === 0) delete item.el.rightIndent
+        else item.el.rightIndent = n
+      }
+    }
+    const applyBackward = () => {
+      for (const item of oldValues) {
+        if (item.rightIndent !== undefined) item.el.rightIndent = item.rightIndent
+        else delete item.el.rightIndent
+      }
+    }
+    applyForward()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+  }
+
+  public spaceBefore(payload: number) {
+    this._applyParagraphSpacing('spaceBefore', payload)
+  }
+
+  public spaceAfter(payload: number) {
+    this._applyParagraphSpacing('spaceAfter', payload)
+  }
+
+  /**
+   * Set or clear MS Word style paragraph shading on each paragraph touched by
+   * the current selection.
+   *
+   * Stored on the paragraph's ZERO delimiter (the same location as
+   * spaceBefore / spaceAfter) so reads from any row of the paragraph
+   * converge on a single value, and so a Word-style "select half of two
+   * paragraphs" gesture paints both whole paragraphs (not just the spanned
+   * runs — that would be character-level highlight semantics).
+   *
+   * Pass `null` to clear; matches the toolbar's "Automatic" picker option.
+   *
+   * The history strategy here mirrors `_applyParagraphSpacing`: an in-place
+   * delta on each affected ZERO, never a snapshot. A snapshot path would
+   * deep-clone elementList on undo and bust `_tryConvergeIncrementalRowList`'s
+   * element-identity check, forcing a full document repaint. Paragraph
+   * shading is a layout-stable mutation (no metrics change), so the
+   * incremental renderer converges within the affected paragraphs.
+   *
+   * `options.clearOverlappingHighlight` — Word-faithful default is `false`:
+   * highlight and paragraph shading are independent. Toolbars that want the
+   * "single source of truth" UX (apply shading → existing character-level
+   * highlight in the same paragraph(s) disappears) pass `true`. Pass `null`
+   * to clear shading regardless of the flag — clearing should never erase
+   * unrelated highlight.
+   */
+  public paragraphShading(
+    payload: string | null,
+    options?: { clearOverlappingHighlight?: boolean }
+  ) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const elementList = this.draw.getElementList()
+    // Walk back from the selection start to its paragraph's ZERO so the
+    // first affected paragraph is fully covered. Same scan as in
+    // `_applyParagraphSpacing` (kept inlined here to avoid pulling that
+    // method's history wrapper, which embeds field-specific dirty-range
+    // logic that doesn't apply to shading).
+    let pz = startIndex
+    while (pz > 0 && elementList[pz]?.value !== ZERO) pz--
+    const oldValues: Array<{
+      el: (typeof elementList)[number]
+      old: string | undefined
+    }> = []
+    for (let i = pz; i <= endIndex; i++) {
+      const el = elementList[i]
+      if (el?.value === ZERO) {
+        oldValues.push({ el, old: el.paragraphShading })
+      }
+    }
+    if (!oldValues.length) return
+    // Extend the dirty end to the last element of the final affected
+    // paragraph so the incremental renderer doesn't converge before
+    // repainting the trailing row (shading touches every row, not just the
+    // first / last like spaceBefore / spaceAfter).
+    const posCtx = this.position.getPositionContext()
+    const paragraphEnd = (() => {
+      let end = endIndex
+      while (
+        end + 1 < elementList.length &&
+        elementList[end + 1]?.value !== ZERO
+      ) {
+        end++
+      }
+      return end
+    })()
+    const dirtyRange: { start: number; end: number } =
+      posCtx.isTable && posCtx.index !== undefined
+        ? { start: posCtx.index, end: posCtx.index }
+        : { start: pz, end: paragraphEnd }
+    // Optional: clear character-level highlight inside the affected
+    // paragraph range so the visual result is a single uniform band
+    // (Word-like UX). Captured before mutation so applyBackward can
+    // restore highlight exactly — including `undefined` → property absent,
+    // so undo doesn't accidentally stamp `highlight: undefined` and shadow
+    // a future default-style highlight.
+    const shouldClearHighlight =
+      options?.clearOverlappingHighlight === true && payload !== null
+    const oldHighlights: Array<{
+      el: (typeof elementList)[number]
+      old: string | undefined
+    }> = []
+    if (shouldClearHighlight) {
+      for (let i = pz; i <= paragraphEnd; i++) {
+        const el = elementList[i]
+        if (el && el.highlight !== undefined) {
+          oldHighlights.push({ el, old: el.highlight })
+        }
+      }
+    }
+    const applyForward = () => {
+      for (const { el } of oldValues) {
+        if (payload === null) delete el.paragraphShading
+        else el.paragraphShading = payload
+      }
+      for (const { el } of oldHighlights) {
+        delete el.highlight
+      }
+    }
+    const applyBackward = () => {
+      for (const { el, old } of oldValues) {
+        if (old !== undefined) el.paragraphShading = old
+        else delete el.paragraphShading
+      }
+      for (const { el, old } of oldHighlights) {
+        if (old !== undefined) el.highlight = old
+        else delete el.highlight
+      }
+    }
+    applyForward()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
+        this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+  }
+
+  /**
+   * Set or clear the MS Word `<w:pBdr>` paragraph border on every paragraph
+   * touched by the current selection. Stamping pattern is identical to
+   * `paragraphShading`:
+   *
+   *   1. Walk back from `startIndex` to find the first affected paragraph's
+   *      ZERO delimiter.
+   *   2. Walk forward to `endIndex` collecting every ZERO in between — each
+   *      one is one affected paragraph.
+   *   3. Capture old values *before* mutating so `applyBackward` restores
+   *      `undefined` correctly (property absent, not `undefined`-typed —
+   *      shadowing a future default style would be a real bug).
+   *
+   * Like paragraph shading, this mutation is layout-stable: the border
+   * doesn't change row metrics or wrap points, so the incremental renderer
+   * converges within the affected paragraph range without a full repaint.
+   * Pass `null` to clear the border.
+   */
+  public paragraphBorder(payload: IParagraphBorder | null) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const elementList = this.draw.getElementList()
+    let pz = startIndex
+    while (pz > 0 && elementList[pz]?.value !== ZERO) pz--
+    const oldValues: Array<{
+      el: (typeof elementList)[number]
+      old: IParagraphBorder | undefined
+    }> = []
+    for (let i = pz; i <= endIndex; i++) {
+      const el = elementList[i]
+      if (el?.value === ZERO) {
+        oldValues.push({ el, old: el.paragraphBorder })
+      }
+    }
+    if (!oldValues.length) return
+    // Extend the dirty end to the last element of the final affected paragraph
+    // so the incremental renderer is forced through the trailing row — the
+    // border touches every row of the paragraph, identical reasoning to
+    // paragraphShading above.
+    const posCtx = this.position.getPositionContext()
+    const paragraphEnd = (() => {
+      let end = endIndex
+      while (
+        end + 1 < elementList.length &&
+        elementList[end + 1]?.value !== ZERO
+      ) {
+        end++
+      }
+      return end
+    })()
+    const dirtyRange: { start: number; end: number } =
+      posCtx.isTable && posCtx.index !== undefined
+        ? { start: posCtx.index, end: posCtx.index }
+        : { start: pz, end: paragraphEnd }
+    const applyForward = () => {
+      for (const { el } of oldValues) {
+        if (payload === null) delete el.paragraphBorder
+        else el.paragraphBorder = payload
+      }
+    }
+    const applyBackward = () => {
+      for (const { el, old } of oldValues) {
+        if (old !== undefined) el.paragraphBorder = old
+        else delete el.paragraphBorder
+      }
+    }
+    applyForward()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
+        this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+  }
+
+  /**
+   * Apply spaceBefore / spaceAfter as an in-place delta on each affected
+   * paragraph's ZERO delimiter, then push a delta history entry so undo /
+   * redo replays the same in-place mutation.
+   *
+   * Why a delta (not the default snapshot path):
+   *   the previous implementation called `draw.render({ curIndex, isSetCursor })`
+   *   with the default `isSubmitHistory: true`. Because the mutation is a
+   *   direct property write (not a splice), `submitHistory` had no delta
+   *   candidates and fell back to `_submitSnapshotHistory`, which does
+   *   `this.elementList = deepClone(oldElementList)` on undo. That replaces
+   *   every element reference, invalidating `this.rowList`'s elementList refs.
+   *   `_tryConvergeIncrementalRowList` then can't find any first-element-ref
+   *   match in `oldRowsAfterCut`, so the incremental layout walks to the end
+   *   of the document and all 34 pages repaint (~2.2 s on the user's doc).
+   *
+   * Delta replay mutates in place, so element identity is preserved across
+   * undo / redo and convergence holds.
+   */
+  private _applyParagraphSpacing(
+    field: 'spaceBefore' | 'spaceAfter',
+    payload: number
+  ) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const elementList = this.draw.getElementList()
+    // Paragraph-level property: set on each paragraph's ZERO delimiter element.
+    // Scan backward from startIndex to find the first affected paragraph's ZERO.
+    let pz = startIndex
+    while (pz > 0 && elementList[pz]?.value !== ZERO) pz--
+    // Capture the (element, old value) pairs *before* mutating so applyBackward
+    // can restore them exactly (including `undefined` → property absent).
+    const oldValues: Array<{
+      el: (typeof elementList)[number]
+      old: number | undefined
+    }> = []
+    for (let i = pz; i <= endIndex; i++) {
+      const el = elementList[i]
+      if (el?.value === ZERO) {
+        oldValues.push({ el, old: el[field] })
+      }
+    }
+    if (!oldValues.length) return
+    // Resolve the dirty range once. Same caveat as before: when the cursor is
+    // inside a table cell, pz/endIndex are cell-local indices which would
+    // corrupt the main dirty range (crash in computePageRowPosition with
+    // undefined metrics). Mark the TABLE element itself dirty instead so the
+    // whole table relayout fires.
+    const posCtx = this.position.getPositionContext()
+    const dirtyRange: { start: number; end: number } = (() => {
+      if (posCtx.isTable && posCtx.index !== undefined) {
+        return { start: posCtx.index, end: posCtx.index }
+      }
+      if (field === 'spaceBefore') {
+        // spaceBefore renders on the FIRST row of the paragraph; dirty range
+        // must start at pz so the incremental renderer includes that row.
+        return { start: pz, end: endIndex }
+      }
+      // spaceAfter renders on the LAST row of the paragraph. The incremental
+      // renderer converges as soon as a completed row surpasses dirtyEndAbs,
+      // so if endIndex sits inside an early visual row the last row is never
+      // re-laid-out. Extend the dirty end to the last element of the final
+      // affected paragraph so the renderer is forced through the last row.
+      let paragraphEnd = endIndex
+      while (
+        paragraphEnd + 1 < elementList.length &&
+        elementList[paragraphEnd + 1]?.value !== ZERO
+      ) {
+        paragraphEnd++
+      }
+      return { start: pz, end: paragraphEnd }
+    })()
+    const applyForward = () => {
+      for (const { el } of oldValues) {
+        el[field] = payload
+      }
+    }
+    const applyBackward = () => {
+      for (const { el, old } of oldValues) {
+        if (old !== undefined) el[field] = old
+        else delete el[field]
+      }
+    }
+    applyForward()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
+        this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+  }
+
+  public decreaseIndent() {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const paragraphInfo = this.range.getRangeParagraphInfo()
+    if (!paragraphInfo) return
+    const paragraphEndIndex =
+      paragraphInfo.startIndex + paragraphInfo.elementList.length - 1
+    const oldValues = paragraphInfo.elementList.map(el => ({
+      el,
+      indent: el.indent
+    }))
+    paragraphInfo.elementList.forEach(element => {
+      const currentIndent = element.indent || 0
+      if (currentIndent > 0) {
+        // Clamp at 0 — `currentIndent` may be fractional (pt-based input
+        // produces e.g. 0.5 for 12pt with a 24pt tab width), and unclamped
+        // subtraction would slide the value negative.
+        element.indent = Math.max(0, currentIndent - 1)
+      }
+    })
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldValues) {
+          const v = item.indent || 0
+          if (v > 0) item.el.indent = Math.max(0, v - 1)
+        }
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          if (item.indent !== undefined) item.el.indent = item.indent
+          else delete item.el.indent
+        }
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+  }
+
+  /**
+   * Set the current paragraph's left indent to an absolute tab-width count
+   * (fractional allowed — callers measuring in pt convert via
+   * `pt / pxToPt(defaultTabWidth)` and pass the resulting fraction here).
+   * Single history entry: pairs with `increaseIndent`/`decreaseIndent` for
+   * callers (e.g. the layout-tab number input) that need to jump from 0 → 5
+   * (or 5 → 0) in one undoable step rather than queueing 5 separate deltas.
+   */
+  public setIndent(payload: number) {
+    const target = Math.max(0, Number(payload) || 0)
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const paragraphInfo = this.range.getRangeParagraphInfo()
+    if (!paragraphInfo) return
+    const paragraphEndIndex =
+      paragraphInfo.startIndex + paragraphInfo.elementList.length - 1
+    const oldValues = paragraphInfo.elementList.map(el => ({
+      el,
+      indent: el.indent
+    }))
+    // No-op when the target matches every element's current indent — avoids
+    // pushing a noise entry onto the history stack for inputs that re-emit
+    // the same value (Svelte fires `change` on blur even without a delta).
+    const allSame = oldValues.every(v => (v.indent || 0) === target)
+    if (allSame) return
+    const applyForward = () => {
+      for (const item of oldValues) {
+        if (target === 0) delete item.el.indent
+        else item.el.indent = target
+      }
+    }
+    const applyBackward = () => {
+      for (const item of oldValues) {
+        if (item.indent !== undefined) item.el.indent = item.indent
+        else delete item.el.indent
+      }
+    }
+    applyForward()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
 
   public insertTable(row: number, col: number) {
@@ -1342,6 +2246,31 @@ export class CommandAdapt {
     ])
   }
 
+  /**
+   * Insert an MS Word style section break.
+   *
+   * The break is encoded as a single element with `type = SECTION_BREAK` and
+   * `sectionBreakType = NEXT_PAGE | CONTINUOUS | EVEN_PAGE | ODD_PAGE`. The
+   * pagination side effects (force new page / blank-page parity for EVEN/ODD,
+   * stay on page for CONTINUOUS) are applied in Draw._computePageList.
+   *
+   * Defaults to NEXT_PAGE — the most common Word flavour.
+   */
+  public sectionBreak(payload?: { type?: SectionBreakType }) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const activeControl = this.control.getActiveControl()
+    if (activeControl) return
+    const type = payload?.type ?? SectionBreakType.NEXT_PAGE
+    this.insertElementList([
+      {
+        type: ElementType.SECTION_BREAK,
+        value: WRAP,
+        sectionBreakType: type
+      }
+    ])
+  }
+
   public columnLayout(payload: { columnCount?: number; columnGap?: number }) {
     const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
     if (isDisabled) return
@@ -1487,7 +2416,10 @@ export class CommandAdapt {
       isSetCursor: false,
       isSubmitHistory: false,
       isCompute: false,
-      isLazy: false
+      isLazy: false,
+      // PERF-PLAN — Strategy B：搜索导航只更新当前匹配的高亮颜色——典型的
+      // decoration-only 操作。
+      isDecorationOnly: true
     })
   }
 
@@ -1498,7 +2430,10 @@ export class CommandAdapt {
       isSetCursor: false,
       isSubmitHistory: false,
       isCompute: false,
-      isLazy: false
+      isLazy: false,
+      // PERF-PLAN — Strategy B：搜索导航只更新当前匹配的高亮颜色——典型的
+      // decoration-only 操作。
+      isDecorationOnly: true
     })
   }
 
@@ -2488,6 +3423,10 @@ export class CommandAdapt {
 
     let capitalizeNext: boolean
 
+    const { startIndex, endIndex } = this.range.getRange()
+    // 捕获旧值
+    const oldValues = selection.map(el => ({ el, value: el.value }))
+
     switch (type) {
       case ChangeCaseType.UPPER:
         selection.forEach(el => {
@@ -2548,7 +3487,22 @@ export class CommandAdapt {
         break
     }
 
-    this.draw.render({ isSetCursor: false })
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        // current state — forward is no-op, backward restores
+      },
+      applyBackward: () => {
+        for (const item of oldValues) {
+          item.el.value = item.value
+        }
+        this.draw.markDirty(startIndex, endIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(startIndex, endIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ isSetCursor: false, isSubmitHistory: false })
   }
 
   public setHTML(payload: Partial<IEditorHTML>) {

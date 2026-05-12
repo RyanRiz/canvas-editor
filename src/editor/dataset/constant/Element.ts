@@ -15,7 +15,15 @@ export const EDITOR_ELEMENT_STYLE_ATTR: Array<keyof IElement> = [
   'textDecoration'
 ]
 
-export const EDITOR_ROW_ATTR: Array<keyof IElement> = ['rowFlex', 'rowMargin']
+export const EDITOR_ROW_ATTR: Array<keyof IElement> = [
+  'rowFlex',
+  'rowMargin',
+  'indent',
+  'rightIndent',
+  'spaceBefore',
+  'spaceAfter',
+  'paragraphShading'
+]
 
 export const EDITOR_ELEMENT_COPY_ATTR: Array<keyof IElement> = [
   'type',
@@ -36,7 +44,12 @@ export const EDITOR_ELEMENT_COPY_ATTR: Array<keyof IElement> = [
   'groupIds',
   'rowMargin',
   'textDecoration',
-  'extension'
+  'extension',
+  'indent',
+  'rightIndent',
+  'spaceBefore',
+  'spaceAfter',
+  'paragraphShading'
 ]
 
 export const EDITOR_ELEMENT_ZIP_ATTR: Array<keyof IElement> = [
@@ -52,6 +65,9 @@ export const EDITOR_ELEMENT_ZIP_ATTR: Array<keyof IElement> = [
   'strikeout',
   'rowFlex',
   'rowMargin',
+  'indent',
+  'rightIndent',
+  'paragraphShading',
   'dashArray',
   'trList',
   'tableToolDisabled',
@@ -89,7 +105,8 @@ export const EDITOR_ELEMENT_ZIP_ATTR: Array<keyof IElement> = [
   'hide',
   'label',
   'labelId',
-  'lineWidth'
+  'lineWidth',
+  'sectionBreakType'
 ]
 
 export const TABLE_TD_ZIP_ATTR: Array<keyof ITd> = [
@@ -164,6 +181,7 @@ export const BLOCK_ELEMENT_TYPE: ElementType[] = [
   ElementType.BLOCK,
   ElementType.PAGE_BREAK,
   ElementType.COLUMN_BREAK,
+  ElementType.SECTION_BREAK,
   ElementType.SEPARATOR,
   ElementType.TABLE
 ]

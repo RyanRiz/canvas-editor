@@ -10,6 +10,7 @@ import { defaultLabelOption } from '../dataset/constant/Label'
 import { defaultImgCaptionOption } from '../dataset/constant/ImgCaption'
 import { defaultLineBreak } from '../dataset/constant/LineBreak'
 import { defaultPageBreakOption } from '../dataset/constant/PageBreak'
+import { defaultSectionBreakOption } from '../dataset/constant/SectionBreak'
 import { defaultPageColumnsOption } from '../dataset/constant/PageColumns'
 import { defaultPageNumberOption } from '../dataset/constant/PageNumber'
 import { defaultPlaceholderOption } from '../dataset/constant/Placeholder'
@@ -36,6 +37,7 @@ import { ILabelOption } from '../interface/Label'
 import { IImgCaptionOption, IListOption } from '../interface/Element'
 import { ILineBreakOption } from '../interface/LineBreak'
 import { IPageBreak } from '../interface/PageBreak'
+import { ISectionBreak } from '../interface/SectionBreak'
 import { IPageColumns } from '../interface/PageColumns'
 import { IPageNumber } from '../interface/PageNumber'
 import { IPlaceholder } from '../interface/Placeholder'
@@ -62,6 +64,8 @@ import { IGraffitiOption } from '../interface/Graffiti'
 import { defaultGraffitiOption } from '../dataset/constant/Graffiti'
 import { IWhiteSpaceOption } from '../interface/WhiteSpace'
 import { defaultWhiteSpaceOption } from '../dataset/constant/WhiteSpace'
+import { IPageLayeredOption } from '../interface/PageLayered'
+import { defaultPageLayeredOption } from '../dataset/constant/PageLayered'
 
 export function mergeOption(
   options: IEditorOption = {}
@@ -117,6 +121,10 @@ export function mergeOption(
   const pageBreakOptions: Required<IPageBreak> = {
     ...defaultPageBreakOption,
     ...options.pageBreak
+  }
+  const sectionBreakOptions: Required<ISectionBreak> = {
+    ...defaultSectionBreakOption,
+    ...options.sectionBreak
   }
   const pageColumnsOptions: Required<IPageColumns> = {
     ...defaultPageColumnsOption,
@@ -174,6 +182,10 @@ export function mergeOption(
     ...defaultMagnifierOption,
     ...options.magnifier
   }
+  const pageLayeredOptions: Required<IPageLayeredOption> = {
+    ...defaultPageLayeredOption,
+    ...options.pageLayered
+  }
   const modeRuleOption: DeepRequired<IModeRule> = {
     print: {
       ...defaultModeRuleOption.print,
@@ -226,6 +238,8 @@ export function mergeOption(
     paperDirection: PaperDirection.VERTICAL,
     inactiveAlpha: 0.6,
     historyMaxRecordCount: 100,
+    historyTypingBatchMs: 0,
+    debugHistory: false,
     wordBreak: WordBreak.BREAK_WORD,
     printPixelRatio: 3,
     maskMargin: [0, 0, 0, 0],
@@ -234,6 +248,8 @@ export function mergeOption(
     shortcutDisableKeys: [],
     scrollContainerSelector: '',
     pageOuterSelectionDisable: false,
+    pagePaintStrategy: 'visible-sync-lazy',
+    pagePaintOverscan: 1,
     ...options,
     table: tableOptions,
     header: headerOptions,
@@ -248,6 +264,7 @@ export function mergeOption(
     placeholder: placeholderOptions,
     group: groupOptions,
     pageBreak: pageBreakOptions,
+    sectionBreak: sectionBreakOptions,
     pageColumns: pageColumnsOptions,
     zone: zoneOptions,
     background: backgroundOptions,
@@ -262,6 +279,7 @@ export function mergeOption(
     label: labelOptions,
     imgCaption: imgCaptionOptions,
     list: listOptions,
-    magnifier: magnifierOptions
+    magnifier: magnifierOptions,
+    pageLayered: pageLayeredOptions
   }
 }

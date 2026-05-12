@@ -134,11 +134,16 @@ export class Position {
       // 行存在环绕的可能性均不设置行布局
       if (!curRow.isSurround) {
         // 计算行偏移量（行居中、居右）
+        // Right indent (curRow.rightOffsetX) trims the usable area from the
+        // right edge: centered rows center between left indent and the
+        // (innerWidth − rightIndent) point; right-aligned rows pin to that
+        // same inner-right point instead of the page's right edge.
         const curRowWidth = curRow.width + (curRow.offsetX || 0)
+        const rightOffsetX = curRow.rightOffsetX || 0
         if (curRow.rowFlex === RowFlex.CENTER) {
-          x += (innerWidth - curRowWidth) / 2
+          x += (innerWidth - curRowWidth - rightOffsetX) / 2
         } else if (curRow.rowFlex === RowFlex.RIGHT) {
-          x += innerWidth - curRowWidth
+          x += innerWidth - curRowWidth - rightOffsetX
         }
       }
       // 当前行X/Y轴偏移量
@@ -328,6 +333,140 @@ export class Position {
     }
   }
 
+  /**
+   * PERF-PLAN §2.3 / Phase 2B: 增量重建 positionList。
+   *
+   * 与 §2.2 的 incremental computeRowList 配套——已知 dirty 之前的所有元素位置
+   * 都未受影响（前缀 row 引用未变 → 元素引用未变 → 它们的 IElementPosition
+   * 也仍然有效），只需要：
+   *   1. 把 positionList 截断到 dirty 起点之前；
+   *   2. floatPositionList 中 index >= dirty 起点的条目清掉，等下重建；
+   *   3. 跳过 pageRowList 中 globalRowIndex < fromRowGlobalIndex 的全部行；
+   *   4. 从匹配的 (pageNo, rowK) 起继续 computePageRowPosition。
+   *
+   * 7441 字 / 10 页文档每键击省下约 30ms 的对象构造。命中条件由 Draw.render
+   * 与 §2.2 的 _tryBuildResumeFrom 协同决定，调用方负责传入正确的 fromRowGlobalIndex
+   * （= 上一帧 rowList 的前缀长度）和 fromElementIndex（= 该行的 startIndex）。
+   *
+   * 安全降级：调用方若不能保证 prefix 行未变，应回落到 computePositionList()。
+   */
+  public computePositionListIncremental(payload: {
+    fromRowGlobalIndex: number
+    fromElementIndex: number
+    /**
+     * 收敛尾部复用提示（PERF-PLAN follow-up）。
+     *
+     * 当 §2.2 的 row-list 收敛命中、且 pagination 稳定时调用方传入：
+     *   - fromNewRowGlobalIndex：NEW pageRowList 中第一个「来自旧 rowList 的
+     *     被复用行」的全局索引——之前的行（含 matched 新行）需要 fresh 计算。
+     *   - deltaElems：dirty 处的元素索引漂移（newTotalElems - oldTotalElems）。
+     *
+     * 命中后：fresh 计算到 fromNewRowGlobalIndex 之前为止；剩余位置直接复用
+     * 上一帧的 IElementPosition 对象（仅修改 `index` 字段为 NEW 坐标）——这
+     * 跳过 ~95% 的对象构造，是 25 页文档 typing 时本函数从 ~25-130ms 降回
+     * 1-3ms 的关键。
+     *
+     * 安全：调用方负责验证「pagination 稳定 + 行布局未漂」——典型场景是
+     * 不引发换行的字符插入。两侧 row 数 / 高度有任何变化都不应传入。
+     */
+    convergedReuse?: {
+      fromNewRowGlobalIndex: number
+      deltaElems: number
+    }
+  }) {
+    const { fromRowGlobalIndex, fromElementIndex, convergedReuse } = payload
+    if (fromElementIndex <= 0 || fromRowGlobalIndex <= 0) {
+      // 没有可保留的前缀——退化成全量
+      this.computePositionList()
+      return
+    }
+    // PERF-PLAN follow-up：在截断前快照旧 positionList，供后段「收敛尾部复用」使用。
+    // 仅当 convergedReuse 存在时拷贝，正常路径无开销。
+    const oldPositionSnapshot = convergedReuse
+      ? this.positionList.slice()
+      : null
+    // 1) 截断 positionList——前缀部分继续沿用上一帧
+    if (this.positionList.length > fromElementIndex) {
+      this.positionList.length = fromElementIndex
+    }
+    // 2) 清掉 dirty 起点之后的浮动条目；前缀里的浮动定位仍然有效
+    if (this.floatPositionList.length) {
+      this.floatPositionList = this.floatPositionList.filter(
+        f => f.position.index < fromElementIndex
+      )
+    }
+    // 3) 找出从哪一页 / 哪一行开始恢复——pageRowList 是本帧 _computePageList()
+    //    刚刚重建的，所以行的 globalRowIndex 与 this.rowList 同序。
+    const pageRowList = this.draw.getPageRowList()
+    const margins = this.draw.getMargins()
+    const header = this.draw.getHeader()
+    const extraHeight = header.getExtraHeight()
+    const startY = margins[0] + extraHeight
+    let startRowIndex = 0
+    let reuseHit = false
+    outer: for (let i = 0; i < pageRowList.length; i++) {
+      const rowList = pageRowList[i]
+      if (!rowList?.length) continue
+      // 整页都在 fromRowGlobalIndex 之前——直接跳过
+      if (startRowIndex + rowList.length <= fromRowGlobalIndex) {
+        startRowIndex += rowList.length
+        continue
+      }
+      // 4) 本页跨过了 boundary——从匹配行开始 replay
+      for (let k = 0; k < rowList.length; k++) {
+        const globalRowIndex = startRowIndex + k
+        if (globalRowIndex < fromRowGlobalIndex) continue
+        // 收敛尾部复用：到达 reuse 起点行——停止 fresh 计算，下面统一接驳。
+        if (
+          convergedReuse &&
+          globalRowIndex >= convergedReuse.fromNewRowGlobalIndex
+        ) {
+          reuseHit = true
+          break outer
+        }
+        const row = rowList[k]
+        this.computePageRowPosition({
+          positionList: this.positionList,
+          rowList: [row],
+          pageNo: i,
+          startRowNo: k,
+          startRowIndex: globalRowIndex,
+          startIndex: row.startIndex,
+          startX: row.pageStartX ?? margins[3],
+          startY: row.pageStartY ?? startY,
+          innerWidth: row.innerWidth ?? this.draw.getInnerWidth()
+        })
+      }
+      startRowIndex += rowList.length
+    }
+    // 收敛尾部复用：fresh 计算结束位置 = 当前 positionList.length。其后所有元素
+    // 都来自旧 rowList（同对象引用 + 同 layout），仅 absolute index 漂了 deltaElems。
+    //
+    // 性能要点：直接「就地修改 .index」并 push 旧对象——避免每条 IElementPosition
+    // 的 spread {...old} 分配（13 字段 × 28k 元素 = ~360k 拷贝，spread 占了
+    // computePositionList 时间里相当大的一块）。安全性：
+    //   - 老 positionList 已经被 truncate 截断，外部从此处看不到那些旧对象。
+    //   - oldPositionSnapshot 是浅拷贝数组，引用同一组对象——我们仍持有它，
+    //     但本帧用完即丢；不会被外部观察到「中间态 index 旧值」。
+    //   - cursorPosition / floatPositionList 的相关引用都在本 render 后续步骤里
+    //     被重新填充（setCursor / area.compute / 重新 push 浮动），不依赖旧 .index。
+    if (convergedReuse && reuseHit && oldPositionSnapshot) {
+      const newReuseStart = this.positionList.length
+      const oldReuseStart = newReuseStart - convergedReuse.deltaElems
+      const delta = convergedReuse.deltaElems
+      // 预分配数组长度——避免 push() 在 V8 内部触发多次容量扩张（amortized O(1)
+      // 但每次扩张都要 memcpy）。对 30k 元素文档可省 ~30% 复用循环时间。
+      const reuseCount = oldPositionSnapshot.length - oldReuseStart
+      this.positionList.length = newReuseStart + reuseCount
+      for (let t = 0; t < reuseCount; t++) {
+        const old = oldPositionSnapshot[oldReuseStart + t]
+        if (!old) continue
+        old.index += delta
+        this.positionList[newReuseStart + t] = old
+      }
+    }
+  }
+
   public computeRowPosition(
     payload: IComputeRowPositionPayload
   ): IElementPosition[] {
@@ -379,18 +518,27 @@ export class Position {
     const curPageNo = payload.pageNo ?? this.draw.getPageNo()
     const isMainActive = zoneManager.isMainActive()
     const positionNo = isMainActive ? curPageNo : 0
+    const shouldScopeRowsByColumn = !isTable
     const pageRowList = this.draw.getPageRowList()
-    const currentPageRows = pageRowList[positionNo] || []
-    const columnRowNoSet = new Set(
-      currentPageRows
-        .filter(row => {
-          const startX = row.pageStartX ?? this.draw.getMargins()[3]
-          const endX = startX + (row.innerWidth ?? this.draw.getInnerWidth())
-          return x >= startX && x <= endX
-        })
-        .map(row => row.rowIndex)
-    )
-    const hasColumnScopedRows = columnRowNoSet.size > 0
+    const currentPageRows = shouldScopeRowsByColumn
+      ? pageRowList[positionNo] || []
+      : []
+    const columnRowNoSet = shouldScopeRowsByColumn
+      ? new Set(
+          currentPageRows
+            .filter(row => {
+              const startX = row.pageStartX ?? this.draw.getMargins()[3]
+              const endX = startX + (row.innerWidth ?? this.draw.getInnerWidth())
+              return x >= startX && x <= endX
+            })
+            .map(row => row.rowIndex)
+        )
+      : new Set<number>()
+    const hasColumnScopedRows =
+      shouldScopeRowsByColumn && columnRowNoSet.size > 0
+    const firstScopedRowIndex = hasColumnScopedRows
+      ? currentPageRows.find(row => columnRowNoSet.has(row.rowIndex))?.rowIndex
+      : undefined
     // 验证浮于文字上方元素
     if (!isTable) {
       const floatTopPosition = this.getFloatPositionByXY({
@@ -676,9 +824,7 @@ export class Position {
             position.pageNo !== positionNo ||
             (hasColumnScopedRows && !columnRowNoSet.has(position.rowIndex)) ||
             (hasColumnScopedRows
-              ? position.rowIndex !==
-                currentPageRows.find(row => columnRowNoSet.has(row.rowIndex))
-                  ?.rowIndex
+              ? position.rowIndex !== firstScopedRowIndex
               : position.rowNo !== 0)
           ) {
             continue

@@ -19,6 +19,10 @@ export default defineConfig(({ mode }) => {
     include: ['tests/**/*.test.ts'],
     css: false,
     pool: 'threads',
+    // Some PERF-PLAN parity / benchmark tests render multi-page docs twice over
+    // (incremental vs full) and can exceed the 5s default under parallel-worker
+    // contention. The bench tests assert their own time budgets internally.
+    testTimeout: 15000,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'lcov'],

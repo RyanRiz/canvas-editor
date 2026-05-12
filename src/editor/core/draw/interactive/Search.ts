@@ -50,6 +50,8 @@ export class Search {
     this.searchKeyword = payload
     this.searchNavigateIndex = null
     this.searchOptions = options || null
+    // PERF-PLAN — Strategy B-γ：搜索关键字变更使装饰层缓存失效。
+    this.draw.bumpDecorationVersion()
   }
 
   public searchNavigatePre(): number | null {
@@ -78,6 +80,8 @@ export class Search {
           this.searchMatchList.length - 1 - (this.searchKeyword.length - 1)
       }
     }
+    // PERF-PLAN — Strategy B-γ：导航即换高亮颜色，需要重绘 decoration 层
+    this.draw.bumpDecorationVersion()
     return this.searchNavigateIndex
   }
 
@@ -105,6 +109,7 @@ export class Search {
         this.searchNavigateIndex = 0
       }
     }
+    this.draw.bumpDecorationVersion()
     return this.searchNavigateIndex
   }
 

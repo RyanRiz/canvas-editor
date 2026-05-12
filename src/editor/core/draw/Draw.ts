@@ -1,5 +1,5 @@
 import { version } from '../../../../package.json'
-import { ZERO } from '../../dataset/constant/Common'
+import { WRAP, ZERO } from '../../dataset/constant/Common'
 import { RowFlex } from '../../dataset/enum/Row'
 import {
   IAppendElementListOption,
@@ -11,8 +11,12 @@ import {
   IGetImageOption,
   IGetOriginValueOption,
   IGetValueOption,
+  IConvergenceTarget,
+  ILayoutCheckpoint,
   IPainterOption
 } from '../../interface/Draw'
+import { HistoryScope } from '../../interface/History'
+import { IMutationEvent, MutationListener } from '../../interface/Mutation'
 import {
   IEditorData,
   IEditorOption,
@@ -21,6 +25,7 @@ import {
 } from '../../interface/Editor'
 import {
   IElement,
+  IElementPosition,
   IElementMetrics,
   IElementFillRect,
   IElementStyle,
@@ -28,7 +33,7 @@ import {
   IInsertElementListOption
 } from '../../interface/Element'
 import { IRow, IRowElement } from '../../interface/Row'
-import { deepClone, getUUID, nextTick } from '../../utils'
+import { deepClone, getUUID } from '../../utils'
 import { Cursor } from '../cursor/Cursor'
 import { CanvasEvent } from '../event/CanvasEvent'
 import { GlobalEvent } from '../event/GlobalEvent'
@@ -38,11 +43,14 @@ import { Position } from '../position/Position'
 import { RangeManager } from '../range/RangeManager'
 import { Background } from './frame/Background'
 import { Highlight } from './richtext/Highlight'
+import { ParagraphShading } from './richtext/ParagraphShading'
+import { ParagraphBorder as ParagraphBorderRenderer } from './richtext/ParagraphBorder'
 import { Margin } from './frame/Margin'
 import { Search } from './interactive/Search'
 import { Strikeout } from './richtext/Strikeout'
 import { Underline } from './richtext/Underline'
 import { ElementType } from '../../dataset/enum/Element'
+import { SectionBreakType } from '../../dataset/enum/SectionBreak'
 import { ImageParticle } from './particle/ImageParticle'
 import { LaTexParticle } from './particle/latex/LaTexParticle'
 import { TextParticle } from './particle/TextParticle'
@@ -58,6 +66,7 @@ import { SuperscriptParticle } from './particle/SuperscriptParticle'
 import { SubscriptParticle } from './particle/SubscriptParticle'
 import { SeparatorParticle } from './particle/SeparatorParticle'
 import { PageBreakParticle } from './particle/PageBreakParticle'
+import { SectionBreakParticle } from './particle/SectionBreakParticle'
 import { Watermark } from './frame/Watermark'
 import { WatermarkLayer } from '../../dataset/enum/Watermark'
 import {
@@ -122,12 +131,182 @@ import { Badge } from './frame/Badge'
 import { Graffiti } from './graffiti/Graffiti'
 import { Magnifier } from './interactive/Magnifier'
 import { IPageColumns } from '../../interface/PageColumns'
+import { IRange } from '../../interface/Range'
+import { IPositionContext } from '../../interface/Position'
+
+/**
+ * PERF-PLAN §1.2 / Phase 1.2：delta-based history 的「BEFORE 状态」元数据。
+ *
+ * 一次 submitHistory 落盘 delta 时除了承载 mutation 数组，还需要把 range /
+ * positionContext / pageNo / zone 这些非元素的小状态一并锁住，否则 undo /
+ * redo 后光标位置 / 当前编辑分区就会与文档内容脱节。
+ */
+interface IDeltaHistoryMeta {
+  range: IRange
+  positionContext: IPositionContext
+  pageNo: number
+  zone: EditorZone
+}
+
+/**
+ * PERF-PLAN §1.2 / Phase 1.2：delta-based history stack 条目。
+ *
+ * 与传统的「Function 即 snapshot 还原器」并列存在；HistoryManager 在 undo /
+ * redo 时按 kind 分发：
+ *   - kind: 'snapshot'  →  call restore()，restore 内部把整份元素列表从 deepClone
+ *     拷贝回来（legacy 行为，覆盖 property-only commands 等无法 delta 描述的场景）。
+ *   - kind: 'delta'  →  applyForward 应用 mutations 顺序、还原 metaAfter；
+ *     applyBackward 应用 mutations 逆序的逆向、还原 metaBefore。两者皆在
+ *     `_isReplayingHistory=true` 的临界区内执行，避免再次入栈循环。
+ */
+export type DraftHistoryStackItem =
+  | { kind: 'snapshot'; restore: () => void }
+  | {
+      kind: 'delta'
+      applyForward: () => void
+      applyBackward: () => void
+    }
+
+interface IPageLayoutSignature {
+  firstRowStartIndex: number
+  lastRowStartIndex: number
+  rowCount: number
+  rowHeightSum: number
+}
+
+interface IPagePaintPlan {
+  firstShiftedPage: number | null
+  syncPages: Set<number>
+  deferredPages: Set<number>
+}
+
+interface IDirtyPageSpan {
+  startPage: number
+  endPage: number
+}
 
 export class Draw {
   private container: HTMLDivElement
   private pageContainer: HTMLDivElement
   private pageList: HTMLCanvasElement[]
   private ctxList: CanvasRenderingContext2D[]
+  // PERF-PLAN — Strategy B：分层 canvas。每页结构 = wrapper div > [base canvas + decoration canvas]。
+  // pageList / ctxList 仍然是「base」canvas + ctx，对外接口零变化（mouse 事件、scroll
+  // observer、PDF 导出等都基于 base）。decorationCanvasList / decorationCtxList 是
+  // 与之平行的「decoration」层；当 options.pageLayered.enable=false 时这两个数组中的
+  // 条目直接 alias 到 base，所有 paint 代码无差别地写到一个 ctx——零回归。
+  private decorationCanvasList: HTMLCanvasElement[]
+  private decorationCtxList: CanvasRenderingContext2D[]
+  private chromeCacheCanvasList: HTMLCanvasElement[]
+  private chromeCacheCtxList: CanvasRenderingContext2D[]
+  private chromeCacheKeyList: (string | null)[]
+  private pageWrapperList: HTMLDivElement[]
+  // 装饰层 dirty page 集合：与 _drawnPages 平行——「这一页的 decoration 已是最新」。
+  // 装饰层只跟踪：选区 / 搜索高亮 / 表格跨行/列。base 重绘时同时清空 decoration
+  // 缓存（base 改 → row 几何变 → 选区位置可能变）。
+  // PERF-PLAN — Strategy B-γ：从 Set<number> 改为 Map<pageNo, version>。
+  // 同一 (range, search) 状态下重复 decoration-only 渲染（典型场景：mousemove
+  // 抖动多次落到同一选区位置）→ 命中即跳过 _walkDecorationRow，O(N) 行遍历
+  // 退化为 1 个 Map.get + 比较。
+  private _decorationDrawnPages: Map<number, number>
+  // PERF-PLAN — Strategy B-γ：装饰层逻辑「版本号」。
+  //   - 初始为 0；range / search keyword 任一变更时 +1
+  //   - _drawDecorationOnly 完成时把 _decorationVersion 写入对应 pageNo
+  //   - 下次进入 decoration-only 路径前，发现 pageVersion === _decorationVersion
+  //     → 跳过本页（DOM 已是最新）
+  // 注意：base 重绘（_drawPage）会同时把 decoration 一起画，因此 base 重绘后
+  // 也用同一 _decorationVersion 标记 → decoration-only 紧随其后命中缓存。
+  private _decorationVersion: number
+  // drawRow 内部 range / table-cross-row paint 时使用的目标 ctx——_drawPage 在
+  // 调用 drawRow 前置位为 decoration ctx，drawRow 完成后清零。
+  // 为 null 时（包括非分层模式 / 单元格递归外层）走原 ctx——零回归。
+  private _currentDecorationCtx: CanvasRenderingContext2D | null
+  private _suppressDecorationPaint: boolean
+  // 复用的测量画布上下文（避免 computeRowList 每次创建 canvas）
+  private _measureCanvas: HTMLCanvasElement | null
+  private _measureCtx: CanvasRenderingContext2D | null
+  // rAF 合并渲染队列：fast-typing 时多次 keystroke 仅产出一次 layout/paint
+  private _pendingRenderPayload: IDrawOption | null
+  private _pendingRenderFrameId: number | null
+  // 输入合批（PERF-PLAN §1.2）：连续 keystroke 合并为单个 history snapshot，
+  // 闲置 500ms 或遇到非输入动作时落盘
+  private _typingBatchActive: boolean
+  private _typingBatchTimer: ReturnType<typeof setTimeout> | null
+  private _typingBatchLastCurIndex: number | undefined
+  // 主元素列表 dirty 区间提示（PERF-PLAN §2.1）。当突变发生时由 spliceElementList
+  // 自动维护或外部通过 markDirty() 显式标记；render() 据此挑选 dirty page，
+  // 只重绘被影响的 canvas（§2.4）。提示性而非权威——为 null 时按现有 O(N) 路径处理。
+  private _dirtyRange: { start: number; end: number } | null
+  // 页眉 / 页脚 dirty 标志：仅当对应 elementList 通过 spliceElementList 改动时置 true。
+  // render() 据此跳过未变更分区的布局 / 计算，尤其重要——典型场景是用户在 header 中
+  // 输入：避免为了一次按键而把整篇 N-page 主文档重新布局（PERF-PLAN §2 follow-up）。
+  private _headerDirty: boolean
+  private _footerDirty: boolean
+  private _headerChromeVersion: number
+  private _footerChromeVersion: number
+  // 上一次渲染各 page 的 row 数；仍用于某些增量 position 复用判定。
+  private _prevPageRowCounts: number[] | null
+  // 上一次渲染各 page 的轻量布局签名。用于判断从哪一页开始发生分页漂移。
+  private _prevPageLayoutSignatures: IPageLayoutSignature[] | null
+  // 当前 paintPlan 的 shifted 起点（仅用于本轮 paint 的局部优化提示）。
+  private _paintPlanFirstShiftedPage: number | null
+  // 已绘制（且未被标脏）的 page 索引集合：lazy 渲染时这些页不再重复绘制
+  private _drawnPages: Set<number>
+  // PERF-PLAN §2.2 / Phase 2B：主元素列表 computeRowList 的行边界 checkpoint。
+  // 与 this.rowList 平行索引——_mainRowCheckpoints[R] 描述「即将进入行 R 的第一个
+  // 元素的迭代」时的循环局部状态。仅当主体进行 full / 增量布局后才有值；
+  // 任何能让前缀行内容失效的事件（setEditorData / 跨字号字距的设置变更）必须
+  // 通过 _invalidatePaintCache() 一并清空。
+  private _mainRowCheckpoints: ILayoutCheckpoint[]
+  // 上一帧主布局的「输入签名」。option.scale / innerWidth / pagingMode 等会改变
+  // 任意 row 的几何形状的字段都纳入；不一致时禁用增量布局，回退到全量。
+  private _mainLayoutSig: {
+    scale: number
+    innerWidth: number
+    isPagingMode: boolean
+    defaultSize: number
+    defaultRowMargin: number
+    defaultTabWidth: number
+  } | null
+  // PERF-PLAN §3.1：Mutator 边界事件订阅者。spliceElementList 完成后通知。
+  private _mutationListeners: Set<MutationListener>
+  // PERF-PLAN follow-up：主元素列表中带 imgDisplay=SURROUND 的浮动元素计数缓存。
+  // null 表示「未知 / 待重新统计」（会触发一次 O(N) 扫描）；> 0 表示需要构建
+  // surroundElementList，等于 0 时 render 可直接跳过 pickSurroundElementList。
+  // 由 spliceElementList 维护增量；setEditorData 等大批量替换会重置为 null。
+  private _mainSurroundCount: number | null
+  // PERF-PLAN follow-up：主元素列表中带 areaId 的元素计数缓存——同 SURROUND，
+  // 当 0 时 area.compute 可直接跳过 O(N) 扫描。绝大多数文档（不使用 area）每
+  // 帧因此省下 ~30k 次属性访问。
+  private _mainAreaCount: number | null
+  // PERF-PLAN §1.2 / Phase 1.2：自上次 submitHistory 以来积累的「主元素列表」突变事件。
+  // submitHistory 据此决定是否走 delta 分支：所有事件 scope=main 且没有破坏 delta
+  // 不变量的旁路改动时，可避免 9× full deepClone。事件由 spliceElementList 自动
+  // push（除非正在 replay history），submitHistory 完成后清空。
+  private _pendingHistoryMutations: IMutationEvent[]
+  // 标志位：自上次 submitHistory 以来发生过任何「不能用 delta 描述」的改动？
+  // 任一为真则 submitHistory 必须 snapshot：
+  //   - spliceElementList 触发的 listId/listType/listStyle 旁清理（属性写入未在 splice
+  //     event 里捕获）
+  //   - spliceElementList 受 deletable 规则保护跳过了部分元素（actualRemoved 与
+  //     deleteCount 不一致——slice 不再对称）
+  //   - 调用方显式 setEditorData / Header.setElementList / Footer.setElementList /
+  //     property-only 命令（按目前的简化策略，非 splice 路径直接 snapshot）
+  private _deltaHistoryUnsafe: boolean
+  // 第一次 mutation 落入挂起队列时捕获的「BEFORE 状态」元数据，供 delta 入栈时携带。
+  // 若整轮 submitHistory 走 snapshot 分支，本字段被忽略并清空。
+  private _preMutationMeta: IDeltaHistoryMeta | null
+  // 正在 replay history（undo/redo 的 applyForward / applyBackward 内部）时，
+  // spliceElementList 不应再次把事件推回 _pendingHistoryMutations，否则形成
+  // 自相干循环：当前撤销动作会被自己再记录一次。
+  private _isReplayingHistory: boolean
+  // 「scale-only」快路径标志位。setPageScale 在确认仅缩放发生改动时已就地把
+  // rowList / element.metrics / table cache 等 scale-相关字段乘以 ratio，因此
+  // 下一帧 render() 不必再跑 O(N) 的 computeRowList——只需重做 _computePageList /
+  // computePositionList / area.compute 等纯算术依赖。25 页文档的 Fit-to-Page →
+  // Fit-to-Width 在此路径下省下数百毫秒主线程时间。仅 setPageScale 内部使用，
+  // render() 完成后立即清零；不应跨多次 render 持续。
+  private _skipMainRowCompute: boolean
   private pageNo: number
   private renderCount: number
   private pagePixelRatio: number | null
@@ -155,6 +334,8 @@ export class Draw {
   private underline: Underline
   private strikeout: Strikeout
   private highlight: Highlight
+  private paragraphShading: ParagraphShading
+  private paragraphBorder: ParagraphBorderRenderer
   private historyManager: HistoryManager
   private previewer: Previewer
   private imageParticle: ImageParticle
@@ -174,6 +355,7 @@ export class Draw {
   private dateParticle: DateParticle
   private separatorParticle: SeparatorParticle
   private pageBreakParticle: PageBreakParticle
+  private sectionBreakParticle: SectionBreakParticle
   private superscriptParticle: SuperscriptParticle
   private subscriptParticle: SubscriptParticle
   private checkboxParticle: CheckboxParticle
@@ -212,6 +394,42 @@ export class Draw {
     this.container = this._wrapContainer(rootContainer)
     this.pageList = []
     this.ctxList = []
+    this.decorationCanvasList = []
+    this.decorationCtxList = []
+    this.chromeCacheCanvasList = []
+    this.chromeCacheCtxList = []
+    this.chromeCacheKeyList = []
+    this.pageWrapperList = []
+    this._decorationDrawnPages = new Map()
+    this._decorationVersion = 0
+    this._currentDecorationCtx = null
+    this._suppressDecorationPaint = false
+    this._measureCanvas = null
+    this._measureCtx = null
+    this._pendingRenderPayload = null
+    this._pendingRenderFrameId = null
+    this._typingBatchActive = false
+    this._typingBatchTimer = null
+    this._typingBatchLastCurIndex = undefined
+    this._dirtyRange = null
+    this._headerDirty = false
+    this._footerDirty = false
+    this._headerChromeVersion = 0
+    this._footerChromeVersion = 0
+    this._prevPageRowCounts = null
+    this._prevPageLayoutSignatures = null
+    this._paintPlanFirstShiftedPage = null
+    this._drawnPages = new Set()
+    this._mainRowCheckpoints = []
+    this._mainLayoutSig = null
+    this._mutationListeners = new Set()
+    this._pendingHistoryMutations = []
+    this._deltaHistoryUnsafe = false
+    this._preMutationMeta = null
+    this._isReplayingHistory = false
+    this._mainSurroundCount = null
+    this._mainAreaCount = null
+    this._skipMainRowCompute = false
     this.pageNo = 0
     this.renderCount = 0
     this.pagePixelRatio = null
@@ -241,6 +459,8 @@ export class Draw {
     this.underline = new Underline(this)
     this.strikeout = new Strikeout(this)
     this.highlight = new Highlight(this)
+    this.paragraphShading = new ParagraphShading(this)
+    this.paragraphBorder = new ParagraphBorderRenderer(this)
     this.previewer = new Previewer(this)
     this.imageParticle = new ImageParticle(this)
     this.laTexParticle = new LaTexParticle(this)
@@ -252,19 +472,14 @@ export class Draw {
     this.lineNumber = new LineNumber(this)
     this.waterMark = new Watermark(this)
     this.placeholder = new Placeholder(this)
-    this.header = new Header(this, data.header, {
-      first: data.headerFirst,
-      even: data.headerEven
-    })
-    this.footer = new Footer(this, data.footer, {
-      first: data.footerFirst,
-      even: data.footerEven
-    })
+    this.header = new Header(this, data.header)
+    this.footer = new Footer(this, data.footer)
     this.hyperlinkParticle = new HyperlinkParticle(this)
     this.labelParticle = new LabelParticle(this)
     this.dateParticle = new DateParticle(this)
     this.separatorParticle = new SeparatorParticle(this)
     this.pageBreakParticle = new PageBreakParticle(this)
+    this.sectionBreakParticle = new SectionBreakParticle(this)
     this.superscriptParticle = new SuperscriptParticle()
     this.subscriptParticle = new SubscriptParticle()
     this.checkboxParticle = new CheckboxParticle(this)
@@ -309,11 +524,14 @@ export class Draw {
     if (this.mode === EditorMode.PRINT) {
       this.setPrintData()
     }
+    this.range.setRange(0, 0)
     this.render({
       isInit: true,
-      isSetCursor: false,
-      isFirstRender: true
+      isSetCursor: true,
+      isFirstRender: true,
+      curIndex: 0
     })
+    this.cursor.focus()
   }
 
   // 设置打印数据
@@ -454,15 +672,15 @@ export class Draw {
     return Math.floor(this.getOriginalHeight() * this.options.scale)
   }
 
-  public getMainHeight(pageNo?: number): number {
+  public getMainHeight(): number {
     const pageHeight = this.getHeight()
-    return pageHeight - this.getMainOuterHeight(pageNo)
+    return pageHeight - this.getMainOuterHeight()
   }
 
-  public getMainOuterHeight(pageNo?: number): number {
+  public getMainOuterHeight(): number {
     const margins = this.getMargins()
-    const headerExtraHeight = this.header.getExtraHeight(pageNo)
-    const footerExtraHeight = this.footer.getExtraHeight(pageNo)
+    const headerExtraHeight = this.header.getExtraHeight()
+    const footerExtraHeight = this.footer.getExtraHeight()
     return margins[0] + margins[2] + headerExtraHeight + footerExtraHeight
   }
 
@@ -480,6 +698,22 @@ export class Draw {
     const width = this.getWidth()
     const margins = this.getMargins()
     return width - margins[1] - margins[3]
+  }
+
+  /**
+   * 主元素列表中携带 areaId 的元素数量。返回 0 时调用方（如 area.compute）
+   * 可直接跳过 O(N) 扫描。null 缓存表示「未统计」——首次调用 / 失效后会
+   * 在这里 lazy-rebuild 一次，后续命中 spliceElementList 维护的增量计数。
+   */
+  public getMainAreaCount(): number {
+    if (this._mainAreaCount === null) {
+      let count = 0
+      for (let i = 0; i < this.elementList.length; i++) {
+        if (this.elementList[i].areaId) count++
+      }
+      this._mainAreaCount = count
+    }
+    return this._mainAreaCount
   }
 
   public getOriginalInnerWidth(): number {
@@ -751,6 +985,14 @@ export class Draw {
     return this.ctxList[this.pageNo]
   }
 
+  public paintPageOnDom(payload: IDrawPagePayload) {
+    this._drawPage(payload)
+  }
+
+  public paintDecorationOnDom(payload: IDrawPagePayload) {
+    this._drawDecorationOnly(payload)
+  }
+
   public getOptions(): DeepRequired<IEditorOption> {
     return this.options
   }
@@ -898,7 +1140,11 @@ export class Draw {
         preElement?.value === ZERO &&
         (!preElement.type || preElement.type === ElementType.TEXT)
       ) {
-        elementList.splice(startIndex, 1)
+        // PERF-PLAN §1.2：直接 splice 会绕开 mutation event 与 _dirtyRange，导致
+        // 1) Phase 1.2 delta history 缺失这条改动→undo 时这个 ZERO 不会回来；
+        // 2) Phase 2A dirty-page paint 不知道改动落在哪里→可能漏画。
+        // 走 spliceElementList 让两条信号同时生效。
+        this.spliceElementList(elementList, startIndex, 1)
         curIndex -= 1
       }
     }
@@ -922,11 +1168,19 @@ export class Draw {
     })
     let curIndex: number
     const { isPrepend, isSubmitHistory = true } = options
+    // PERF-PLAN §1.2：走 spliceElementList 让 mutation event / _dirtyRange / delta
+    // history 都能感知到这次插入，并复用 Phase 1.2 follow-up 的批量 splice 优化
+    // （否则 push(...elementList) 在长列表上会 O(M × N) 累积。）
     if (isPrepend) {
-      this.elementList.splice(1, 0, ...elementList)
+      this.spliceElementList(this.elementList, 1, 0, elementList)
       curIndex = elementList.length
     } else {
-      this.elementList.push(...elementList)
+      this.spliceElementList(
+        this.elementList,
+        this.elementList.length,
+        0,
+        elementList
+      )
       curIndex = this.elementList.length - 1
     }
     this.range.setRange(curIndex, curIndex)
@@ -936,6 +1190,72 @@ export class Draw {
     })
   }
 
+  /**
+   * 标记主元素列表的 dirty 区间（PERF-PLAN §2.1）。
+   * - 多次标记会取并集（最小 start、最大 end）
+   * - 仅作为渲染期 dirty-page 计算的提示；为 null 时按全量路径处理
+   * - render() 完成后会被自动清空
+   */
+  public markDirty(start: number, end: number) {
+    const lo = Math.max(0, Math.min(start, end))
+    const hi = Math.max(lo, Math.max(start, end))
+    if (this._dirtyRange) {
+      this._dirtyRange.start = Math.min(this._dirtyRange.start, lo)
+      this._dirtyRange.end = Math.max(this._dirtyRange.end, hi)
+    } else {
+      this._dirtyRange = { start: lo, end: hi }
+    }
+  }
+
+  /**
+   * PERF-PLAN §2.6：用 computeRowList 预先存储在 TABLE 元素上的
+   * _mainElementIndex 将其在主列表中的位置标脏。TableTool 的列/行拖拽、
+   * TableOperate 的插入/删除行/列/合并/拆分等操作均直接更改元素属性后调用
+   * render()，不经过 spliceElementList 故无法自动设脏。此方法提供统一的
+   * 标脏入口，使增量布局在表格操作后仍能生效。
+   */
+  public markTableElementDirty(element: IElement) {
+    const idx = (element as unknown as { _mainElementIndex?: number })
+      ._mainElementIndex
+    if (idx !== undefined) {
+      this.markDirty(idx, idx)
+    }
+  }
+
+  public getDirtyRange(): { start: number; end: number } | null {
+    return this._dirtyRange
+  }
+
+  public clearDirtyRange() {
+    this._dirtyRange = null
+  }
+
+  /**
+   * 订阅 elementList 突变事件（PERF-PLAN §3.1）。
+   *
+   * 所有结构性变更最终都走 `spliceElementList`。订阅 `onMutation` 即可在
+   * 不修改核心代码的前提下接入 CRDT runtime / 审计 / 远端同步等横切关注点。
+   * 返回反订阅函数。
+   */
+  public onMutation(listener: MutationListener): () => void {
+    this._mutationListeners.add(listener)
+    return () => {
+      this._mutationListeners.delete(listener)
+    }
+  }
+
+  private _emitMutation(event: IMutationEvent) {
+    if (this._mutationListeners.size === 0) return
+    // 拷贝集合再迭代，避免回调中改 listener 集合引发问题
+    for (const listener of Array.from(this._mutationListeners)) {
+      try {
+        listener(event)
+      } catch {
+        /* 订阅者异常不影响突变流程 */
+      }
+    }
+  }
+
   public spliceElementList(
     elementList: IElement[],
     start: number,
@@ -943,6 +1263,123 @@ export class Draw {
     items?: IElement[],
     options?: ISpliceElementListOption
   ) {
+    // 主列表 / 页眉 / 页脚分别维护 dirty 标志：render() 据此精确决定布局范围
+    let scope: HistoryScope
+    // delta 历史所需：若本轮为表格单元格编辑，此变量保存 td 定位信息，
+    // 供后续构造 mutation event 时填充 tdPath。
+    let tableTdPath: {
+      elementIdx: number
+      trIdx: number
+      tdIdx: number
+    } | null = null
+    if (elementList === this.elementList) {
+      scope = 'main'
+      const insertedLen = items?.length ?? 0
+      this.markDirty(start, start + Math.max(deleteCount, insertedLen))
+    } else if (elementList === this.header.getElementList()) {
+      scope = 'header'
+      this._headerDirty = true
+      this._headerChromeVersion++
+    } else if (elementList === this.footer.getElementList()) {
+      scope = 'footer'
+      this._footerDirty = true
+      this._footerChromeVersion++
+    } else {
+      scope = 'table'
+      // PERF-PLAN §2.5 / Phase 2B：如果该 elementList 是某个 td.value（由上一次
+      // computeRowList 在表格分支里挂上 _owningTd 反向引用），把那个 td 标 dirty。
+      // 主体下次 computeRowList 抵达该单元格时会按 cacheKey + _dirty 决定是否
+      // 复用 td.rowList。任何主体外的 elementList（自由文本、控件值等）都没有
+      // _owningTd，本分支静默跳过。
+      const owningTd = (
+        elementList as unknown as { _owningTd?: { _dirty?: boolean } }
+      )._owningTd
+      if (owningTd) {
+        owningTd._dirty = true
+        // PERF-PLAN §2.5 follow-up：编辑表格单元格时 spliceElementList 的
+        // 作用域是 'table'，因此不会自动标脏主元素列表。若该 td 所属的 TABLE
+        // 元素在主列表中，就把主列表的 dirty 区间设为 TABLE 元素的索引位置，
+        // 使下一帧 _tryBuildResumeFrom 能恢复增量布局——避免在 34 页文档的
+        // 表格中每按一个键触发一次 ~1700 ms 的 full computeRowList。
+        const tdMeta = owningTd as unknown as {
+          _ownerElementIndex?: number
+          _trIdx?: number
+          _tdIdx?: number
+          _dirty?: boolean
+        }
+        const ownerIdx = tdMeta._ownerElementIndex
+        if (
+          ownerIdx !== undefined &&
+          ownerIdx < this.elementList.length &&
+          this.elementList[ownerIdx].type === ElementType.TABLE
+        ) {
+          this.markDirty(ownerIdx, ownerIdx)
+        }
+        // PERF-PLAN §1.2 follow-up：捕获 td 定位信息以支持表格编辑的 delta
+        // 历史。若 tr/td 索引可用，后续 mutation event 会携带 tdPath，
+        // submitHistory 可走 delta 分支而非全量 snapshot——将 ~150 ms
+        // 的 history 开销降至 <1 ms。
+        if (
+          ownerIdx !== undefined &&
+          tdMeta._trIdx !== undefined &&
+          tdMeta._tdIdx !== undefined
+        ) {
+          tableTdPath = {
+            elementIdx: ownerIdx,
+            trIdx: tdMeta._trIdx,
+            tdIdx: tdMeta._tdIdx
+          }
+        }
+      }
+    }
+    // PERF-PLAN §1.2 / Phase 1.2：header/footer 无法走 delta 分支——
+    // setElementList 会替换整个 elementList，retroactive splice 不可靠。
+    // 表格编辑若捕获了 tdPath 则可走 delta；否则 fallback 到 snapshot。
+    if (scope !== 'main' && (scope !== 'table' || !tableTdPath)) {
+      this._deltaHistoryUnsafe = true
+    }
+    // PERF-PLAN follow-up：维护 main 列表中 SURROUND 元素的计数缓存——
+    // pickSurroundElementList 在 render() 每帧扫一次 O(N)，对于绝大多数没有
+    // 浮动图片的文档完全是空载。spliceElementList 是主列表唯一的结构化变更
+    // 入口，这里同步增减 counter，render 据此跳过整次扫描。null 表示「未计算」
+    // —下一次 render 触发的 fast-path 检查会重建。
+    if (scope === 'main' && this._mainSurroundCount !== null) {
+      let delta = 0
+      if (deleteCount > 0) {
+        // removedSnapshot 还没建好，但元素仍在 elementList[start..start+deleteCount)。
+        for (let i = 0; i < deleteCount; i++) {
+          const el = elementList[start + i]
+          if (el?.imgDisplay === ImageDisplay.SURROUND) delta--
+        }
+      }
+      if (items?.length) {
+        for (let i = 0; i < items.length; i++) {
+          if (items[i].imgDisplay === ImageDisplay.SURROUND) delta++
+        }
+      }
+      this._mainSurroundCount = Math.max(0, this._mainSurroundCount + delta)
+    }
+    // 同样维护 area 计数缓存——area.compute 据此跳过整次扫描。
+    if (scope === 'main' && this._mainAreaCount !== null) {
+      let delta = 0
+      if (deleteCount > 0) {
+        for (let i = 0; i < deleteCount; i++) {
+          const el = elementList[start + i]
+          if (el?.areaId) delta--
+        }
+      }
+      if (items?.length) {
+        for (let i = 0; i < items.length; i++) {
+          if (items[i].areaId) delta++
+        }
+      }
+      this._mainAreaCount = Math.max(0, this._mainAreaCount + delta)
+    }
+    // 事件订阅前先快照「将被删除」切片（splice 后无法访问）。
+    // 内部的 delta-history 记录器同样需要这份快照，因此从此版本起即便没有
+    // 外部 mutation 订阅者，只要存在 delete 也照常 slice。
+    const removedSnapshot =
+      deleteCount > 0 ? elementList.slice(start, start + deleteCount) : []
     const { isIgnoreDeletedRule = false } = options || {}
     const { group, modeRule } = this.options
     if (deleteCount > 0) {
@@ -967,6 +1404,9 @@ export class Draw {
           delete curElement.listType
           delete curElement.listStyle
           startIndex++
+          // PERF-PLAN §1.2：本路径属于「splice 之外的旁路属性写入」——mutation
+          // 事件无法描述。记入旁路改动后，submitHistory 会回退到 snapshot 分支。
+          this._deltaHistoryUnsafe = true
         }
       }
       // 非明确忽略删除规则 && 非设计模式 && 非光标在控件内(控件内控制) =》 校验删除规则
@@ -977,6 +1417,7 @@ export class Draw {
       ) {
         const tdDeletable = this.getTd()?.deletable
         let deleteIndex = endIndex - 1
+        let actuallyDeleted = 0
         while (deleteIndex >= start) {
           const deleteElement = elementList[deleteIndex]
           if (
@@ -994,18 +1435,87 @@ export class Draw {
                 deleteElement?.areaIndex !== 0))
           ) {
             elementList.splice(deleteIndex, 1)
+            actuallyDeleted++
           }
           deleteIndex--
+        }
+        // PERF-PLAN §1.2：deletable 规则跳过了部分元素时 removed 切片不再对称
+        // （它仍是 `[start, start+deleteCount)`，但部分元素其实没删）。delta 入栈
+        // 时若按这份切片做逆操作会重新插入「保留下来的」元素，导致重复。
+        // 因此只要保护规则真的吃掉了某个候选删除项，立即让本轮 fallback 到 snapshot。
+        if (actuallyDeleted !== deleteCount) {
+          this._deltaHistoryUnsafe = true
         }
       } else {
         elementList.splice(start, deleteCount)
       }
     }
-    // 循环添加，避免使用解构影响性能
+    // PERF-PLAN follow-up：批量插入。从历史「逐项 splice 避免解构开销」改为单次
+    // splice 大批插入。前者每次 splice 都是 O(N)，对于一条粘贴 M 个元素的命令
+    // 总成本是 O(M × N)——pasting 长段落 10 次时观测到的滚雪球延迟正是出自这里。
+    // 现在改为一次 splice 完成插入：单次 O(N + M)，同时仍保留 §6.2a 的 CRDT id
+    // 填充。`splice(...items)` 的展开会受到 V8 函数参数上限（~65535）影响，因此
+    // 巨型 paste 自动按 chunk 分次完成，避免 RangeError。
     if (items?.length) {
+      // 1) §6.2a：先一遍循环把缺失的稳定 id 填好——每个元素一次属性写。
       for (let i = 0; i < items.length; i++) {
-        elementList.splice(start + i, 0, items[i])
+        if (!items[i].id) items[i].id = getUUID()
       }
+      // 2) 一次（或几次）spread splice 完成结构性插入。
+      const SPREAD_CHUNK = 32768
+      if (items.length <= SPREAD_CHUNK) {
+        elementList.splice(start, 0, ...items)
+      } else {
+        for (let off = 0; off < items.length; off += SPREAD_CHUNK) {
+          const slice = items.slice(off, off + SPREAD_CHUNK)
+          elementList.splice(start + off, 0, ...slice)
+        }
+      }
+    }
+    // PERF-PLAN §1.2 / §3.1：构造 splice 事件，既给 mutation 订阅者也给 history
+    // delta 记录器使用。仅在 replay history（撤销/重做）期间不做记录，避免
+    // 自相干循环（applyBackward 调用 splice 还原时会再次进来）。
+    if (!this._isReplayingHistory) {
+      const clonedRemoved = getSlimCloneElementList(removedSnapshot)
+      const clonedInserted = items ? getSlimCloneElementList(items) : []
+      const event: IMutationEvent = {
+        kind: 'splice',
+        scope,
+        start,
+        removed: clonedRemoved,
+        inserted: clonedInserted,
+        ...(tableTdPath ? { tdPath: tableTdPath } : {})
+      }
+      // 第一笔 mutation 入队前先锁住 BEFORE 状态——delta 入栈时携带，作为
+      // applyBackward 的「目的地」元数据。允许 table scope（若 tdPath 可用）。
+      if (
+        (scope === 'main' || (scope === 'table' && tableTdPath)) &&
+        !this._deltaHistoryUnsafe &&
+        this._pendingHistoryMutations.length === 0 &&
+        this._preMutationMeta === null
+      ) {
+        this._preMutationMeta = {
+          range: deepClone(this.range.getRange()),
+          positionContext: deepClone(this.position.getPositionContext()),
+          pageNo: this.pageNo,
+          zone: this.zone.getZone()
+        }
+      }
+      this._pendingHistoryMutations.push(event)
+      // 通知 mutation 订阅者
+      if (this._mutationListeners.size > 0) {
+        this._emitMutation(event)
+      }
+    } else if (this._mutationListeners.size > 0) {
+      const clonedRemoved = getSlimCloneElementList(removedSnapshot)
+      const clonedInserted = items ? getSlimCloneElementList(items) : []
+      this._emitMutation({
+        kind: 'splice',
+        scope,
+        start,
+        removed: clonedRemoved,
+        inserted: clonedInserted
+      })
     }
   }
 
@@ -1065,7 +1575,9 @@ export class Draw {
     return this.footer
   }
 
-  public setHeaderOption(payload: Partial<DeepRequired<IEditorOption>['header']>) {
+  public setHeaderOption(
+    payload: Partial<DeepRequired<IEditorOption>['header']>
+  ) {
     Object.assign(this.options.header, payload)
     this.render({
       isSubmitHistory: false,
@@ -1073,7 +1585,9 @@ export class Draw {
     })
   }
 
-  public setFooterOption(payload: Partial<DeepRequired<IEditorOption>['footer']>) {
+  public setFooterOption(
+    payload: Partial<DeepRequired<IEditorOption>['footer']>
+  ) {
     Object.assign(this.options.footer, payload)
     this.render({
       isSubmitHistory: false,
@@ -1147,20 +1661,9 @@ export class Draw {
     if (isSwitchMode) {
       this.setMode(mode)
     }
-    // 打印 / 截图时不应渲染当前选区,否则选区蓝色矩形会被烘进 PNG
-    const savedRange =
-      mode === EditorMode.PRINT ? deepClone(this.range.getRange()) : null
-    if (savedRange) {
-      this.range.clearRange()
-    }
-    // 打印模式下 setPrintData 会用过滤后的克隆数据替换 elementList,
-    // 旧的 pageRowList / positionList 仍引用过滤前的元素,导致 drawRow
-    // 走的是旧布局而 elementList 参数是新数组,偶尔会出现绘制错位/叠字.
-    // 强制 compute 重新计算以保证布局与数据一致.
-    const isPrintRender = mode === EditorMode.PRINT
     this.render({
       isLazy: false,
-      isCompute: isPrintRender,
+      isCompute: false,
       isSetCursor: false,
       isSubmitHistory: false
     })
@@ -1176,9 +1679,6 @@ export class Draw {
     }
     if (isSwitchMode) {
       this.setMode(currentMode)
-    }
-    if (savedRange) {
-      this.range.replaceRange(savedRange)
     }
     return dataUrlList
   }
@@ -1220,6 +1720,8 @@ export class Draw {
   public setPageMode(payload: PageMode) {
     if (!payload || this.options.pageMode === payload) return
     this.options.pageMode = payload
+    // 分页模式切换会重建整套 pageRowList / page signature；旧的 paint plan 不可复用。
+    this._invalidatePaintCache()
     // 纸张大小重置
     if (payload === PageMode.PAGING) {
       const { height } = this.options
@@ -1261,30 +1763,179 @@ export class Draw {
   }
 
   public setPageScale(payload: number) {
+    const oldScale = this.options.scale
+    // Decide whether the scale-only fast path applies. computeRowList over
+    // the entire document is the dominant cost on large docs (25-page +)
+    // when only `scale` changed — wrapping decisions are essentially
+    // scale-invariant in this renderer because measureText is cached
+    // against unscaled fonts (TextParticle.measureText sets `ctx.font` via
+    // `getElementFont(element)` with the default scale=1) and widths are
+    // multiplied by `scale` only at the use site. We therefore can scale
+    // the existing rowList / element.metrics / table caches in-place and
+    // let the cheap O(N) arithmetic dependents (pageRowList, positionList,
+    // area, search highlights) re-derive from the scaled rowList.
+    const ratio = oldScale > 0 ? payload / oldScale : 0
+    const canFastPath =
+      payload !== oldScale &&
+      Number.isFinite(ratio) &&
+      ratio > 0 &&
+      this.rowList.length > 0 &&
+      this._dirtyRange === null &&
+      this._prevPageRowCounts !== null &&
+      !this.isPrintMode()
     const dpr = this.getPagePixelRatio()
     this.options.scale = payload
     const width = this.getWidth()
     const height = this.getHeight()
     this.container.style.width = `${width}px`
-    this.pageList.forEach((p, i) => {
-      p.width = width * dpr
-      p.height = height * dpr
-      p.style.width = `${width}px`
-      p.style.height = `${height}px`
-      p.style.marginBottom = `${this.getPageGap()}px`
-      this._initPageContext(this.ctxList[i])
-    })
+    for (let i = 0; i < this.pageList.length; i++) {
+      this._resizePageBacking(i, width, height, dpr)
+    }
+    if (canFastPath) {
+      this._scaleLayoutInPlace(this.rowList, ratio, payload)
+      // Row checkpoints carry scale-dependent carry state (x / y /
+      // controlRealWidth — see ILayoutCheckpoint). Scaling them in place
+      // matches what the in-place rowList scaling did, so the next typing
+      // event can still resume incremental layout from the appropriate
+      // prefix and stays fast (PERF-PLAN §2.2). Without this, the first
+      // keystroke after a fit-to-X click would pay a full computeRowList
+      // on the entire document while incremental rebuilt its checkpoints.
+      this._scaleCheckpointsInPlace(this._mainRowCheckpoints, ratio)
+      // Canvas backing stores were just resized → all bitmaps cleared.
+      this._drawnPages.clear()
+      this._skipMainRowCompute = true
+    }
     const cursorPosition = this.position.getCursorPosition()
-    this.render({
-      isSubmitHistory: false,
-      isSetCursor: !!cursorPosition,
-      curIndex: cursorPosition?.index
-    })
+    try {
+      this.render({
+        isSubmitHistory: false,
+        isSetCursor: !!cursorPosition,
+        curIndex: cursorPosition?.index
+      })
+    } finally {
+      this._skipMainRowCompute = false
+    }
     if (this.listener.pageScaleChange) {
       this.listener.pageScaleChange(payload)
     }
     if (this.eventBus.isSubscribe('pageScaleChange')) {
       this.eventBus.emit('pageScaleChange', payload)
+    }
+  }
+
+  /**
+   * Apply a uniform scale ratio to a rowList (and any nested table
+   * rowLists) in place, without re-running computeRowList. Used by
+   * {@link setPageScale} as the scale-only fast path.
+   *
+   * Why this is correct: every scale-dependent geometry value in this
+   * renderer is computed as `unscaled * options.scale`, and measureText
+   * is cached against the unscaled font (see Draw.ts:2564 / 2582 — the
+   * default `getElementFont(el)` argument is scale=1; line widths are
+   * multiplied by `scale` only at the use site, e.g. lines 2541, 2553,
+   * 2567, 2584). Therefore a uniform multiply of every cached pixel
+   * value reproduces what computeRowList would have produced at the new
+   * scale, modulo sub-pixel rounding noise that's already below the
+   * detection threshold of the existing layout invariants.
+   *
+   * Touches:
+   *  - row.{width,height,ascent,offsetX,offsetY,innerWidth,pageStartX,pageStartY}
+   *  - row.elementList[*].metrics — the per-element pixel dimensions
+   *    drawn by drawRow / TextParticle / ImageParticle / etc.
+   *  - row.elementList[*].style — the canvas font string (`getElementFont`
+   *    with the new scale baked in) used at draw time
+   *  - row.elementList[*].left — manual left offset, scale-dependent
+   *  - For TABLE elements: recurse into td.rowList (per-cell layouts)
+   *    and refresh td._cacheScale / td._cacheInnerWidth so the next
+   *    full computeRowList pass can reuse the cell.
+   *
+   * Does NOT touch: tr.height / td.{width,height} — those are stored
+   * in *unscaled* units in this codebase (line 2282 multiplies td.width
+   * by scale at use; lines 2267, 2409 likewise for tr.height).
+   */
+  /**
+   * Scale a parallel-indexed checkpoint sink by `ratio` in place. Pairs
+   * with {@link _scaleLayoutInPlace} for the scale-only fast path: row
+   * checkpoints capture the loop carry state (x / y / controlRealWidth)
+   * at row boundaries, all of which are scale-dependent. Scaling them
+   * keeps incremental layout viable on the next render — without this,
+   * the first keystroke after a fit-to-X would resume against stale
+   * pre-scale x / y values, fail the layout-sig compatibility check,
+   * and fall back to full computeRowList over the whole document.
+   *
+   * Other fields (pageNo / listId / listIndex / currentPageColumns /
+   * surroundElementList element refs) are scale-invariant; the element
+   * references inside surroundElementList still point at the same IElement
+   * objects whose metrics were already scaled by _scaleLayoutInPlace.
+   */
+  private _scaleCheckpointsInPlace(
+    checkpoints: ILayoutCheckpoint[],
+    ratio: number
+  ) {
+    for (let i = 0; i < checkpoints.length; i++) {
+      const ckpt = checkpoints[i]
+      ckpt.x *= ratio
+      ckpt.y *= ratio
+      ckpt.controlRealWidth *= ratio
+    }
+  }
+
+  private _scaleLayoutInPlace(
+    rowList: IRow[],
+    ratio: number,
+    newScale: number
+  ) {
+    for (let r = 0; r < rowList.length; r++) {
+      const row = rowList[r]
+      row.width *= ratio
+      row.height *= ratio
+      row.ascent *= ratio
+      // Pre-spacing geometry travels with the row through scale changes — both
+      // values must move together so spacing post-process and convergence
+      // comparisons stay consistent after _skipMainRowCompute reuses these rows.
+      if (row.baseHeight !== undefined) row.baseHeight *= ratio
+      if (row.baseAscent !== undefined) row.baseAscent *= ratio
+      if (row.offsetX !== undefined) row.offsetX *= ratio
+      if (row.offsetY !== undefined) row.offsetY *= ratio
+      if (row.innerWidth !== undefined) row.innerWidth *= ratio
+      if (row.pageStartX !== undefined) row.pageStartX *= ratio
+      if (row.pageStartY !== undefined) row.pageStartY *= ratio
+      const elementList = row.elementList
+      for (let e = 0; e < elementList.length; e++) {
+        const el = elementList[e]
+        const m = el.metrics
+        if (m) {
+          m.width *= ratio
+          m.height *= ratio
+          m.boundingBoxAscent *= ratio
+          m.boundingBoxDescent *= ratio
+        }
+        if (el.left !== undefined) el.left *= ratio
+        // The drawn font string has the (old) scale baked in via
+        // getElementFont(el, oldScale). Refresh it for the new scale.
+        el.style = this.getElementFont(el, newScale)
+        if (el.type === ElementType.TABLE && el.trList) {
+          for (let t = 0; t < el.trList.length; t++) {
+            const tr = el.trList[t]
+            for (let d = 0; d < tr.tdList.length; d++) {
+              const td = tr.tdList[d]
+              if (td.rowList) {
+                this._scaleLayoutInPlace(td.rowList, ratio, newScale)
+              }
+              // Keep the per-cell cache key consistent with the new scale
+              // so the next full computeRowList pass can reuse this td
+              // (canReuseCell at Draw.ts:2284 requires _cacheScale ===
+              // current scale).
+              if (td._cacheScale !== undefined) {
+                td._cacheScale = newScale
+                if (td._cacheInnerWidth !== undefined) {
+                  td._cacheInnerWidth *= ratio
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 
@@ -1307,11 +1958,9 @@ export class Draw {
     const dpr = this.getPagePixelRatio()
     const width = this.getWidth()
     const height = this.getHeight()
-    this.pageList.forEach((p, i) => {
-      p.width = width * dpr
-      p.height = height * dpr
-      this._initPageContext(this.ctxList[i])
-    })
+    for (let i = 0; i < this.pageList.length; i++) {
+      this._resizePageBacking(i, width, height, dpr)
+    }
     this.render({
       isSubmitHistory: false,
       isSetCursor: false
@@ -1325,13 +1974,9 @@ export class Draw {
     const realWidth = this.getWidth()
     const realHeight = this.getHeight()
     this.container.style.width = `${realWidth}px`
-    this.pageList.forEach((p, i) => {
-      p.width = realWidth * dpr
-      p.height = realHeight * dpr
-      p.style.width = `${realWidth}px`
-      p.style.height = `${realHeight}px`
-      this._initPageContext(this.ctxList[i])
-    })
+    for (let i = 0; i < this.pageList.length; i++) {
+      this._resizePageBacking(i, realWidth, realHeight, dpr)
+    }
     this.render({
       isSubmitHistory: false,
       isSetCursor: false
@@ -1344,13 +1989,9 @@ export class Draw {
     const width = this.getWidth()
     const height = this.getHeight()
     this.container.style.width = `${width}px`
-    this.pageList.forEach((p, i) => {
-      p.width = width * dpr
-      p.height = height * dpr
-      p.style.width = `${width}px`
-      p.style.height = `${height}px`
-      this._initPageContext(this.ctxList[i])
-    })
+    for (let i = 0; i < this.pageList.length; i++) {
+      this._resizePageBacking(i, width, height, dpr)
+    }
     this.render({
       isSubmitHistory: false,
       isSetCursor: false
@@ -1401,23 +2042,11 @@ export class Draw {
       header: zipElementList(originData.header, {
         extraPickAttrs
       }),
-      headerFirst: zipElementList(originData.headerFirst ?? [], {
-        extraPickAttrs
-      }),
-      headerEven: zipElementList(originData.headerEven ?? [], {
-        extraPickAttrs
-      }),
       main: zipElementList(originData.main, {
         extraPickAttrs,
         isClassifyArea: true
       }),
       footer: zipElementList(originData.footer, {
-        extraPickAttrs
-      }),
-      footerFirst: zipElementList(originData.footerFirst ?? [], {
-        extraPickAttrs
-      }),
-      footerEven: zipElementList(originData.footerEven ?? [], {
         extraPickAttrs
       }),
       graffiti: originData.graffiti
@@ -1430,35 +2059,10 @@ export class Draw {
   }
 
   public setValue(payload: Partial<IEditorData>, options?: ISetValueOption) {
-    const {
-      header,
-      headerFirst,
-      headerEven,
-      main,
-      footer,
-      footerFirst,
-      footerEven
-    } = deepClone(payload)
-    if (
-      !header &&
-      !headerFirst &&
-      !headerEven &&
-      !main &&
-      !footer &&
-      !footerFirst &&
-      !footerEven
-    )
-      return
+    const { header, main, footer } = deepClone(payload)
+    if (!header && !main && !footer) return
     const { isSetCursor = false } = options || {}
-    const pageComponentData = [
-      header,
-      headerFirst,
-      headerEven,
-      main,
-      footer,
-      footerFirst,
-      footerEven
-    ]
+    const pageComponentData = [header, main, footer]
     pageComponentData.forEach(data => {
       if (!data) return
       formatElementList(data, {
@@ -1468,12 +2072,8 @@ export class Draw {
     })
     this.setEditorData({
       header,
-      headerFirst,
-      headerEven,
       main,
-      footer,
-      footerFirst,
-      footerEven
+      footer
     })
     // 渲染&计算&清空历史记录
     this.historyManager.recovery()
@@ -1493,35 +2093,316 @@ export class Draw {
   }
 
   public setEditorData(payload: Partial<Omit<IEditorData, 'graffiti'>>) {
-    const {
-      header,
-      headerFirst,
-      headerEven,
-      main,
-      footer,
-      footerFirst,
-      footerEven
-    } = payload
+    const { header, main, footer } = payload
     if (header) {
-      this.header.setVariantElementList('default', header)
-    }
-    if (headerFirst) {
-      this.header.setVariantElementList('first', headerFirst)
-    }
-    if (headerEven) {
-      this.header.setVariantElementList('even', headerEven)
+      this.header.setElementList(header)
     }
     if (main) {
       this.elementList = main
     }
     if (footer) {
-      this.footer.setVariantElementList('default', footer)
+      this.footer.setElementList(footer)
     }
-    if (footerFirst) {
-      this.footer.setVariantElementList('first', footerFirst)
+    // 整体替换文档：dirty page 缓存与已绘制集合一并失效，下一次 render 强制全量重绘
+    this._invalidatePaintCache()
+  }
+
+  /**
+   * 失效化 dirty-page paint 缓存（PERF-PLAN §2.4）。在 setEditorData / 大批量
+   * 替换文档等无法用 dirty-range 描述的场景由调用方触发。
+   */
+  public invalidatePaintCache() {
+    this._invalidatePaintCache()
+  }
+
+  private _invalidatePaintCache() {
+    this._prevPageRowCounts = null
+    this._prevPageLayoutSignatures = null
+    this._drawnPages.clear()
+    this._decorationDrawnPages.clear()
+    this.chromeCacheKeyList = this.chromeCacheKeyList.map(() => null)
+    this._dirtyRange = null
+    this._headerDirty = false
+    this._footerDirty = false
+    // Phase 2B：增量布局所依赖的 row checkpoint 也一并失效，避免 setEditorData
+    // 等大批量替换文档后还沿用上一份文档的恢复点（PERF-PLAN §2.2）。
+    this._mainRowCheckpoints = []
+    this._mainLayoutSig = null
+    // PERF-PLAN §1.2 / Phase 1.2：累积的 delta mutation 也作废——setEditorData 之后
+    // 旧的 mutations 引用着已失效的 elementList 索引，replay 会产生灾难性的越界。
+    this._pendingHistoryMutations = []
+    this._deltaHistoryUnsafe = true
+    this._preMutationMeta = null
+    // surround / area 计数缓存需要重建：新文档可能含/不含这些特殊元素。
+    this._mainSurroundCount = null
+    this._mainAreaCount = null
+  }
+
+  /**
+   * PERF-PLAN §2.2 / Phase 2B：构建本帧的「布局输入签名」。
+   *
+   * 任何会让任意一行的几何形状（width / height / x / y / page break 时机）改变的
+   * 选项必须列入。签名变了 → 上一帧的 _mainRowCheckpoints 不再可信，必须全量。
+   */
+  private _buildLayoutSig(extra: {
+    isPagingMode: boolean
+    innerWidth: number
+  }) {
+    const { scale, defaultSize, defaultRowMargin, defaultTabWidth } =
+      this.options
+    return {
+      scale,
+      innerWidth: extra.innerWidth,
+      isPagingMode: extra.isPagingMode,
+      defaultSize,
+      defaultRowMargin,
+      defaultTabWidth
     }
-    if (footerEven) {
-      this.footer.setVariantElementList('even', footerEven)
+  }
+
+  private _isLayoutSigCompatible(extra: {
+    isPagingMode: boolean
+    innerWidth: number
+  }): boolean {
+    if (!this._mainLayoutSig) return false
+    const cur = this._buildLayoutSig(extra)
+    const old = this._mainLayoutSig
+    return (
+      cur.scale === old.scale &&
+      cur.innerWidth === old.innerWidth &&
+      cur.isPagingMode === old.isPagingMode &&
+      cur.defaultSize === old.defaultSize &&
+      cur.defaultRowMargin === old.defaultRowMargin &&
+      cur.defaultTabWidth === old.defaultTabWidth
+    )
+  }
+
+  /**
+   * PERF-PLAN §2.2 / Phase 2B：根据 _dirtyRange 找出 dirty 起点所在的行，
+   * 并构建一个 IComputeRowListResumePayload 指示 computeRowList 从哪里继续。
+   *
+   * 返回 null 表示「不要走增量分支」——调用方应回落到全量布局。安全条件：
+   *  1) 上一帧已经至少跑过一次主体布局（_mainRowCheckpoints / rowList 非空）。
+   *  2) _dirtyRange 已被显式标记。
+   *  3) 布局签名（scale / innerWidth / pagingMode / defaultSize / ...）与上一帧一致。
+   *  4) dirty 起点所在行能定位到一个有效 checkpoint（通常就是 dirtyRowIndex 对应项）。
+   *     dirty 落在第一行时前缀为空，但仍可借助 convergence 复用尾部旧行。
+   *  5) 所有 prefix 行的元素引用必须仍可信（即没有 setEditorData / 跨文档替换）。
+   *     由 _invalidatePaintCache() 在那些路径上同步失效 _mainRowCheckpoints 来保证。
+   */
+  private _tryBuildResumeFrom(extra: {
+    isPagingMode: boolean
+    innerWidth: number
+  }): {
+    startElementIndex: number
+    prefixRowList: IRow[]
+    checkpoint: ILayoutCheckpoint
+    convergenceTarget: IConvergenceTarget
+  } | null {
+    if (!this._dirtyRange) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: no _dirtyRange'
+      )
+      return null
+    }
+    if (!this._mainRowCheckpoints.length) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: _mainRowCheckpoints empty'
+      )
+      return null
+    }
+    if (!this.rowList.length) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: rowList empty'
+      )
+      return null
+    }
+    if (this._mainRowCheckpoints.length !== this.rowList.length) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: checkpoint/row length mismatch',
+        {
+          checkpoints: this._mainRowCheckpoints.length,
+          rows: this.rowList.length
+        }
+      )
+      return null
+    }
+    if (!this._isLayoutSigCompatible(extra)) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: layout sig incompatible'
+      )
+      return null
+    }
+    const dirtyStart = this._dirtyRange.start
+    // 二分查找第一个 startIndex > dirtyStart 的行，O(log R) 替代 O(R)。
+    // rowList 的 startIndex 单调非递减——同一 startIndex 出现多次时取最后一个，
+    // 即「最大的 i 使得 rowList[i].startIndex <= dirtyStart」。
+    let lo = 0
+    let hi = this.rowList.length
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1
+      if (this.rowList[mid].startIndex > dirtyStart) {
+        hi = mid
+      } else {
+        lo = mid + 1
+      }
+    }
+    // lo 现在指向第一个 startIndex > dirtyStart 的行；前一行包含 dirtyStart。
+    const dirtyRowIndex = lo - 1
+    if (dirtyRowIndex < 0) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: dirtyRowIndex < 0',
+        {
+          dirtyStart,
+          dirtyRowIndex,
+          firstRowStartIndex: this.rowList[0]?.startIndex
+        }
+      )
+      return null
+    }
+    // PERF-PLAN §2.8：dirtyRowIndex === 0 表示脏起始于首行。此时前缀为空，
+    // 需要构造初始 checkpoint（等同行 0 之前的状态）。该 checkpoint 不与
+    // _mainRowCheckpoints 中的条目对齐，因此从边界参数重建。
+    const prefixRowList = this.rowList.slice(0, dirtyRowIndex)
+    let checkpoint = this._mainRowCheckpoints[dirtyRowIndex]
+    if (dirtyRowIndex === 0 && !checkpoint) {
+      const margins = this.options.margins
+      const extraHeight = this.header.getExtraHeight()
+      checkpoint = {
+        x: margins[3],
+        y: extra.isPagingMode ? margins[0] + extraHeight : 0,
+        pageNo: 0,
+        listId: undefined,
+        listIndex: 0,
+        controlRealWidth: 0,
+        currentPageColumns: this.normalizePageColumns(undefined),
+        surroundElementList: []
+      }
+    }
+    if (!checkpoint) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: no checkpoint at dirtyRowIndex',
+        { dirtyRowIndex, checkpointsLen: this._mainRowCheckpoints.length }
+      )
+      return null
+    }
+    // dirty 行的第一个元素索引：从该行开始重排
+    const startElementIndex = this.rowList[dirtyRowIndex].startIndex
+    // 收敛目标：从 dirty 行起的旧行序列 + 对应 checkpoint。computeRowList 跑到
+    // 与某个旧行完全一致时立即停止；调用方把剩余旧行（适当位移后）接到尾部。
+    // 仅当 _dirtyRange 存在时构造（_tryBuildResumeFrom 上方已断言非空）。
+    const convergenceTarget: IConvergenceTarget = {
+      oldRowsAfterCut: this.rowList.slice(dirtyRowIndex),
+      oldCheckpointsAfterCut: this._mainRowCheckpoints.slice(dirtyRowIndex),
+      dirtyEndAbs: this._dirtyRange!.end,
+      matched: null
+    }
+    return {
+      startElementIndex,
+      prefixRowList,
+      checkpoint,
+      convergenceTarget
+    }
+  }
+
+  /**
+   * PERF-PLAN §2.2 / Phase 2B：是否启用增量布局校验桩。
+   *
+   * 通过 editorOption 上的 `__perfValidateLayout` 隐藏字段开启——非生产路径，
+   * 仅用于本地 / CI 回归确认增量分支与全量分支输出字节相等。开启时每帧多跑
+   * 一次完整布局，性能直接腰斩，请勿用于真实场景。
+   */
+  private _isPerfValidateLayoutEnabled(): boolean {
+    const sentinel = (this.options as unknown as Record<string, unknown>)
+      .__perfValidateLayout
+    return sentinel === true
+  }
+
+  /**
+   * 是否启用渲染阶段计时日志（PERF-PLAN follow-up）。
+   *
+   * 通过 editorOption 上的 `__perfTraceRender` 隐藏字段开启——给用户一个
+   * 显式工具看到「这一帧 layout / paint / area / submitHistory 各花了多少
+   * ms」，便于诊断剩余卡顿来源。仅供 dev 使用，开启时会向 console 打印
+   * 一条 group。生产路径请保持关闭。
+   */
+  private _isPerfTraceRenderEnabled(): boolean {
+    const sentinel = (this.options as unknown as Record<string, unknown>)
+      .__perfTraceRender
+    return sentinel === true
+  }
+
+  /**
+   * 构造一个一次性的渲染阶段计时器（PERF-PLAN follow-up）。
+   *
+   * 用法：在 render() 入口构造一次（仅 __perfTraceRender 启用时），在每个
+   * 关键阶段调用 mark('label')，最后 flush() 把所有 phase 时间打印到
+   * console。便于用户在自己的内容上看到「这一帧 layout / paint / area /
+   * submitHistory 各占多少 ms」，定位剩余卡顿来源。
+   */
+  private _createRenderTrace() {
+    const t0 =
+      typeof performance !== 'undefined' ? performance.now() : Date.now()
+    let last = t0
+    const phases: { label: string; ms: number }[] = []
+    const now = () =>
+      typeof performance !== 'undefined' ? performance.now() : Date.now()
+    return {
+      mark: (label: string) => {
+        const cur = now()
+        phases.push({ label, ms: +(cur - last).toFixed(2) })
+        last = cur
+      },
+      flush: () => {
+        const total = +(now() - t0).toFixed(2)
+        console.log(
+          `[PerfTrace] render #${this.renderCount} total=${total}ms`,
+          phases.map(p => `${p.label}=${p.ms}ms`).join('  '),
+          phases
+        )
+      }
+    }
+  }
+
+  /**
+   * PERF-PLAN §2.2 / Phase 2B：把当前 this.rowList（增量结果）与一遍全量
+   * computeRowList 的输出按行 diff，不一致时 `console.error`。仅在
+   * _isPerfValidateLayoutEnabled() 为真时调用。
+   */
+  private _validateIncrementalLayout(payload: IComputeRowListPayload) {
+    // 全量重新跑一遍——独立 surroundElementList / 不写 sink，避免污染主路径
+    const fullRowList = this.computeRowList({
+      ...payload,
+      surroundElementList: payload.surroundElementList?.slice() ?? [],
+      checkpointSink: undefined,
+      resumeFrom: undefined
+    })
+    const inc = this.rowList
+    if (fullRowList.length !== inc.length) {
+      console.error(
+        `[Phase2B/validate] row count mismatch: full=${fullRowList.length} incremental=${inc.length}`
+      )
+      return
+    }
+    for (let r = 0; r < fullRowList.length; r++) {
+      const a = fullRowList[r]
+      const b = inc[r]
+      if (
+        a.startIndex !== b.startIndex ||
+        a.elementList.length !== b.elementList.length ||
+        Math.abs(a.width - b.width) > 0.01 ||
+        Math.abs(a.height - b.height) > 0.01 ||
+        a.rowIndex !== b.rowIndex ||
+        !!a.isPageBreak !== !!b.isPageBreak ||
+        !!a.isColumnBreak !== !!b.isColumnBreak ||
+        !!a.isSectionBreak !== !!b.isSectionBreak
+      ) {
+        console.error(`[Phase2B/validate] row ${r} mismatch`, {
+          full: a,
+          incremental: b
+        })
+        return
+      }
     }
   }
 
@@ -1545,28 +2426,161 @@ export class Draw {
     return pageContainer
   }
 
+  // 复用一个测量画布上下文（避免 computeRowList 每次创建 canvas）。
+  // 仅用于 measureText/list-style 等纯测量操作；font/baseline 等状态会被
+  // 各调用方在使用前显式覆盖，无需重置。
+  private _getMeasureCtx(): CanvasRenderingContext2D {
+    if (!this._measureCtx) {
+      this._measureCanvas = document.createElement('canvas')
+      this._measureCtx = this._measureCanvas.getContext(
+        '2d'
+      ) as CanvasRenderingContext2D
+    }
+    return this._measureCtx
+  }
+
   private _createPage(pageNo: number) {
     const width = this.getWidth()
     const height = this.getHeight()
-    const canvas = document.createElement('canvas')
-    canvas.style.width = `${width}px`
-    canvas.style.height = `${height}px`
-    canvas.style.display = 'block'
-    canvas.style.backgroundColor = '#ffffff'
-    canvas.style.marginBottom = `${this.getPageGap()}px`
-    canvas.setAttribute('data-index', String(pageNo))
-    this.pageContainer.append(canvas)
-    // 调整分辨率
     const dpr = this.getPagePixelRatio()
-    canvas.width = width * dpr
-    canvas.height = height * dpr
-    canvas.style.cursor = 'text'
-    const ctx = canvas.getContext('2d')!
-    // 初始化上下文配置
+    const isLayered = this._isPageLayered()
+
+    // base canvas——getPageList() 仍然返回这个 canvas，对外行为不变。
+    const base = document.createElement('canvas')
+    base.style.width = `${width}px`
+    base.style.height = `${height}px`
+    base.style.display = 'block'
+    base.style.backgroundColor = '#ffffff'
+    base.style.cursor = 'text'
+    base.setAttribute('data-index', String(pageNo))
+    base.width = width * dpr
+    base.height = height * dpr
+    const ctx = base.getContext('2d')!
     this._initPageContext(ctx)
-    // 缓存上下文
-    this.pageList.push(canvas)
+    const chromeCache = document.createElement('canvas')
+    chromeCache.width = width * dpr
+    chromeCache.height = height * dpr
+    const chromeCacheCtx = chromeCache.getContext('2d')!
+    this._initPageContext(chromeCacheCtx)
+
+    if (isLayered) {
+      // wrapper 是 pageContainer 的直接子节点——继承原 base canvas 在 flex/block
+      // 流中的位置（间距由 wrapper 的 marginBottom 提供）；base + decoration 都
+      // 用 absolute 位于 wrapper 内部叠放。
+      const wrapper = document.createElement('div')
+      wrapper.classList.add(`${EDITOR_PREFIX}-page-wrapper`)
+      // wrapper 同样不带 data-index——避免外部 `[data-index]` 查询双计数。
+      // 唯一带 data-index 的是 base canvas（line 2206）——保留事件命中和
+      // 索引语义不变。
+      wrapper.style.position = 'relative'
+      wrapper.style.width = `${width}px`
+      wrapper.style.height = `${height}px`
+      wrapper.style.display = 'block'
+      wrapper.style.marginBottom = `${this.getPageGap()}px`
+      base.classList.add(`${EDITOR_PREFIX}-page-base`)
+      base.style.position = 'absolute'
+      base.style.left = '0'
+      base.style.top = '0'
+      base.style.marginBottom = '0'
+      wrapper.appendChild(base)
+
+      const decoration = document.createElement('canvas')
+      decoration.classList.add(`${EDITOR_PREFIX}-page-decoration`)
+      // 注意：装饰层不带 data-index——很多外部代码（如 JATS canvas-inspect-overlay）
+      // 用 `canvas[data-index]` 计数页数；如果装饰层也带 data-index，会双计数→
+      // 「1 页文档被识别为 2 页」。仅 base canvas 需要 data-index（事件命中、
+      // IntersectionObserver target、demo 中的 page 索引）。
+      decoration.style.position = 'absolute'
+      decoration.style.left = '0'
+      decoration.style.top = '0'
+      decoration.style.width = `${width}px`
+      decoration.style.height = `${height}px`
+      decoration.style.pointerEvents = 'none'
+      decoration.width = width * dpr
+      decoration.height = height * dpr
+      const decoCtx = decoration.getContext('2d')!
+      this._initPageContext(decoCtx)
+      wrapper.appendChild(decoration)
+
+      this.pageContainer.append(wrapper)
+      this.pageWrapperList.push(wrapper)
+      this.decorationCanvasList.push(decoration)
+      this.decorationCtxList.push(decoCtx)
+    } else {
+      // 单层 fallback——保留旧 DOM 结构。decoration 数组条目 alias base，paint
+      // 代码无差别地写到一个 ctx。
+      base.style.marginBottom = `${this.getPageGap()}px`
+      this.pageContainer.append(base)
+      this.pageWrapperList.push(base as unknown as HTMLDivElement)
+      this.decorationCanvasList.push(base)
+      this.decorationCtxList.push(ctx)
+    }
+    this.pageList.push(base)
     this.ctxList.push(ctx)
+    this.chromeCacheCanvasList.push(chromeCache)
+    this.chromeCacheCtxList.push(chromeCacheCtx)
+    this.chromeCacheKeyList.push(null)
+  }
+
+  /**
+   * 是否启用分层 canvas。
+   *   - options.pageLayered.enable=true（默认）→ 每页 wrapper + base + decoration
+   *   - 否则单层 base canvas（旧行为，零回归）
+   */
+  private _isPageLayered(): boolean {
+    return this.options.pageLayered.enable === true
+  }
+
+  /** 拿到第 pageNo 页的 decoration ctx；分层关时与 base ctx 同一个。 */
+  public getDecorationCtx(pageNo: number): CanvasRenderingContext2D {
+    return this.decorationCtxList[pageNo] ?? this.ctxList[pageNo]
+  }
+
+  /**
+   * 同步重设第 pageNo 页的 base + decoration + wrapper 的物理尺寸 / DPR。
+   * setPageScale / setPaperSize / setPaperDirection / setPageDevicePixel 共用——
+   * 替换原来散落在各 setter 里的 `pageList.forEach((p, i) => { p.width = ... })`
+   * 块，确保两层 canvas 永远不会出现尺寸漂移（否则 decoration 上的选区矩形会
+   * 偏离 base 上的文字）。
+   */
+  private _resizePageBacking(
+    pageNo: number,
+    w: number,
+    h: number,
+    dpr: number
+  ) {
+    const base = this.pageList[pageNo]
+    base.width = w * dpr
+    base.height = h * dpr
+    base.style.width = `${w}px`
+    base.style.height = `${h}px`
+    this._initPageContext(this.ctxList[pageNo])
+    const wrapper = this.pageWrapperList[pageNo]
+    if (wrapper && wrapper !== (base as unknown as HTMLDivElement)) {
+      wrapper.style.width = `${w}px`
+      wrapper.style.height = `${h}px`
+      wrapper.style.marginBottom = `${this.getPageGap()}px`
+      // 分层模式下 base 的 marginBottom 由 wrapper 提供——保留 base 自身为 0
+      base.style.marginBottom = '0'
+    } else {
+      // 单层模式，间距挂在 base 自己身上（与旧行为一致）
+      base.style.marginBottom = `${this.getPageGap()}px`
+    }
+    const deco = this.decorationCanvasList[pageNo]
+    if (deco && deco !== base) {
+      deco.width = w * dpr
+      deco.height = h * dpr
+      deco.style.width = `${w}px`
+      deco.style.height = `${h}px`
+      this._initPageContext(this.decorationCtxList[pageNo])
+    }
+    const chromeCache = this.chromeCacheCanvasList[pageNo]
+    if (chromeCache) {
+      chromeCache.width = w * dpr
+      chromeCache.height = h * dpr
+      this._initPageContext(this.chromeCacheCtxList[pageNo])
+      this.chromeCacheKeyList[pageNo] = null
+    }
   }
 
   private _initPageContext(ctx: CanvasRenderingContext2D) {
@@ -1599,6 +2613,113 @@ export class Draw {
     return (extraLineHeight / 2) * scale
   }
 
+  /**
+   * PERF-PLAN §2.7：rowFlex / rowMargin 等纯行级属性变更的快速重算。
+   *
+   * 这些操作仅更改元素上的 rowFlex / rowMargin 属性——元素列表结构、字体、
+   * 换行边界均未变。跳过完整 computeRowList（1683 ms），直接基于当前
+   * rowList 还原自然宽度（_naturalWidth）后重新应用对齐与行距逻辑。
+   *
+   * 最后更新 pageRowList、positionList 并触发 paint 周期。
+   */
+  public recomputeRowProperties(curIndex: number | undefined) {
+    const innerWidth = this.getInnerWidth()
+    for (let r = 0; r < this.rowList.length; r++) {
+      const row = this.rowList[r]
+      const rowInnerWidth = row.innerWidth || innerWidth
+      // 1. 还原自然宽度（擦除上次 alignment 引入的拉伸量）
+      for (let e = 0; e < row.elementList.length; e++) {
+        const el = row.elementList[e]
+        const nw = (el as unknown as { _naturalWidth?: number })._naturalWidth
+        if (nw !== undefined) {
+          el.metrics.width = nw
+        }
+      }
+      // 2. 重算行高（rowMargin 可能已变更）
+      let maxRowHeight = 0
+      let totalWidth = 0
+      const firstEl = row.elementList[0]
+      const lastEl = row.elementList[row.elementList.length - 1]
+      for (let e = 0; e < row.elementList.length; e++) {
+        const el = row.elementList[e]
+        const m = el.metrics
+        totalWidth += m.width
+        const elRowMargin = this.getElementRowMargin(el)
+        // 与 computeRowList 一致：行高 = 各元素高度的最大值
+        const elHeight =
+          elRowMargin + m.boundingBoxAscent + m.boundingBoxDescent + elRowMargin
+        if (elHeight > maxRowHeight) {
+          maxRowHeight = elHeight
+          // 行 ascent 取最高元素的 ascent（含 rowMargin，与 computeRowList 一致）
+          row.ascent = m.boundingBoxAscent + elRowMargin
+        }
+      }
+      row.height = maxRowHeight
+      // 3. 重算行宽（重走 justify / alignment 逻辑）
+      const preEl = lastEl || firstEl
+      if (
+        !row.isSurround &&
+        (preEl?.rowFlex === RowFlex.JUSTIFY ||
+          (preEl?.rowFlex === RowFlex.ALIGNMENT && row.isWidthNotEnough))
+      ) {
+        // 忽略换行符及尾部元素间隔设置
+        const rl =
+          row.elementList[0]?.value === ZERO
+            ? row.elementList.slice(1)
+            : row.elementList
+        const whitespaceIndexes: number[] = []
+        for (let e = 0; e < rl.length - 1; e++) {
+          const v = rl[e].value
+          if (v === ' ' || v === '\u00a0') {
+            whitespaceIndexes.push(e)
+          }
+        }
+        let hasLatin = false
+        for (let e = 0; e < rl.length; e++) {
+          const v = rl[e].value
+          if (v && this.LETTER_REG.test(v)) {
+            hasLatin = true
+            break
+          }
+        }
+        const availableWidth = rowInnerWidth
+        if (whitespaceIndexes.length > 0) {
+          const gap = (availableWidth - totalWidth) / whitespaceIndexes.length
+          for (let g = 0; g < whitespaceIndexes.length; g++) {
+            rl[whitespaceIndexes[g]].metrics.width += gap
+          }
+          totalWidth = availableWidth
+        } else if (!hasLatin && rl.length > 1) {
+          const gap = (availableWidth - totalWidth) / (rl.length - 1)
+          for (let e = 0; e < rl.length - 1; e++) {
+            rl[e].metrics.width += gap
+          }
+          totalWidth = availableWidth
+        }
+      }
+      row.width = totalWidth
+      // 更新 row.rowFlex（computePageRowPosition 用此判断左/居中/右对齐）
+      // 遵循 computeRowList 的赋值逻辑：取行首元素（或第二个）的 rowFlex
+      const rowFlexEl = row.elementList[0]
+      row.rowFlex =
+        rowFlexEl?.rowFlex ?? row.elementList[1]?.rowFlex ?? rowFlexEl?.rowFlex
+    }
+    // 重算页列表和位置
+    this.pageRowList = this._computePageList()
+    this.position.computePositionList()
+    this.area.compute()
+    // 清空挂起的 rAF 渲染队列——否则 render() 的 OR 合并会将
+    // isSubmitHistory: false 覆盖为 true，触发全额 snapshot 克隆。
+    this.cancelScheduledRender()
+    // 触发热刷新（跳过 layout，仅 paint + cursor，历史由调用方负责）
+    this.render({
+      curIndex,
+      isCompute: false,
+      isSetCursor: true,
+      isSubmitHistory: false
+    })
+  }
+
   public computeRowList(payload: IComputeRowListPayload) {
     const {
       innerWidth,
@@ -1609,8 +2730,13 @@ export class Draw {
       startY = 0,
       pageHeight = 0,
       mainOuterHeight = 0,
-      surroundElementList = []
+      checkpointSink,
+      resumeFrom
     } = payload
+    // surroundElementList 在循环里会就地裁剪（deleteSurroundElementList），
+    // 因此在 resumeFrom 路径下不能继续沿用调用方传入的引用——
+    // 必须从 checkpoint 快照恢复一份独立拷贝。
+    let surroundElementList = payload.surroundElementList ?? []
     const {
       defaultSize,
       scale,
@@ -1619,39 +2745,135 @@ export class Draw {
       defaultTabWidth
     } = this.options
     const defaultBasicRowMarginHeight = this.getDefaultBasicRowMarginHeight()
-    const canvas = document.createElement('canvas')
-    const ctx = canvas.getContext('2d') as CanvasRenderingContext2D
+    const ctx = this._getMeasureCtx()
     // 计算列表偏移宽度
     const listStyleMap = this.listParticle.computeListStyle(ctx, elementList)
-    const rowList: IRow[] = []
-    let currentPageColumns = this.normalizePageColumns(
-      isFromTable
-        ? { columnCount: 1, columnGap: 0 }
-        : elementList[0]?.pageColumns
-    )
-    if (elementList.length) {
-      rowList.push({
-        width: 0,
-        height: 0,
-        ascent: 0,
-        elementList: [],
-        startIndex: 0,
-        rowIndex: 0,
-        rowFlex: elementList?.[0]?.rowFlex || elementList?.[1]?.rowFlex,
-        pageColumns: currentPageColumns,
-        innerWidth: this.getColumnInnerWidth(currentPageColumns)
-      })
-    }
-    // 起始位置及页码计算
-    let x = startX
-    let y = startY
-    let pageNo = 0
-    // 列表位置
+    let rowList: IRow[]
+    let currentPageColumns: Required<IPageColumns>
+    let x: number
+    let y: number
+    let pageNo: number
     let listId: string | undefined
-    let listIndex = 0
-    // 控件最小宽度
-    let controlRealWidth = 0
-    for (let i = 0; i < elementList.length; i++) {
+    let listIndex: number
+    let controlRealWidth: number
+    let i: number
+
+    if (resumeFrom) {
+      // PERF-PLAN §2.2 / Phase 2B：从已捕获的 checkpoint 恢复布局。
+      // 跳过 prefix 元素的 measureText / 包装判定 / surround 计算等 O(N) 工作，
+      // 直接在 dirty range 起点之前的「最近一行边界」继续。
+      rowList = resumeFrom.prefixRowList.slice()
+      const ckpt = resumeFrom.checkpoint
+      x = ckpt.x
+      y = ckpt.y
+      pageNo = ckpt.pageNo
+      listId = ckpt.listId
+      listIndex = ckpt.listIndex
+      controlRealWidth = ckpt.controlRealWidth
+      currentPageColumns = ckpt.currentPageColumns
+      // surround 列表使用 checkpoint 快照的副本——后续循环里 deleteSurroundElementList
+      // 会就地裁剪，不能直接绑回原数组。
+      surroundElementList = ckpt.surroundElementList.slice()
+      i = resumeFrom.startElementIndex
+      if (checkpointSink) {
+        // checkpointSink 与 rowList 平行索引——保留 prefix 部分，截断尾部，
+        // 后续循环按 push 时机继续追加。
+        if (checkpointSink.length > rowList.length) {
+          checkpointSink.length = rowList.length
+        }
+      }
+    } else {
+      rowList = []
+      currentPageColumns = this.normalizePageColumns(
+        isFromTable
+          ? { columnCount: 1, columnGap: 0 }
+          : elementList[0]?.pageColumns
+      )
+      if (elementList.length) {
+        rowList.push({
+          width: 0,
+          height: 0,
+          baseHeight: 0,
+          ascent: 0,
+          baseAscent: 0,
+          elementList: [],
+          startIndex: 0,
+          rowIndex: 0,
+          rowFlex: elementList?.[0]?.rowFlex || elementList?.[1]?.rowFlex,
+          pageColumns: currentPageColumns,
+          innerWidth: isFromTable
+            ? innerWidth
+            : this.getColumnInnerWidth(currentPageColumns)
+        })
+      }
+      // 起始位置及页码计算
+      x = startX
+      y = startY
+      pageNo = 0
+      // 列表位置
+      listId = undefined
+      listIndex = 0
+      // 控件最小宽度
+      controlRealWidth = 0
+      i = 0
+      // 种子行 checkpoint：等价于「未进入 i=0 之前」的循环局部状态。
+      // 注意：必须在 `i = 0` / `pageNo = 0` 等本地变量初始化之后捕获，确保数值一致。
+      if (checkpointSink) {
+        checkpointSink.length = 0
+        if (rowList.length) {
+          checkpointSink.push({
+            x,
+            y,
+            pageNo,
+            listId,
+            listIndex,
+            controlRealWidth,
+            currentPageColumns,
+            surroundElementList: surroundElementList.length
+              ? surroundElementList.slice()
+              : []
+          })
+        }
+      }
+    }
+    for (; i < elementList.length; i++) {
+      // PERF-PLAN §2.2 / Phase 2B：在循环顶部（即「iter (i-1) END / iter i TOP」）
+      // 捕获一份 checkpoint 候选；若本次迭代实际创建了新行（page-column 分支或
+      // wrap 分支），就把它写入 sink；否则丢弃。仅当调用方传入 checkpointSink
+      // 时才付出该成本。
+      const iterStartCkpt: ILayoutCheckpoint | null = checkpointSink
+        ? {
+            x,
+            y,
+            pageNo,
+            listId,
+            listIndex,
+            controlRealWidth,
+            currentPageColumns,
+            surroundElementList: surroundElementList.length
+              ? surroundElementList.slice()
+              : []
+          }
+        : null
+      // PERF-PLAN §2.8：dirtyRowIndex===0 时 rowList 初始为空（无前缀行）。
+      // 必须创建种子行以承接第一个迭代元素，逻辑与全量路径相同。
+      if (!rowList.length && elementList.length) {
+        rowList.push({
+          width: 0,
+          height: 0,
+          baseHeight: 0,
+          ascent: 0,
+          baseAscent: 0,
+          elementList: [],
+          startIndex: i,
+          rowIndex: 0,
+          rowFlex: elementList[i]?.rowFlex || elementList[i + 1]?.rowFlex,
+          pageColumns: currentPageColumns,
+          innerWidth: isFromTable
+            ? innerWidth
+            : this.getColumnInnerWidth(currentPageColumns)
+        })
+      }
       let curRow: IRow = rowList[rowList.length - 1]
       const element = elementList[i]
       if (!isFromTable && element.pageColumns) {
@@ -1662,21 +2884,31 @@ export class Draw {
             rowList.push({
               width: 0,
               height: 0,
+              baseHeight: 0,
               ascent: 0,
+              baseAscent: 0,
               elementList: [],
               startIndex: i,
               rowIndex: curRow.rowIndex + 1,
               rowFlex:
                 elementList?.[i]?.rowFlex || elementList?.[i + 1]?.rowFlex,
               pageColumns: currentPageColumns,
-              innerWidth: this.getColumnInnerWidth(currentPageColumns)
+              innerWidth: isFromTable
+                ? innerWidth
+                : this.getColumnInnerWidth(currentPageColumns)
             })
+            // 新行 checkpoint 落盘：与 rowList 长度保持平行
+            if (checkpointSink && iterStartCkpt) {
+              checkpointSink.push(iterStartCkpt)
+            }
             curRow = rowList[rowList.length - 1]
             x = startX
             y += rowList[rowList.length - 2].height
           } else {
             curRow.pageColumns = currentPageColumns
-            curRow.innerWidth = this.getColumnInnerWidth(currentPageColumns)
+            curRow.innerWidth = isFromTable
+              ? innerWidth
+              : this.getColumnInnerWidth(currentPageColumns)
           }
         }
       }
@@ -1688,14 +2920,42 @@ export class Draw {
         boundingBoxDescent: 0
       }
       // 实际可用宽度
+      // When the second slot of a row is about to be filled (isStartElement),
+      // lock curRow.offsetX from the row's existing first element's indent.
+      // This ensures every element in the row sees the same availableWidth,
+      // preventing mixed-indent rows (e.g. first-line-Tab + wrapped elements)
+      // from producing a wider layout than the rendered curRow.offsetX allows.
+      const isStartElement = curRow.elementList.length === 1
+      if (isStartElement && !curRow.offsetX && !element.listId) {
+        const firstEl = curRow.elementList[0]
+        if (firstEl?.indent) {
+          curRow.offsetX = firstEl.indent * defaultTabWidth * scale
+        }
+      }
+      // Lock right indent off the row's first element too, by the same logic
+      // as the left-indent lock above. Right indent is a paragraph property,
+      // so all elements share the same value — locking just avoids depending
+      // on whichever element happens to be `element` when the row wraps.
+      if (isStartElement && !curRow.rightOffsetX) {
+        const firstEl = curRow.elementList[0]
+        if (firstEl?.rightIndent) {
+          curRow.rightOffsetX = firstEl.rightIndent * defaultTabWidth * scale
+        }
+      }
+      const indentOffsetX = element.indent
+        ? element.indent * defaultTabWidth * scale
+        : 0
+      const rightIndentOffsetX = element.rightIndent
+        ? element.rightIndent * defaultTabWidth * scale
+        : 0
       const offsetX =
         curRow.offsetX ||
         (element.listId && listStyleMap.get(element.listId)) ||
-        0
+        indentOffsetX
+      const rightOffsetX = curRow.rightOffsetX || rightIndentOffsetX
       const rowInnerWidth = curRow.innerWidth || innerWidth
-      const availableWidth = rowInnerWidth - offsetX
+      const availableWidth = rowInnerWidth - offsetX - rightOffsetX
       // 增加起始位置坐标偏移量
-      const isStartElement = curRow.elementList.length === 1
       x += isStartElement ? offsetX : 0
       y += isStartElement ? curRow.offsetY || 0 : 0
       if (
@@ -1762,6 +3022,13 @@ export class Draw {
           }
         }
       } else if (element.type === ElementType.TABLE) {
+        // PERF-PLAN §2.6：除 td 级 _ownerElementIndex 外，也在 TABLE 元素本身
+        // 存储其在主列表中的索引。TableTool 的列/行拖拽缩放直接更改元素属性
+        // 后调用 render()——不经过 spliceElementList，因此无法自动标脏。此索引
+        // 使 resize 路径也能精准 markDirty(tableIndex)，启用增量布局。
+        ;(
+          element as unknown as { _mainElementIndex?: number }
+        )._mainElementIndex = i
         const tdPaddingWidth = tdPadding[1] + tdPadding[3]
         const tdPaddingHeight = tdPadding[0] + tdPadding[2]
         // 表格分页处理进度：https://github.com/Hufe921/canvas-editor/issues/41
@@ -1804,18 +3071,70 @@ export class Draw {
         // 计算表格行列
         this.tableParticle.computeRowColInfo(element)
         // 计算表格内元素信息
+        // 在外层捕获主元素列表索引，供下方 td 循环内的 _ownerElementIndex 使用。
+        // td 循环内有一个 `let i = 0`（td.rowspan 循环），会遮蔽外层 i，导致 TDZ，
+        // 因此在此先行捕获。
+        const tableElementIndex = i
         for (let t = 0; t < trList.length; t++) {
           const tr = trList[t]
           for (let d = 0; d < tr.tdList.length; d++) {
             const td = tr.tdList[d]
-            const rowList = this.computeRowList({
-              innerWidth: (td.width! - tdPaddingWidth) * scale,
-              elementList: td.value,
-              isFromTable: true,
-              isPagingMode
-            })
+            // PERF-PLAN §2.5 / Phase 2B：在 Mutator 边界（spliceElementList）能找到
+            // 「这条 elementList 属于哪个 td」的能力靠 td.value 上的隐藏 _owningTd
+            // 反向引用——这里保证每次 render 都重新设置一次（td 引用可能在表格
+            // 重排时变化，因此 writable + 重写）。
+            ;(td.value as unknown as { _owningTd: typeof td })._owningTd = td
+            // PERF-PLAN §2.5 follow-up：让 Mutator 边界也能把 dirty 传播到主元素
+            // 列表的 _dirtyRange。编辑表格单元格时 spliceElementList 的作用域是
+            //  'table'——不会自动标记主列表脏区。存储父 TABLE 元素在主列表中的
+            // 索引，spliceElementList 据此可精准设置主列表的 dirty 起点，使增量
+            // 布局 (_tryBuildResumeFrom) 能恢复运行——避免在 34 页文档的 table 中
+            // 按每个字符触发一次 full computeRowList。
+            // 注意：不存 _ownerElement 引用——那会形成 td→TABLE→trList→tdList→td
+            // 的循环引用，致使序列化 / 深拷贝递归爆栈。
+            ;(
+              td as unknown as {
+                _ownerElementIndex: number
+                _trIdx: number
+                _tdIdx: number
+              }
+            )._ownerElementIndex = tableElementIndex
+            ;(
+              td as unknown as {
+                _ownerElementIndex: number
+                _trIdx: number
+                _tdIdx: number
+              }
+            )._trIdx = t
+            ;(
+              td as unknown as {
+                _ownerElementIndex: number
+                _trIdx: number
+                _tdIdx: number
+              }
+            )._tdIdx = d
+            const tdInnerWidth = (td.width! - tdPaddingWidth) * scale
+            // 缓存命中条件：td 未被 dirty 标记，且缓存键完全一致。
+            const canReuseCell =
+              !!td.rowList &&
+              !td._dirty &&
+              td._cacheInnerWidth === tdInnerWidth &&
+              td._cacheScale === scale &&
+              td._cacheIsPagingMode === isPagingMode
+            const rowList = canReuseCell
+              ? td.rowList!
+              : this.computeRowList({
+                  innerWidth: tdInnerWidth,
+                  elementList: td.value,
+                  isFromTable: true,
+                  isPagingMode
+                })
             const rowHeight = rowList.reduce((pre, cur) => pre + cur.height, 0)
             td.rowList = rowList
+            td._dirty = false
+            td._cacheInnerWidth = tdInnerWidth
+            td._cacheScale = scale
+            td._cacheIsPagingMode = isPagingMode
             // 移除缩放导致的行高变化-渲染时会进行缩放调整
             const curTdHeight = rowHeight / scale + tdPaddingHeight
             // 内容高度大于当前单元格高度需增加
@@ -1911,7 +3230,14 @@ export class Draw {
             const rowOffsetY = row.offsetY || 0
             if (
               row.height + curPagePreHeight + rowOffsetY > height ||
-              rowList[r - 1]?.isPageBreak
+              rowList[r - 1]?.isPageBreak ||
+              // A page-starting section break behaves like a page break here.
+              (rowList[r - 1]?.isSectionBreak &&
+                rowList[r - 1]?.elementList.some(
+                  el =>
+                    el.type === ElementType.SECTION_BREAK &&
+                    el.sectionBreakType !== SectionBreakType.CONTINUOUS
+                ))
             ) {
               curPagePreHeight = marginHeight + row.height + rowOffsetY
             } else {
@@ -1922,10 +3248,18 @@ export class Draw {
           // 前面元素为换页符时重新计算高度
           const rowMarginHeight = rowMargin * 2 * scale
           const firstTrHeight = element.trList![0].height! * scale
+          // A section break that opens a new page (NEXT_PAGE / EVEN_PAGE /
+          // ODD_PAGE) also restarts table pagination accounting, just like a
+          // PAGE_BREAK; CONTINUOUS does not because layout stays on the page.
+          const prevEl = elementList[i - 1]
+          const isPriorPageStartingSectionBreak =
+            prevEl?.type === ElementType.SECTION_BREAK &&
+            prevEl.sectionBreakType !== SectionBreakType.CONTINUOUS
           if (
             curPagePreHeight + firstTrHeight + rowMarginHeight > height ||
             (element.pagingIndex !== 0 && element.trList![0].pagingRepeat) ||
-            elementList[i - 1]?.type === ElementType.PAGE_BREAK
+            prevEl?.type === ElementType.PAGE_BREAK ||
+            isPriorPageStartingSectionBreak
           ) {
             // 无可拆分行则切换至新页
             curPagePreHeight = marginHeight
@@ -2037,6 +3371,13 @@ export class Draw {
         element.width = availableWidth / scale
         metrics.width = availableWidth
         metrics.height = defaultSize
+      } else if (element.type === ElementType.SECTION_BREAK) {
+        // Section break occupies a placeholder row similar to PAGE_BREAK; the
+        // page-parity / page-flow side effects are applied later in
+        // _computePageList via row.isSectionBreak + element.sectionBreakType.
+        element.width = availableWidth / scale
+        metrics.width = availableWidth
+        metrics.height = defaultSize
       } else if (
         element.type === ElementType.RADIO ||
         element.controlComponent === ControlComponent.RADIO
@@ -2100,6 +3441,11 @@ export class Draw {
         if (element.letterSpacing) {
           metrics.width += element.letterSpacing * scale
         }
+        // PERF-PLAN §2.7：存储自然宽度（alignment 前）。rowFlex / rowMargin
+        // 快速路径需要还原到未拉伸宽度后重新对齐，避免在 34 页文档上每
+        // 次属性变更触发 ~1700ms 的 full computeRowList。
+        ;(element as unknown as { _naturalWidth?: number })._naturalWidth =
+          metrics.width
         // 使用基于字体的基准度量以确保一致的行高，避免字符特定度量导致的布局跳动
         const basisMetrics = this.textParticle.measureBasisWord(
           ctx,
@@ -2239,15 +3585,20 @@ export class Draw {
         const row: IRow = {
           width: metrics.width,
           height,
+          baseHeight: height,
           startIndex: i,
           elementList: [rowElement],
           ascent,
+          baseAscent: ascent,
           rowIndex: curRow.rowIndex + 1,
           rowFlex: elementList[i]?.rowFlex || elementList[i + 1]?.rowFlex,
           pageColumns: currentPageColumns,
-          innerWidth: this.getColumnInnerWidth(currentPageColumns),
+          innerWidth: isFromTable
+            ? innerWidth
+            : this.getColumnInnerWidth(currentPageColumns),
           isPageBreak: element.type === ElementType.PAGE_BREAK,
-          isColumnBreak: element.type === ElementType.COLUMN_BREAK
+          isColumnBreak: element.type === ElementType.COLUMN_BREAK,
+          isSectionBreak: element.type === ElementType.SECTION_BREAK
         }
         // 控件缩进
         if (
@@ -2285,6 +3636,12 @@ export class Draw {
             ? element.area.top * scale
             : 0
         rowList.push(row)
+        // PERF-PLAN §2.2 / Phase 2B：wrap 分支创建新行——同步落盘 checkpoint。
+        // iterStartCkpt 描述「即将进入元素 i 的迭代」之前的循环局部状态，
+        // 也就是「重新执行 iter i 来重建该 wrap 行」所需的全部 carry 信息。
+        if (checkpointSink && iterStartCkpt) {
+          checkpointSink.push(iterStartCkpt)
+        }
       } else {
         curRow.width += metrics.width
         // 减小块元素前第一行空行行高
@@ -2294,9 +3651,16 @@ export class Draw {
         ) {
           curRow.height = defaultBasicRowMarginHeight
           curRow.ascent = defaultBasicRowMarginHeight
+          // baseHeight/baseAscent track natural (pre-spacing) row geometry —
+          // keep in sync with every height write so spacing post-process can
+          // re-derive idempotently and convergence can compare like-for-like.
+          curRow.baseHeight = defaultBasicRowMarginHeight
+          curRow.baseAscent = defaultBasicRowMarginHeight
         } else if (curRow.height < height) {
           curRow.height = height
           curRow.ascent = ascent
+          curRow.baseHeight = height
+          curRow.baseAscent = ascent
         }
         curRow.elementList.push(rowElement)
       }
@@ -2357,12 +3721,18 @@ export class Draw {
       if (isWrap) {
         x = startX
         y += curRow.height
+        // NEXT_PAGE / EVEN_PAGE / ODD_PAGE all force a new page;
+        // CONTINUOUS deliberately does not (layout state changes mid-page).
+        const isPageStartingSectionBreak =
+          element.type === ElementType.SECTION_BREAK &&
+          element.sectionBreakType !== SectionBreakType.CONTINUOUS
         if (
           isPagingMode &&
           !isFromTable &&
           pageHeight &&
           (y - startY + mainOuterHeight + height > pageHeight ||
-            element.type === ElementType.PAGE_BREAK)
+            element.type === ElementType.PAGE_BREAK ||
+            isPageStartingSectionBreak)
         ) {
           y = startY
           // 删除多余四周环绕型元素
@@ -2388,8 +3758,268 @@ export class Draw {
         x = surroundPosition.x
         x += metrics.width
       }
+      // PERF-PLAN §2.2 / Phase 2B：收敛检测——仅当本帧走增量恢复路径、且本次
+      // 迭代实际完成了一行（isWrap）时检查。命中收敛则丢弃刚 push 的下一行
+      // 种子，break 出循环，由调用方拼接旧尾部。
+      // 这是把「在 25 页文档第 1 页改字」的工作量从 O(后续 N 元素) 收敛回
+      // 「受影响段落」量级的关键步骤。
+      if (
+        isWrap &&
+        resumeFrom?.convergenceTarget &&
+        resumeFrom.convergenceTarget.matched === null
+      ) {
+        if (
+          this._tryConvergeIncrementalRowList(
+            rowList,
+            checkpointSink,
+            resumeFrom.convergenceTarget
+          )
+        ) {
+          break
+        }
+      }
+    }
+    // 段落缩进
+    for (let r = 0; r < rowList.length; r++) {
+      const curRow = rowList[r]
+      const repEl = curRow.elementList.find(
+        el => el.value !== ZERO && el.value !== WRAP
+      )
+      if (repEl?.indent) {
+        // Always compute from a fresh base to avoid double-counting when
+        // incremental layout convergence reuses old row objects that already
+        // had curRow.offsetX set by a previous post-processing pass.
+        // List rows use the current list offset as base; plain rows use 0.
+        const listBase = curRow.isList
+          ? (listStyleMap.get(curRow.elementList.find(e => e.listId)?.listId ?? '') || 0)
+          : 0
+        curRow.offsetX = listBase + repEl.indent * defaultTabWidth * scale
+      }
+      // Right indent: same fresh-base recompute so incremental layout reuse
+      // doesn't compound the value across frames. Right offset is independent
+      // of the list bullet base (lists don't take right-side gutter space).
+      curRow.rightOffsetX = repEl?.rightIndent
+        ? repEl.rightIndent * defaultTabWidth * scale
+        : 0
+    }
+    // 段前段后间距
+    // paragraphZero tracks the ZERO element of the current paragraph so its
+    // spaceBefore/spaceAfter (paragraph-level properties) are accessible from
+    // every row in the paragraph, including the last row.
+    //
+    // PERF-PLAN §2.2 — Idempotency: incremental renders reuse prefix row
+    // objects from `this.rowList`. Naive `curRow.height += spaceBefore` would
+    // compound on every frame, bloating prefix heights and breaking the
+    // convergence check (`old.height !== completed.height`) because the old
+    // row's height drifts above the freshly-computed natural height.
+    // We reset each row to its captured natural geometry (baseHeight/baseAscent)
+    // before applying spacing, so the result is a pure function of the current
+    // (isFirst/isLast, spaceBefore/spaceAfter) and never accumulates.
+    let paragraphZero: (typeof elementList)[0] | undefined
+    for (let r = 0; r < rowList.length; r++) {
+      const curRow = rowList[r]
+      // Reset to natural geometry. baseHeight is set at every row construction
+      // and every in-loop height write — should always be defined here; the
+      // fallback covers legacy row objects from before this field existed.
+      if (curRow.baseHeight !== undefined) {
+        curRow.height = curRow.baseHeight
+        curRow.ascent = curRow.baseAscent ?? curRow.ascent
+      } else {
+        curRow.baseHeight = curRow.height
+        curRow.baseAscent = curRow.ascent
+      }
+      const prevRow = rowList[r - 1]
+      const nextRow = rowList[r + 1]
+      const hasTextContent = curRow.elementList.some(
+        el => el.value !== ZERO && el.value !== WRAP
+      )
+      if (!hasTextContent) continue
+      const isFirstOfParagraph =
+        !prevRow ||
+        elementList[
+          prevRow.startIndex + prevRow.elementList.length
+        ]?.value === ZERO
+      const isLastOfParagraph =
+        !nextRow ||
+        elementList[
+          curRow.startIndex + curRow.elementList.length
+        ]?.value === ZERO
+      if (isFirstOfParagraph) {
+        // The first element of the first row is always the paragraph's ZERO delimiter.
+        paragraphZero = curRow.elementList.find(el => el.value === ZERO)
+      }
+      if (!isFirstOfParagraph && !isLastOfParagraph) continue
+      // Use the paragraph ZERO for spacing (paragraph-level property).
+      // Fall back to repEl for documents that stored spacing on text elements.
+      const repEl = curRow.elementList.find(
+        el => el.value !== ZERO && el.value !== WRAP
+      )
+      const spacingEl = paragraphZero ?? repEl
+      if (!spacingEl) continue
+      // extraPixel: defaultBasicRowMarginHeight is already scaled by options.scale,
+      // so no additional scale factor is needed.
+      const extraPixel = defaultBasicRowMarginHeight
+      if (isFirstOfParagraph && spacingEl.spaceBefore) {
+        const spaceBeforePx = extraPixel * spacingEl.spaceBefore
+        curRow.height += spaceBeforePx
+        curRow.ascent += spaceBeforePx
+      }
+      if (isLastOfParagraph && spacingEl.spaceAfter) {
+        curRow.height += extraPixel * spacingEl.spaceAfter
+      }
     }
     return rowList
+  }
+
+  /**
+   * 尝试把刚完成的行（rowList[length-2]）匹配到 oldRowsAfterCut 中的某个旧
+   * 行——元素引用 / 长度 / 宽高 / ascent 全部一致，且当前位置已越过 dirtyEnd
+   * 时认定收敛。命中后：
+   *   - 写入 convergenceTarget.matched
+   *   - 丢弃 rowList 末尾刚 push 的下一行种子（避免与即将接驳的旧尾部首行重复）
+   *   - 同步丢弃 checkpointSink 的最末尾条目
+   *   - 返回 true：调用方应 break 出 for-loop
+   *
+   * 不命中时返回 false——调用方继续下一次迭代。
+   */
+  private _tryConvergeIncrementalRowList(
+    rowList: IRow[],
+    checkpointSink: ILayoutCheckpoint[] | undefined,
+    target: IConvergenceTarget
+  ): boolean {
+    if (rowList.length < 2) return false
+    const completed = rowList[rowList.length - 2]
+    const completedAbsEnd = completed.startIndex + completed.elementList.length
+    // 必须越过 dirty 末端——否则可能匹配到 dirty 区间内的旧行（误收敛会丢
+    // 掉本应重排的行）。
+    if (completedAbsEnd <= target.dirtyEndAbs) return false
+    const oldRows = target.oldRowsAfterCut
+    const len = completed.elementList.length
+    const last = len - 1
+    const firstEl = completed.elementList[0]
+    const lastEl = last >= 0 ? completed.elementList[last] : firstEl
+    // PERF-PLAN follow-up：诊断桩——开启 __perfTraceRender 时若收敛全程未命中，
+    // 把第一次「首尾元素 ref 匹配但其它字段不等」的差异打到 console，给用户
+    // 一条具体的失败原因（heights/widths/ascents/lengths/element refs）。
+    const traceConverge = (this.options as unknown as Record<string, unknown>)
+      .__perfTraceRender === true
+    let diagFirstNearMiss:
+      | {
+          oj: number
+          why: string
+          oldLen?: number
+          newLen?: number
+          oldH?: number
+          newH?: number
+          oldW?: number
+          newW?: number
+          oldA?: number
+          newA?: number
+          kMismatch?: number
+        }
+      | null = null
+    for (let oj = 0; oj < oldRows.length; oj++) {
+      const old = oldRows[oj]
+      if (old.elementList.length !== len) {
+        if (
+          traceConverge &&
+          !diagFirstNearMiss &&
+          old.elementList[0] === firstEl
+        ) {
+          diagFirstNearMiss = {
+            oj,
+            why: 'len',
+            oldLen: old.elementList.length,
+            newLen: len
+          }
+        }
+        continue
+      }
+      // 廉价的早期剔除：首尾元素引用必须相等（refs 经过 splice 也保留）。
+      if (old.elementList[0] !== firstEl) continue
+      if (old.elementList[last] !== lastEl) {
+        if (traceConverge && !diagFirstNearMiss) {
+          diagFirstNearMiss = { oj, why: 'lastRef' }
+        }
+        continue
+      }
+      // 行布局必须全等——任何漂移都意味着后续行也会不同。
+      // 比较 baseHeight/baseAscent（natural pre-spacing geometry）——
+      // `completed` 是循环内刚 push 的新行，paragraph spacing post-process
+      // 还没跑过，所以 .height/.ascent 仍是自然值。`old` 来自上一帧的
+      // post-process 结果，.height/.ascent 已包含 spaceBefore/spaceAfter。
+      // 若直接比较 .height，凡是 paragraph 带 spaceBefore 的下段首行都不会
+      // 命中收敛，回退到 walk-to-end-of-doc。
+      const oldBaseHeight = old.baseHeight ?? old.height
+      const oldBaseAscent = old.baseAscent ?? old.ascent
+      if (oldBaseHeight !== completed.height) {
+        if (traceConverge && !diagFirstNearMiss) {
+          diagFirstNearMiss = {
+            oj,
+            why: 'height',
+            oldH: oldBaseHeight,
+            newH: completed.height
+          }
+        }
+        continue
+      }
+      if (old.width !== completed.width) {
+        if (traceConverge && !diagFirstNearMiss) {
+          diagFirstNearMiss = {
+            oj,
+            why: 'width',
+            oldW: old.width,
+            newW: completed.width
+          }
+        }
+        continue
+      }
+      if (oldBaseAscent !== completed.ascent) {
+        if (traceConverge && !diagFirstNearMiss) {
+          diagFirstNearMiss = {
+            oj,
+            why: 'ascent',
+            oldA: oldBaseAscent,
+            newA: completed.ascent
+          }
+        }
+        continue
+      }
+      // 完整 ref 比对——保险起见，避免首尾相同但中间被改的极端情形。
+      let allMatch = true
+      let kMismatch = -1
+      for (let k = 1; k < last; k++) {
+        if (old.elementList[k] !== completed.elementList[k]) {
+          allMatch = false
+          kMismatch = k
+          break
+        }
+      }
+      if (!allMatch) {
+        if (traceConverge && !diagFirstNearMiss) {
+          diagFirstNearMiss = { oj, why: 'midRef', kMismatch }
+        }
+        continue
+      }
+      target.matched = { atOldIdx: oj }
+      // 丢弃刚 push 的下一行种子——调用方会从 oldRowsAfterCut[oj+1] 接驳，
+      // 那里已经包含 element[i]，避免双重计入。
+      rowList.pop()
+      if (checkpointSink && checkpointSink.length > rowList.length) {
+        checkpointSink.pop()
+      }
+      return true
+    }
+    if (traceConverge && diagFirstNearMiss) {
+      console.log('[PerfTrace] converge near-miss', {
+        completedStart: completed.startIndex,
+        completedLen: len,
+        dirtyEndAbs: target.dirtyEndAbs,
+        oldRowsLen: oldRows.length,
+        ...diagFirstNearMiss
+      })
+    }
+    return false
   }
 
   private _computePageList(): IRow[][] {
@@ -2400,23 +4030,13 @@ export class Draw {
     } = this.options
     const height = this.getHeight()
     const margins = this.getMargins()
-    // marginHeight / contentStartY / trailingOuterHeight / contentBottomY are
-    // recomputed per page so header/footer variants of different heights
-    // (e.g. "Different first page") produce per-page-correct body bounds.
-    let headerExtraHeight = this.header.getExtraHeight(0)
-    let marginHeight = this.getMainOuterHeight(0)
-    let contentStartY = margins[0] + headerExtraHeight
-    let trailingOuterHeight = marginHeight - contentStartY
-    let contentBottomY = height - trailingOuterHeight
+    const headerExtraHeight = this.header.getExtraHeight()
+    const marginHeight = this.getMainOuterHeight()
+    const contentStartY = margins[0] + headerExtraHeight
+    const trailingOuterHeight = marginHeight - contentStartY
+    const contentBottomY = height - trailingOuterHeight
     let pageNo = 0
     let pageHeight = marginHeight
-    const recomputePageBounds = () => {
-      headerExtraHeight = this.header.getExtraHeight(pageNo)
-      marginHeight = this.getMainOuterHeight(pageNo)
-      contentStartY = margins[0] + headerExtraHeight
-      trailingOuterHeight = marginHeight - contentStartY
-      contentBottomY = height - trailingOuterHeight
-    }
     const pushRow = (row: IRow) => {
       if (!pageRowList[pageNo]) {
         pageRowList[pageNo] = []
@@ -2429,10 +4049,46 @@ export class Draw {
         return false
       }
       pageNo++
-      recomputePageBounds()
       pageHeight = marginHeight
       if (!pageRowList[pageNo]) {
         pageRowList[pageNo] = []
+      }
+      return true
+    }
+    // Extract the SectionBreakType (if any) carried by the section-break
+    // sentinel row preceding `row`. Section-break rows hold exactly one
+    // element of type SECTION_BREAK whose `sectionBreakType` is the flavour.
+    const getSectionBreakType = (row?: IRow): SectionBreakType | null => {
+      if (!row?.isSectionBreak) return null
+      const sentinel = row.elementList.find(
+        el => el.type === ElementType.SECTION_BREAK
+      )
+      return sentinel?.sectionBreakType ?? SectionBreakType.NEXT_PAGE
+    }
+    // Page parity helpers — pageNo is 0-indexed internally (pageNo 0 == page 1 == odd).
+    // EVEN_PAGE: next content lands on an even-numbered page (pageNo 1, 3, 5…).
+    // ODD_PAGE:  next content lands on an odd-numbered  page (pageNo 0, 2, 4…).
+    // When the natural next page already satisfies the parity rule, only one
+    // page advance is needed. Otherwise an extra blank page is inserted, just
+    // like Word does for duplex/book layouts.
+    const advanceForSectionBreak = (
+      type: SectionBreakType,
+      cutIndex: number
+    ): boolean => {
+      // CONTINUOUS does not advance pages here — it is handled below by
+      // simply not triggering nextPage at all.
+      // For NEXT_PAGE / EVEN_PAGE / ODD_PAGE, advance at least once.
+      if (!nextPage(cutIndex)) return false
+      if (type === SectionBreakType.EVEN_PAGE) {
+        // Even pages are pageNo 1, 3, 5… i.e. pageNo % 2 === 1.
+        if (pageNo % 2 === 0) {
+          if (!nextPage(cutIndex)) return false
+        }
+      } else if (type === SectionBreakType.ODD_PAGE) {
+        // Odd pages are pageNo 0, 2, 4… i.e. pageNo % 2 === 0.
+        if (pageNo % 2 === 1) {
+          if (!nextPage(cutIndex)) return false
+        }
       }
       return true
     }
@@ -2452,15 +4108,16 @@ export class Draw {
       const dpr = this.getPagePixelRatio()
       const pageDom = this.pageList[0]
       const pageDomHeight = Number(pageDom.style.height.replace('px', ''))
-      if (pageHeight > pageDomHeight) {
-        pageDom.style.height = `${pageHeight}px`
-        pageDom.height = pageHeight * dpr
-      } else {
-        const reduceHeight = pageHeight < height ? height : pageHeight
-        pageDom.style.height = `${reduceHeight}px`
-        pageDom.height = reduceHeight * dpr
-      }
-      this._initPageContext(this.ctxList[0])
+      const targetHeight =
+        pageHeight > pageDomHeight
+          ? pageHeight
+          : pageHeight < height
+            ? height
+            : pageHeight
+      // PERF-PLAN — Strategy B：连续模式动态高度调整也必须同步 wrapper /
+      // decoration——否则 decoration canvas 会保持创建时的初始高度，下方
+      // 内容画到 base 上 decoration 会被裁掉。
+      this._resizePageBacking(0, this.getWidth(), targetHeight, dpr)
     } else {
       let rowIndex = 0
       while (rowIndex < this.rowList.length) {
@@ -2485,8 +4142,18 @@ export class Draw {
             const rowOffsetY = row.offsetY || 0
             const prev = this.rowList[row.rowIndex - 1]
             const forcePageBreak = !!prev?.isPageBreak
+            // Section break: NEXT_PAGE / EVEN_PAGE / ODD_PAGE all force a new
+            // page (with parity adjustment); CONTINUOUS keeps current page.
+            const sectionBreakType = getSectionBreakType(prev)
+            const forceSectionBreak =
+              sectionBreakType !== null &&
+              sectionBreakType !== SectionBreakType.CONTINUOUS
             const overflow = row.height + rowOffsetY + pageHeight > height
-            if (forcePageBreak || (overflow && pageHeight > marginHeight)) {
+            if (forceSectionBreak) {
+              if (!advanceForSectionBreak(sectionBreakType!, row.startIndex)) {
+                return pageRowList
+              }
+            } else if (forcePageBreak || (overflow && pageHeight > marginHeight)) {
               if (!nextPage(row.startIndex)) {
                 return pageRowList
               }
@@ -2533,7 +4200,23 @@ export class Draw {
           const prev = this.rowList[row.rowIndex - 1]
           const forcePageBreak = !!prev?.isPageBreak
           const forceColumnBreak = !!prev?.isColumnBreak
-          if (forcePageBreak) {
+          const sectionBreakType = getSectionBreakType(prev)
+          const forceSectionPageBreak =
+            sectionBreakType !== null &&
+            sectionBreakType !== SectionBreakType.CONTINUOUS
+          if (forceSectionPageBreak) {
+            if (!advanceForSectionBreak(sectionBreakType!, row.startIndex)) {
+              return pageRowList
+            }
+            sectionTop = pageHeight - trailingOuterHeight
+            columnIndex = 0
+            columnHeightList = new Array(columnCount).fill(sectionTop)
+            columnHasContentList = new Array(columnCount).fill(false)
+            balanceThreshold = computeBalanceThreshold(
+              sectionTop,
+              remainingSectionHeight
+            )
+          } else if (forcePageBreak) {
             if (!nextPage(row.startIndex)) {
               return pageRowList
             }
@@ -2664,6 +4347,25 @@ export class Draw {
   }
 
   public drawRow(ctx: CanvasRenderingContext2D, payload: IDrawRowPayload) {
+    // Paragraph shading paints first — full-width band per row of each shaded
+    // paragraph, indent-aware, fragmenting across pages. Highlight overlays
+    // shading (character-level over block-level), text overlays both, then
+    // selection / search overlay on the decoration layer.
+    this.paragraphShading.render(ctx, {
+      rowList: payload.rowList,
+      elementList: payload.elementList,
+      positionList: payload.positionList,
+      innerWidth: payload.innerWidth
+    })
+    // Paragraph border — fragment-aware block decoration. Painted *after*
+    // shading (so the stroke sits on top of the shaded band) and *before*
+    // highlight / text (matching Word's shading → border → text z-order).
+    this.paragraphBorder.render(ctx, {
+      rowList: payload.rowList,
+      elementList: payload.elementList,
+      positionList: payload.positionList,
+      innerWidth: payload.innerWidth
+    })
     // 优先绘制高亮元素
     this._drawHighlight(ctx, payload)
     // 绘制元素、下划线、删除线、选区
@@ -2769,6 +4471,10 @@ export class Draw {
         } else if (element.type === ElementType.COLUMN_BREAK) {
           if (this.mode !== EditorMode.CLEAN && !isPrintMode) {
             this.pageBreakParticle.render(ctx, element, x, y)
+          }
+        } else if (element.type === ElementType.SECTION_BREAK) {
+          if (this.mode !== EditorMode.CLEAN && !isPrintMode) {
+            this.sectionBreakParticle.render(ctx, element, x, y)
           }
         } else if (
           element.type === ElementType.CHECKBOX ||
@@ -3011,11 +4717,13 @@ export class Draw {
       this.strikeout.render(ctx)
       // 绘制批注样式
       this.group.render(ctx)
-      // 绘制选区
-      if (!isPrintMode && !isGraffitiMode) {
+      // 绘制选区——PERF-PLAN — Strategy B：当 _currentDecorationCtx 非空（_drawPage
+      // 设置）时写到 decoration 层；否则保持旧行为（写到 base ctx，用于打印 / 单层）。
+      const decorationCtx = this._currentDecorationCtx ?? ctx
+      if (!this._suppressDecorationPaint && !isPrintMode && !isGraffitiMode) {
         if (rangeRecord.width && rangeRecord.height) {
           const { x, y, width, height } = rangeRecord
-          this.range.render(ctx, x, y, width, height)
+          this.range.render(decorationCtx, x, y, width, height)
         }
         if (
           isCrossRowCol &&
@@ -3027,7 +4735,7 @@ export class Draw {
               leftTop: [x, y]
             }
           } = positionList[curRow.startIndex]
-          this.tableParticle.drawRange(ctx, tableRangeElement, x, y)
+          this.tableParticle.drawRange(decorationCtx, tableRangeElement, x, y)
         }
       }
     }
@@ -3062,58 +4770,188 @@ export class Draw {
     }
   }
 
-  private _clearPage(pageNo: number) {
-    const ctx = this.ctxList[pageNo]
-    const pageDom = this.pageList[pageNo]
-    ctx.clearRect(
-      0,
-      0,
-      Math.max(pageDom.width, this.getWidth()),
-      Math.max(pageDom.height, this.getHeight())
-    )
+  private _clearPageContexts(
+    pageNo: number,
+    ctx: CanvasRenderingContext2D,
+    decoCtx: CanvasRenderingContext2D,
+    clipTop = 0
+  ) {
+    // pageNo 仅用于健壮性校验：允许在 page 尚未创建时仍按配置尺寸清空。
+    if (!this.pageList[pageNo]) {
+      // noop
+    }
+    const w = this.getWidth()
+    const h = this.getHeight()
+    const safeTop = Math.max(0, Math.min(clipTop, h))
+    ctx.clearRect(0, safeTop, w, h - safeTop)
+    if (decoCtx && decoCtx !== ctx) {
+      decoCtx.clearRect(0, safeTop, w, h - safeTop)
+    }
     this.blockParticle.clear()
   }
 
-  private _drawPage(payload: IDrawPagePayload) {
-    const { elementList, positionList, rowList, pageNo } = payload
+  private _getPageChromeCacheKey(pageNo: number): string {
     const {
       inactiveAlpha,
       pageMode,
       header,
       footer,
       pageNumber,
-      lineNumber,
-      pageBorder
+      pageBorder,
+      watermark,
+      margins,
+      width,
+      height,
+      scale
     } = this.options
+    return JSON.stringify({
+      pageNo,
+      pageCount: this.pageRowList.length,
+      width,
+      height,
+      scale,
+      pageMode,
+      alpha: !this.zone.isMainActive() ? inactiveAlpha : 1,
+      isPrintMode: this.mode === EditorMode.PRINT,
+      printBackgroundDisabled:
+        this.options.modeRule[EditorMode.PRINT]?.backgroundDisabled ?? false,
+      headerDisabled: header.disabled,
+      footerDisabled: footer.disabled,
+      pageNumberDisabled: pageNumber.disabled,
+      pageBorderDisabled: pageBorder.disabled,
+      headerExtraHeight: this.header.getExtraHeight(),
+      watermarkData: watermark.data,
+      watermarkLayer: watermark.layer,
+      watermarkType: watermark.type,
+      watermarkOpacity: watermark.opacity,
+      watermarkColor: watermark.color,
+      watermarkFont: watermark.font,
+      watermarkSize: watermark.size,
+      watermarkRepeat: watermark.repeat,
+      watermarkGap: watermark.gap,
+      watermarkNumberType: watermark.numberType,
+      pageBorderColor: pageBorder.color,
+      pageBorderLineWidth: pageBorder.lineWidth,
+      pageBorderPadding: pageBorder.padding,
+      margins,
+      headerVersion: this._headerChromeVersion,
+      footerVersion: this._footerChromeVersion
+    })
+  }
+
+  private _renderPageChromeCache(pageNo: number) {
+    const { inactiveAlpha, pageMode, header, footer, pageNumber, pageBorder } =
+      this.options
     const isPrintMode = this.mode === EditorMode.PRINT
     const isContinuityMode = pageMode === PageMode.CONTINUITY
-    const innerWidth = this.getInnerWidth()
-    const ctx = this.ctxList[pageNo]
-    // 判断当前激活区域-非正文区域时元素透明度降低
-    ctx.globalAlpha = !this.zone.isMainActive() ? inactiveAlpha : 1
-    this._clearPage(pageNo)
-    // 绘制背景
+    const chromeCtx = this.chromeCacheCtxList[pageNo]
+    const chromeCanvas = this.chromeCacheCanvasList[pageNo]
+    if (!chromeCtx || !chromeCanvas) return
+    chromeCtx.clearRect(0, 0, this.getWidth(), this.getHeight())
+    chromeCtx.globalAlpha = !this.zone.isMainActive() ? inactiveAlpha : 1
     if (
       !isPrintMode ||
       !this.options.modeRule[EditorMode.PRINT]?.backgroundDisabled
     ) {
-      this.background.render(ctx, pageNo)
+      this.background.render(chromeCtx, pageNo)
     }
-    // 绘制区域
-    if (!isPrintMode) {
-      this.area.render(ctx, pageNo)
-    }
-    // 绘制水印（底层）
     if (
       !isContinuityMode &&
       this.options.watermark.data &&
       this.options.watermark.layer === WatermarkLayer.BOTTOM
     ) {
-      this.waterMark.render(ctx, pageNo)
+      this.waterMark.render(chromeCtx, pageNo)
     }
-    // 绘制页边距
     if (!isPrintMode) {
-      this.margin.render(ctx, pageNo)
+      this.margin.render(chromeCtx, pageNo)
+    }
+    if (this.getIsPagingMode()) {
+      if (!header.disabled) {
+        this.header.render(chromeCtx, pageNo)
+      }
+      if (!pageNumber.disabled) {
+        this.pageNumber.render(chromeCtx, pageNo)
+      }
+      if (!footer.disabled) {
+        this.footer.render(chromeCtx, pageNo)
+      }
+    }
+    if (!pageBorder.disabled) {
+      this.pageBorder.render(chromeCtx)
+    }
+    if (
+      !isContinuityMode &&
+      this.options.watermark.data &&
+      this.options.watermark.layer === WatermarkLayer.TOP
+    ) {
+      this.waterMark.render(chromeCtx, pageNo)
+    }
+  }
+
+  private _blitPageChrome(ctx: CanvasRenderingContext2D, pageNo: number) {
+    const nextKey = this._getPageChromeCacheKey(pageNo)
+    if (this.chromeCacheKeyList[pageNo] !== nextKey) {
+      this._renderPageChromeCache(pageNo)
+      this.chromeCacheKeyList[pageNo] = nextKey
+    }
+    const chromeCanvas = this.chromeCacheCanvasList[pageNo]
+    if (!chromeCanvas) return
+    ctx.drawImage(chromeCanvas, 0, 0, this.getWidth(), this.getHeight())
+  }
+
+  private _drawPageWithContexts(
+    payload: IDrawPagePayload,
+    ctx: CanvasRenderingContext2D,
+    decoCtx: CanvasRenderingContext2D,
+    suppressDecorationPaint = false
+  ) {
+    const { elementList, positionList, rowList, pageNo } = payload
+    const { inactiveAlpha, lineNumber } = this.options
+    const isPrintMode = this.mode === EditorMode.PRINT
+    const innerWidth = this.getInnerWidth()
+    const canPartialPaint =
+      !suppressDecorationPaint &&
+      this._dirtyRange !== null &&
+      !this._isDecorationActive() &&
+      this.getIsPagingMode() &&
+      (this._paintPlanFirstShiftedPage === null ||
+        pageNo < this._paintPlanFirstShiftedPage) &&
+      !this._pageHasFloatImageOnPage(pageNo)
+    const partialInfo = canPartialPaint
+      ? this._getDirtyClipInfoForPage(rowList, positionList)
+      : null
+    const clipTop = partialInfo?.clipTop ?? 0
+    const rowListToPaint = partialInfo
+      ? rowList.slice(partialInfo.fromRowIndex)
+      : rowList
+    const w = this.getWidth()
+    const h = this.getHeight()
+    // PERF-PLAN — Strategy B：drawRow 内部 range / table-cross-row paint 时
+    // 取这个 ctx 作为目标。打印模式不需要选区——保留 null，落到 base ctx 上
+    // 保持原行为（实际打印模式下 startIndex===endIndex，不会画选区）。
+    this._suppressDecorationPaint = suppressDecorationPaint
+    this._currentDecorationCtx = !isPrintMode ? decoCtx : null
+    // 判断当前激活区域-非正文区域时元素透明度降低
+    ctx.globalAlpha = !this.zone.isMainActive() ? inactiveAlpha : 1
+    if (decoCtx && decoCtx !== ctx) decoCtx.globalAlpha = ctx.globalAlpha
+    this._clearPageContexts(pageNo, ctx, decoCtx, clipTop)
+    const needsClip = clipTop > 0 && clipTop < h
+    if (needsClip) {
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(0, clipTop, w, h - clipTop)
+      ctx.clip()
+      if (decoCtx && decoCtx !== ctx) {
+        decoCtx.save()
+        decoCtx.beginPath()
+        decoCtx.rect(0, clipTop, w, h - clipTop)
+        decoCtx.clip()
+      }
+    }
+    this._blitPageChrome(ctx, pageNo)
+    // 绘制区域
+    if (!isPrintMode) {
+      this.area.render(ctx, pageNo)
     }
     // 渲染衬于文字下方元素
     this._drawFloat(ctx, {
@@ -3125,38 +4963,30 @@ export class Draw {
       this.control.renderHighlightList(ctx, pageNo)
     }
     // 渲染元素
-    const index = rowList[0]?.startIndex
+    const index = rowListToPaint[0]?.startIndex
     this.drawRow(ctx, {
       elementList,
       positionList,
-      rowList,
+      rowList: rowListToPaint,
       pageNo,
       startIndex: index,
       innerWidth,
       zone: EditorZone.MAIN
     })
-    if (this.getIsPagingMode()) {
-      // 绘制页眉
-      if (!header.disabled) {
-        this.header.render(ctx, pageNo)
-      }
-      // 绘制页码
-      if (!pageNumber.disabled) {
-        this.pageNumber.render(ctx, pageNo)
-      }
-      // 绘制页脚
-      if (!footer.disabled) {
-        this.footer.render(ctx, pageNo)
-      }
-    }
     // 渲染浮于文字上方元素
     this._drawFloat(ctx, {
       pageNo,
       imgDisplays: [ImageDisplay.FLOAT_TOP, ImageDisplay.SURROUND]
     })
-    // 搜索匹配绘制
-    if (!isPrintMode && this.search.getSearchKeyword()) {
-      this.search.render(ctx, pageNo)
+    // 搜索匹配绘制——PERF-PLAN — Strategy B：装饰层。打印模式没有搜索高亮，
+    // 走原 ctx 是 no-op；其它情况落到 decoration canvas 上，便于 search-next
+    // 触发的快路径重绘只擦除 decoration、不动 base 文字。
+    if (
+      !this._suppressDecorationPaint &&
+      !isPrintMode &&
+      this.search.getSearchKeyword()
+    ) {
+      this.search.render(this._currentDecorationCtx ?? ctx, pageNo)
     }
     // 绘制空白占位符
     if (this.elementList.length <= 1 && !this.elementList[0]?.listId) {
@@ -3166,23 +4996,319 @@ export class Draw {
     if (!lineNumber.disabled) {
       this.lineNumber.render(ctx, pageNo)
     }
-    // 绘制页面边框
-    if (!pageBorder.disabled) {
-      this.pageBorder.render(ctx)
-    }
     // 绘制签章
     this.badge.render(ctx, pageNo)
     // 绘制涂鸦
     if (this.isGraffitiMode()) {
       this.graffiti.render(ctx, pageNo)
     }
-    // 绘制水印（顶层）
-    if (
-      !isContinuityMode &&
-      this.options.watermark.data &&
-      this.options.watermark.layer === WatermarkLayer.TOP
-    ) {
-      this.waterMark.render(ctx, pageNo)
+    // PERF-PLAN — Strategy B：完成本页后 decoration 视为最新；后续若仅
+    // selection / search 改动则可走快路径只重绘装饰层。
+    // B-γ：用 _decorationVersion 而非常量打 tag——下次 decoration-only render
+    // 命中后即可跳过重绘（同 (range, search) 状态多次重入时直接复用）。
+    this._decorationDrawnPages.set(pageNo, this._decorationVersion)
+    this._currentDecorationCtx = null
+    this._suppressDecorationPaint = false
+    if (needsClip) {
+      if (decoCtx && decoCtx !== ctx) {
+        decoCtx.restore()
+      }
+      ctx.restore()
+    }
+  }
+
+  private _drawPage(payload: IDrawPagePayload) {
+    this._drawPageWithContexts(
+      payload,
+      this.ctxList[payload.pageNo],
+      this.decorationCtxList[payload.pageNo]
+    )
+  }
+
+  private _recordDecorationOnly(
+    payload: IDrawPagePayload,
+    decoCtx: CanvasRenderingContext2D
+  ) {
+    const { pageNo, elementList, positionList, rowList } = payload
+    decoCtx.globalAlpha = !this.zone.isMainActive()
+      ? this.options.inactiveAlpha
+      : 1
+    decoCtx.clearRect(0, 0, this.getWidth(), this.getHeight())
+    if (!this._isDecorationActive()) {
+      return
+    }
+    this._walkDecorationRow(decoCtx, {
+      elementList,
+      positionList,
+      rowList,
+      pageNo,
+      startIndex: rowList[0]?.startIndex ?? 0,
+      innerWidth: this.getInnerWidth(),
+      zone: EditorZone.MAIN
+    })
+    if (this.search.getSearchKeyword()) {
+      this.search.render(decoCtx, pageNo)
+    }
+  }
+
+  /**
+   * PERF-PLAN — Strategy B：装饰层独立重绘。
+   *
+   * 调用前提：base layer 完全干净（主元素列表 / 行布局 / 位置都未变）。仅清空
+   * 并重绘 decoration canvas——选区矩形、搜索匹配高亮、表格跨行 / 列范围。
+   * 通过 _walkDecorationRow 复用 drawRow 里的 rangeRecord 计算逻辑，但跳过
+   * 全部文字 / 控件 / 下划线 / 删除线 / 列表标记 / 表格内文字 / 浮动元素的
+   * 实际 paint——典型用例下成本约为 drawRow 的 5–10%。
+   *
+   * 当 _isPageLayered() 为 false 时直接退化到 _drawPage——单层 canvas 没法
+   * 「只擦装饰」，必须重画整页。
+   */
+  private _drawDecorationOnly(payload: IDrawPagePayload) {
+    if (!this._isPageLayered()) {
+      this._drawPage(payload)
+      return
+    }
+    const { pageNo } = payload
+    const isPrintMode = this.mode === EditorMode.PRINT
+    if (isPrintMode) {
+      this._drawPage(payload)
+      return
+    }
+    const decoCtx = this.decorationCtxList[pageNo]
+    const baseCtx = this.ctxList[pageNo]
+    if (!decoCtx || decoCtx === baseCtx) {
+      this._drawPage(payload)
+      return
+    }
+    // B-γ：版本号缓存——同 (range, search) 状态的重入直接跳过（典型场景：
+    // mousemove 抖动多次落到同一选区位置，or 拖拽穿过完全可见的多页时）。
+    const cachedVersion = this._decorationDrawnPages.get(pageNo)
+    if (cachedVersion === this._decorationVersion) return
+    decoCtx.globalAlpha = !this.zone.isMainActive()
+      ? this.options.inactiveAlpha
+      : 1
+    decoCtx.clearRect(0, 0, this.getWidth(), this.getHeight())
+    // B-β.1：装饰层逻辑「空状态」——选区收起、无搜索、非跨行表格选区时直接
+    // 跳过整轮行遍历。clearRect 已经把上一帧的内容擦掉，绘制阶段无事可做。
+    if (!this._isDecorationActive()) {
+      this._decorationDrawnPages.set(pageNo, this._decorationVersion)
+      return
+    }
+    // 走 row 仅跑 rangeRecord 逻辑，不做任何文字 / 几何 paint。
+    this._recordDecorationOnly(payload, decoCtx)
+    this._decorationDrawnPages.set(pageNo, this._decorationVersion)
+  }
+
+  /**
+   * 装饰层是否「需要画东西」——选区展开 / 跨行 / 搜索关键字均算 active。
+   * 三者全空时 _drawDecorationOnly 会 clearRect 后立刻 return（B-β.1），跳过
+   * 整轮 _walkDecorationRow 行遍历。
+   */
+  private _isDecorationActive(): boolean {
+    const { startIndex, endIndex, isCrossRowCol } = this.range.getRange()
+    if (startIndex !== endIndex) return true
+    if (isCrossRowCol) return true
+    if (this.search.getSearchKeyword()) return true
+    return false
+  }
+
+  private _pageHasFloatImageOnPage(pageNo: number): boolean {
+    const floatPositionList = this.position.getFloatPositionList()
+    for (let i = 0; i < floatPositionList.length; i++) {
+      const floatPosition = floatPositionList[i]
+      if (floatPosition.pageNo !== pageNo) continue
+      const element = floatPosition.element
+      if (
+        element.type === ElementType.IMAGE &&
+        element.imgDisplay &&
+        [
+          ImageDisplay.SURROUND,
+          ImageDisplay.FLOAT_TOP,
+          ImageDisplay.FLOAT_BOTTOM
+        ].includes(element.imgDisplay)
+      ) {
+        return true
+      }
+    }
+    return false
+  }
+
+  private _getDirtyClipInfoForPage(
+    rowList: IRow[],
+    positionList: IElementPosition[]
+  ): { clipTop: number; fromRowIndex: number } | null {
+    if (this._dirtyRange === null) return null
+    if (!rowList.length) return null
+    const dirtyIndex = Math.min(this._dirtyRange.start, this._dirtyRange.end)
+    const pageStart = rowList[0].startIndex
+    const lastRow = rowList[rowList.length - 1]
+    const lastRowLen = Math.max(1, lastRow.elementList.length)
+    const pageEnd = lastRow.startIndex + lastRowLen - 1
+    if (dirtyIndex < pageStart || dirtyIndex > pageEnd) return null
+    let lo = 0
+    let hi = rowList.length - 1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1
+      const row = rowList[mid]
+      const rowLen = Math.max(1, row.elementList.length)
+      const rowEnd = row.startIndex + rowLen - 1
+      if (dirtyIndex < row.startIndex) {
+        hi = mid - 1
+      } else if (dirtyIndex > rowEnd) {
+        lo = mid + 1
+      } else {
+        if (mid <= 0) return null
+        const pos = positionList[row.startIndex]
+        const y = pos?.coordinate?.leftTop?.[1]
+        if (typeof y !== 'number' || !Number.isFinite(y)) return null
+        const clipTop = Math.max(0, y - 2)
+        return {
+          clipTop,
+          fromRowIndex: mid
+        }
+      }
+    }
+    return null
+  }
+
+  /** [0, pageList.length) 的索引数组——visible filter fallback 时用。 */
+  private _allPageIndices(): number[] {
+    const out: number[] = []
+    for (let i = 0; i < this.pageRowList.length; i++) out.push(i)
+    return out
+  }
+
+  /**
+   * B-γ：装饰层逻辑状态变更钩子——RangeManager.setRange 与 Search.setSearchKeyword
+   * 在状态变化后调用，把 _decorationVersion +1。下次 decoration-only 路径取到
+   * 不匹配的 cachedVersion，正常重绘并记录新版本。
+   */
+  public bumpDecorationVersion() {
+    this._decorationVersion++
+  }
+
+  /**
+   * 仅遍历 rowList 计算 + 绘制选区矩形 + 表格跨行/列范围；与 drawRow 中选区
+   * 段落（lines 3846-3900 + 3930-3948）的逻辑完全等价，但跳过其他全部 paint。
+   * 递归处理表格内单元格（嵌套选区）。
+   */
+  private _walkDecorationRow(
+    decoCtx: CanvasRenderingContext2D,
+    payload: IDrawRowPayload
+  ) {
+    const {
+      rowList,
+      elementList,
+      positionList,
+      startIndex,
+      pageNo,
+      zone = EditorZone.MAIN
+    } = payload
+    const {
+      isCrossRowCol,
+      tableId,
+      zone: currentZone,
+      startIndex: rs,
+      endIndex: re
+    } = this.range.getRange()
+    const positionContext = this.position.getPositionContext()
+    let index = startIndex
+    for (let i = 0; i < rowList.length; i++) {
+      const curRow = rowList[i]
+      const rangeRecord: IElementFillRect = {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0
+      }
+      let tableRangeElement: IElement | null = null
+      for (let j = 0; j < curRow.elementList.length; j++) {
+        const element = curRow.elementList[j]
+        const metrics = element.metrics
+        const {
+          coordinate: {
+            leftTop: [x, y]
+          }
+        } = positionList[curRow.startIndex + j]
+        if (
+          element.type === ElementType.TABLE &&
+          isCrossRowCol &&
+          !tableRangeElement
+        ) {
+          rangeRecord.x = x
+          rangeRecord.y = y
+          tableRangeElement = element
+        }
+        if (
+          currentZone === zone &&
+          rs !== re &&
+          rs <= index &&
+          index <= re &&
+          ((!positionContext.isTable && !element.tdId) ||
+            positionContext.tdId === element.tdId)
+        ) {
+          if (rs === index) {
+            const nextElement = elementList[rs + 1]
+            if (nextElement && nextElement.value === ZERO) {
+              rangeRecord.x = x + metrics.width
+              rangeRecord.y = y
+              rangeRecord.height = curRow.height
+              rangeRecord.width += this.options.rangeMinWidth
+            }
+          } else {
+            let rangeWidth = metrics.width
+            if (rangeWidth === 0 && curRow.elementList.length === 1) {
+              rangeWidth = this.options.rangeMinWidth
+            }
+            if (!rangeRecord.width) {
+              rangeRecord.x = x
+              rangeRecord.y = y
+              rangeRecord.height = curRow.height
+            }
+            rangeRecord.width += rangeWidth
+          }
+        }
+        // 嵌套表格——处理单元格内选区。打印模式与外层一致跳过。
+        if (
+          element.type === ElementType.TABLE &&
+          !element.hide &&
+          element.trList
+        ) {
+          for (let t = 0; t < element.trList.length; t++) {
+            const tr = element.trList[t]
+            for (let d = 0; d < tr.tdList.length; d++) {
+              const td = tr.tdList[d]
+              if (!td.rowList || !td.positionList) continue
+              this._walkDecorationRow(decoCtx, {
+                elementList: td.value,
+                positionList: td.positionList,
+                rowList: td.rowList,
+                pageNo,
+                startIndex: 0,
+                innerWidth: payload.innerWidth,
+                zone
+              })
+            }
+          }
+        }
+        index++
+      }
+      if (rangeRecord.width && rangeRecord.height) {
+        const { x, y, width, height } = rangeRecord
+        this.range.render(decoCtx, x, y, width, height)
+      }
+      if (
+        isCrossRowCol &&
+        tableRangeElement &&
+        tableRangeElement.id === tableId
+      ) {
+        const {
+          coordinate: {
+            leftTop: [x, y]
+          }
+        } = positionList[curRow.startIndex]
+        this.tableParticle.drawRange(decoCtx, tableRangeElement, x, y)
+      }
     }
   }
 
@@ -3190,43 +5316,414 @@ export class Draw {
     this.lazyRenderIntersectionObserver?.disconnect()
   }
 
-  private _lazyRender() {
+  private _getPageLayoutSignatures(
+    pageRowList: IRow[][] = this.pageRowList
+  ): IPageLayoutSignature[] {
+    return pageRowList.map(rowList => {
+      if (!rowList.length) {
+        return {
+          firstRowStartIndex: -1,
+          lastRowStartIndex: -1,
+          rowCount: 0,
+          rowHeightSum: 0
+        }
+      }
+      let rowHeightSum = 0
+      for (let i = 0; i < rowList.length; i++) {
+        const row = rowList[i]
+        rowHeightSum += row.height + (row.offsetY || 0)
+      }
+      return {
+        firstRowStartIndex: rowList[0].startIndex,
+        lastRowStartIndex: rowList[rowList.length - 1].startIndex,
+        rowCount: rowList.length,
+        rowHeightSum: +rowHeightSum.toFixed(2)
+      }
+    })
+  }
+
+  private _findFirstShiftedPage(
+    prev: IPageLayoutSignature[],
+    cur: IPageLayoutSignature[]
+  ): number | null {
+    const sharedCount = Math.min(prev.length, cur.length)
+    for (let i = 0; i < sharedCount; i++) {
+      const a = prev[i]
+      const b = cur[i]
+      if (
+        a.firstRowStartIndex !== b.firstRowStartIndex ||
+        a.lastRowStartIndex !== b.lastRowStartIndex ||
+        a.rowCount !== b.rowCount ||
+        Math.abs(a.rowHeightSum - b.rowHeightSum) > 0.01
+      ) {
+        return i
+      }
+    }
+    if (prev.length !== cur.length) return sharedCount
+    return null
+  }
+
+  private _collectVisibleSyncPages(pageCount: number): Set<number> {
+    const syncPages = new Set<number>()
+    const overscan = Math.max(0, Math.floor(this.options.pagePaintOverscan))
+    for (let i = 0; i < this.visiblePageNoList.length; i++) {
+      const visiblePageNo = this.visiblePageNoList[i]
+      if (visiblePageNo < 0 || visiblePageNo >= pageCount) continue
+      const start = Math.max(0, visiblePageNo - overscan)
+      const end = Math.min(pageCount - 1, visiblePageNo + overscan)
+      for (let pageNo = start; pageNo <= end; pageNo++) {
+        syncPages.add(pageNo)
+      }
+    }
+    return syncPages
+  }
+
+  private _getDirtyPageSpanFromPositionList(
+    positionList: IElementPosition[]
+  ): IDirtyPageSpan | null {
+    if (this._dirtyRange === null || !positionList.length) return null
+    const startPos =
+      positionList[Math.min(this._dirtyRange.start, positionList.length - 1)]
+    const endPos =
+      positionList[Math.min(this._dirtyRange.end, positionList.length - 1)]
+    const startPage = startPos?.pageNo
+    const endPage = endPos?.pageNo
+    if (startPage === undefined && endPage === undefined) return null
+    const lo = Math.min(startPage ?? endPage!, endPage ?? startPage!)
+    const hi = Math.max(startPage ?? endPage!, endPage ?? startPage!)
+    return {
+      startPage: lo,
+      endPage: hi
+    }
+  }
+
+  private _buildPagePaintPlan(
+    preLayoutDirtyPageSpan: IDirtyPageSpan | null = null
+  ): IPagePaintPlan | null {
+    if (!this.getIsPagingMode()) return null
+    if (this.options.pagePaintStrategy === 'full') return null
+    if (this.visiblePageNoList.length === 0) return null
+    if (this._prevPageLayoutSignatures === null) return null
+    const pageCount = this.pageRowList.length
+    const syncPages = this._collectVisibleSyncPages(pageCount)
+    const curSignatures = this._getPageLayoutSignatures()
+    const firstShiftedPage = this._findFirstShiftedPage(
+      this._prevPageLayoutSignatures,
+      curSignatures
+    )
+    const deferredPages = new Set<number>()
+    if (firstShiftedPage !== null) {
+      for (let i = firstShiftedPage; i < pageCount; i++) {
+        deferredPages.add(i)
+      }
+    }
+    if (this._dirtyRange !== null) {
+      const positionList = this.position.getOriginalMainPositionList()
+      const startPos =
+        positionList[Math.min(this._dirtyRange.start, positionList.length - 1)]
+      if (startPos) {
+        syncPages.add(startPos.pageNo)
+        deferredPages.delete(startPos.pageNo)
+      }
+      const endPos =
+        positionList[Math.min(this._dirtyRange.end, positionList.length - 1)]
+      if (endPos) {
+        syncPages.add(endPos.pageNo)
+        deferredPages.delete(endPos.pageNo)
+      }
+    }
+    if (preLayoutDirtyPageSpan) {
+      for (
+        let pageNo = preLayoutDirtyPageSpan.startPage;
+        pageNo <= preLayoutDirtyPageSpan.endPage;
+        pageNo++
+      ) {
+        if (pageNo < 0 || pageNo >= pageCount) continue
+        syncPages.add(pageNo)
+        deferredPages.delete(pageNo)
+      }
+    }
+    for (const pageNo of syncPages) {
+      deferredPages.delete(pageNo)
+    }
+    for (let i = 0; i < pageCount; i++) {
+      if (!syncPages.has(i) && !deferredPages.has(i)) {
+        deferredPages.add(i)
+      }
+    }
+    return {
+      firstShiftedPage,
+      syncPages,
+      deferredPages
+    }
+  }
+
+  private _getMainIndexPageNo(index: number): number | null {
+    const positionList = this.position.getOriginalMainPositionList()
+    if (!positionList.length) return null
+    const safeIndex = Math.min(
+      Math.max(0, Math.floor(index)),
+      positionList.length - 1
+    )
+    return positionList[safeIndex]?.pageNo ?? null
+  }
+
+  private _collectPagesNeedingPaint(
+    paintPlan: IPagePaintPlan,
+    curIndex: number | undefined,
+    preLayoutDirtyPageSpan: IDirtyPageSpan | null = null
+  ): Set<number> {
+    const out = new Set<number>()
+    const pageCount = this.pageRowList.length
+    if (paintPlan.firstShiftedPage !== null) {
+      for (let i = paintPlan.firstShiftedPage; i < pageCount; i++) {
+        out.add(i)
+      }
+    }
+    if (this._dirtyRange !== null) {
+      const startPage = this._getMainIndexPageNo(this._dirtyRange.start)
+      const endPage = this._getMainIndexPageNo(this._dirtyRange.end)
+      if (startPage !== null && endPage !== null) {
+        const lo = Math.min(startPage, endPage)
+        const hi = Math.max(startPage, endPage)
+        for (let i = lo; i <= hi; i++) out.add(i)
+      } else if (startPage !== null) {
+        out.add(startPage)
+      } else if (endPage !== null) {
+        out.add(endPage)
+      }
+    }
+    if (preLayoutDirtyPageSpan) {
+      for (
+        let i = preLayoutDirtyPageSpan.startPage;
+        i <= preLayoutDirtyPageSpan.endPage;
+        i++
+      ) {
+        if (i >= 0 && i < pageCount) out.add(i)
+      }
+    }
+    if (curIndex !== undefined) {
+      const cursorPage = this._getMainIndexPageNo(curIndex)
+      if (cursorPage !== null) out.add(cursorPage)
+    }
+    return out
+  }
+
+  private _lazyRender(
+    deferredPages: Set<number>,
+    syncPages: Set<number> | null = null
+  ) {
     const positionList = this.position.getOriginalMainPositionList()
     const elementList = this.getOriginalMainElementList()
     this._disconnectLazyRender()
+    if (!deferredPages.size) return
+    // Backward-compatible helper behavior for direct callers in tests and
+    // legacy code: if no explicit sync set is provided, treat the requested
+    // pages plus the current viewport pages as "must paint now", and observe
+    // only the remainder.
+    if (syncPages === null) {
+      const immediatePages = new Set<number>(deferredPages)
+      const pageCount = this.pageRowList.length
+      for (const pageNo of this._collectVisibleSyncPages(pageCount)) {
+        immediatePages.add(pageNo)
+      }
+      for (const pageNo of immediatePages) {
+        if (!this.pageRowList[pageNo]) continue
+        this.paintPageOnDom({
+          elementList,
+          positionList,
+          rowList: this.pageRowList[pageNo],
+          pageNo
+        })
+        this._drawnPages.add(pageNo)
+        deferredPages.delete(pageNo)
+      }
+      if (!deferredPages.size) return
+    }
     this.lazyRenderIntersectionObserver = new IntersectionObserver(entries => {
       entries.forEach(entry => {
         if (entry.isIntersecting) {
           const index = Number((<HTMLCanvasElement>entry.target).dataset.index)
-          this._drawPage({
+          if (!deferredPages.has(index) || !this.pageRowList[index]) return
+          this.paintPageOnDom({
             elementList,
             positionList,
             rowList: this.pageRowList[index],
             pageNo: index
           })
+          this._drawnPages.add(index)
+          this.lazyRenderIntersectionObserver?.unobserve(entry.target)
         }
       })
     })
-    this.pageList.forEach(el => {
-      this.lazyRenderIntersectionObserver!.observe(el)
+    deferredPages.forEach(index => {
+      const page = this.pageList[index]
+      if (page) {
+        this.lazyRenderIntersectionObserver!.observe(page)
+      }
     })
   }
 
-  private _immediateRender() {
+  private _immediateRender(syncPages: Set<number> | null) {
     const positionList = this.position.getOriginalMainPositionList()
     const elementList = this.getOriginalMainElementList()
-    for (let i = 0; i < this.pageRowList.length; i++) {
-      this._drawPage({
+    const pageIndices =
+      syncPages === null
+        ? this._allPageIndices()
+        : Array.from(syncPages).sort((a, b) => a - b)
+    for (const i of pageIndices) {
+      if (!this.pageRowList[i]) continue
+      this.paintPageOnDom({
         elementList,
         positionList,
         rowList: this.pageRowList[i],
         pageNo: i
       })
+      this._drawnPages.add(i)
     }
   }
 
+  /**
+   * 合并 payload 后请求一次 rAF 渲染。
+   *
+   * 用于按键密集的入口（input、keydown 等），把同一帧内的多次 keystroke
+   * 合并为单次 layout/paint，避免每个字符触发一次全量回流（详见
+   * PERF-PLAN §1.1）。
+   *
+   * 合并语义：
+   *  - curIndex / isLazy / isInit / isFirstRender / isSourceHistory：取最新值
+   *  - isSubmitHistory / isCompute / isSetCursor：OR 合并（任一调用方需要即生效），
+   *    保证 history、layout、cursor 不会因合并被吞掉
+   *  - remoteDirtyRange：取并集（CRDT 6.2c 占位）
+   *
+   * 同步路径仍可走 {@link render}（首次渲染 / setValue / 打印等）。
+   */
+  public scheduleRender(payload?: IDrawOption) {
+    this._pendingRenderPayload = this._mergeRenderPayload(
+      this._pendingRenderPayload,
+      payload
+    )
+    if (this._pendingRenderFrameId !== null) return
+    const raf =
+      typeof requestAnimationFrame === 'function'
+        ? requestAnimationFrame
+        : (cb: FrameRequestCallback) =>
+            setTimeout(() => cb(performance.now()), 16) as unknown as number
+    this._pendingRenderFrameId = raf(() => this._flushScheduledRender())
+  }
+
+  /** 立即清空 rAF 队列；同步代码路径需要立刻看到最新视图时使用。 */
+  public flushScheduledRender() {
+    if (this._pendingRenderFrameId === null) return
+    const caf =
+      typeof cancelAnimationFrame === 'function'
+        ? cancelAnimationFrame
+        : clearTimeout
+    caf(this._pendingRenderFrameId as number)
+    this._pendingRenderFrameId = null
+    this._flushScheduledRender()
+  }
+
+  /** 取消挂起的 rAF 渲染但不执行——用于需要以特定选项同步 render 时。 */
+  public cancelScheduledRender() {
+    if (this._pendingRenderFrameId !== null) {
+      const caf =
+        typeof cancelAnimationFrame === 'function'
+          ? cancelAnimationFrame
+          : clearTimeout
+      caf(this._pendingRenderFrameId as number)
+      this._pendingRenderFrameId = null
+      this._pendingRenderPayload = null
+    }
+  }
+
+  private _flushScheduledRender() {
+    const payload = this._pendingRenderPayload
+    this._pendingRenderPayload = null
+    this._pendingRenderFrameId = null
+    if (payload) this.render(payload)
+  }
+
+  private _mergeRenderPayload(
+    a: IDrawOption | null,
+    b: IDrawOption | undefined
+  ): IDrawOption {
+    if (!a) return { ...(b || {}) }
+    if (!b) return a
+    // OR：任一为 true 即取 true（默认 true 的字段缺省视为 true）
+    const orTrue = (
+      x: boolean | undefined,
+      y: boolean | undefined
+    ): boolean | undefined => {
+      // 仅当两者都显式 false 时才保留 false
+      if (x === false && y === false) return false
+      if (x === undefined && y === undefined) return undefined
+      return (x ?? true) || (y ?? true)
+    }
+    const merged: IDrawOption = {
+      // last-write-wins
+      curIndex: b.curIndex !== undefined ? b.curIndex : a.curIndex,
+      isLazy: b.isLazy !== undefined ? b.isLazy : a.isLazy,
+      isInit: b.isInit !== undefined ? b.isInit : a.isInit,
+      isFirstRender:
+        b.isFirstRender !== undefined ? b.isFirstRender : a.isFirstRender,
+      isSourceHistory:
+        b.isSourceHistory !== undefined ? b.isSourceHistory : a.isSourceHistory,
+      // OR 合并
+      isSubmitHistory: orTrue(a.isSubmitHistory, b.isSubmitHistory),
+      isCompute: orTrue(a.isCompute, b.isCompute),
+      isSetCursor: orTrue(a.isSetCursor, b.isSetCursor),
+      // AND：只有当所有合并源都标注 isTextInput 时才视为输入合批；
+      // 任一非输入动作进入本帧即按非输入处理（先 flush 当前 batch、再正常 submit）
+      isTextInput:
+        a.isTextInput === true && b.isTextInput === true ? true : undefined,
+      // PERF-PLAN — Strategy B：装饰层快路径同样用 AND 合并——只要一个 caller
+      // 是「全量重绘」级别的请求（typing / 缩放 / 字体改动），本帧必须走完整
+      // render；将 isDecorationOnly 收敛到 false 是安全降级。
+      isDecorationOnly:
+        a.isDecorationOnly === true && b.isDecorationOnly === true
+          ? true
+          : undefined
+    }
+    // remoteDirtyRange：取区间并集
+    if (a.remoteDirtyRange || b.remoteDirtyRange) {
+      const ar = a.remoteDirtyRange
+      const br = b.remoteDirtyRange
+      if (ar && br) {
+        merged.remoteDirtyRange = {
+          start: Math.min(ar.start, br.start),
+          end: Math.max(ar.end, br.end)
+        }
+      } else {
+        merged.remoteDirtyRange = ar || br
+      }
+    }
+    return merged
+  }
+
   public render(payload?: IDrawOption) {
+    // 同步 render 进入时若仍有 rAF 队列：合并并取消，确保后续调用看到的视图与
+    // history 是最新的（避免被即将到来的 rAF 回调覆盖）。
+    if (this._pendingRenderPayload || this._pendingRenderFrameId !== null) {
+      if (this._pendingRenderPayload) {
+        payload = this._mergeRenderPayload(this._pendingRenderPayload, payload)
+        this._pendingRenderPayload = null
+      }
+      if (this._pendingRenderFrameId !== null) {
+        const caf =
+          typeof cancelAnimationFrame === 'function'
+            ? cancelAnimationFrame
+            : clearTimeout
+        caf(this._pendingRenderFrameId as number)
+        this._pendingRenderFrameId = null
+      }
+    }
     this.renderCount++
+    // PERF-PLAN follow-up：渲染阶段计时桩（__perfTraceRender 隐藏选项开启）。
+    // 仅在标志位开时构造，正常路径完全无开销（trace.mark / trace.flush 都是 no-op）。
+    const trace = this._isPerfTraceRenderEnabled()
+      ? this._createRenderTrace()
+      : null
     const { header, footer } = this.options
     const {
       isSubmitHistory = true,
@@ -3235,64 +5732,402 @@ export class Draw {
       isLazy = true,
       isInit = false,
       isSourceHistory = false,
-      isFirstRender = false
+      isFirstRender = false,
+      isTextInput = false,
+      isDecorationOnly = false
     } = payload || {}
     let { curIndex } = payload || {}
     const innerWidth = this.getInnerWidth()
     const isPagingMode = this.getIsPagingMode()
     // 缓存当前页数信息
     const oldPageSize = this.pageRowList.length
+    const preLayoutDirtyPageSpan = this._getDirtyPageSpanFromPositionList(
+      this.position.getOriginalMainPositionList()
+    )
+
+    // PERF-PLAN — Strategy B：装饰层独立重绘快路径。
+    // 调用方显式标注 isDecorationOnly 时——典型来自 selection drag (mousemove) /
+    // search-next/pre——若条件满足则走极简路径：只擦除 decoration canvas + 重画
+    // 选区矩形 + 搜索高亮。完全跳过 computeRowList / computePositionList /
+    // _drawPage 全套——成本约为 base 重绘的 5–10%。
+    //
+    // 安全条件：必须分层、非首次渲染、有有效 pageRowList、无未消化的 dirty 文本
+    // 改动、非打印模式。任一不满足则降级为常规 render（行为不变）。
+    if (
+      isDecorationOnly &&
+      !isCompute &&
+      this._isPageLayered() &&
+      !isInit &&
+      !isFirstRender &&
+      this.pageRowList.length > 0 &&
+      this._dirtyRange === null &&
+      this.mode !== EditorMode.PRINT
+    ) {
+      // B-γ：版本号由 RangeManager.setRange / Search.setSearchKeyword /
+      // Search.searchNavigatePre/Next 在状态变更时 bump——这里不再无条件 ++，
+      // 避免相同 (range, search) 状态的同帧重入也成为 cache miss。
+      const positionList = this.position.getOriginalMainPositionList()
+      const elementList = this.getOriginalMainElementList()
+      // B-β.2：分页模式下只重绘可见页（mousemove drag 期间通常仅 2-3 页可见，
+      // 而 _drawDecorationOnly 仍按 pageRowList 全量遍历是浪费）。
+      // 连续模式 / 首帧未观察到 visiblePageNoList 时退回全量遍历。
+      const useVisibleFilter = isPagingMode && this.visiblePageNoList.length > 0
+      const pageIndices = useVisibleFilter
+        ? this.visiblePageNoList
+        : this._allPageIndices()
+      for (const i of pageIndices) {
+        if (!this.pageRowList[i] || !this.pageList[i]) continue
+        this.paintDecorationOnDom({
+          elementList,
+          positionList,
+          rowList: this.pageRowList[i],
+          pageNo: i
+        })
+      }
+      // setCursor / history 都不应在 decoration-only 路径上跑——decoration 不
+      // 改变光标位置（光标位置由 selection drag 期间另行 setRange 触发）。
+      // history 同理——选区拖拽不需要进入 undo stack。
+      return
+    }
     // 计算文档信息
     if (isCompute) {
-      // 清空浮动元素位置信息
-      this.position.setFloatPositionList([])
+      // 主元素列表是否需要重新布局：仅当当前编辑区域为 MAIN 或主列表 dirty
+      // 已经被显式标记时才走全量。换言之，在 4-page 主文档场景下，用户在
+      // 页眉/页脚里输入不会触发主体的 N 元素 computeRowList / computePositionList /
+      // area.compute() —— 这些都依赖主元素，主元素未改时它们的结果是稳定的。
+      const activeZone = this.zone.getZone()
+      const isMainZone = activeZone === EditorZone.MAIN
+      // _skipMainRowCompute 由 setPageScale 在已就地缩放 rowList 后设置——此时
+      // 即便用户在 HEADER/FOOTER 区也必须刷新主体的 pageRowList / positionList，
+      // 否则光标位置会停留在旧 scale 下、与已缩放的 rowList 出现 ½× 错位。
+      const mainNeedsCompute =
+        isMainZone ||
+        this._dirtyRange !== null ||
+        this._prevPageRowCounts === null ||
+        this._skipMainRowCompute
+      // 清空浮动元素位置信息（仅当本帧确实会重新布局主体时才清空，否则保留上次缓存）
+      // PERF-PLAN §2.3：增量路径下浮动列表交给 computePositionListIncremental 自行
+      // 按 dirty 边界过滤，因此这里不能无条件清空——延后到 _tryBuildResumeFrom 决定
+      // 之后再处理。
+      if (mainNeedsCompute) {
+        // 保留：下方 mainNeedsCompute 块里再按是否走增量决定是否清空。
+      }
       if (isPagingMode) {
-        // 页眉信息
-        if (!header.disabled) {
+        // 页眉信息：当前在页眉区或页眉 dirty 或主体重新布局时计算
+        if (
+          !header.disabled &&
+          (this._headerDirty ||
+            activeZone === EditorZone.HEADER ||
+            mainNeedsCompute)
+        ) {
           this.header.compute()
+          this._headerDirty = false
         }
-        // 页脚信息
-        if (!footer.disabled) {
+        // 页脚信息：同上
+        if (
+          !footer.disabled &&
+          (this._footerDirty ||
+            activeZone === EditorZone.FOOTER ||
+            mainNeedsCompute)
+        ) {
           this.footer.compute()
+          this._footerDirty = false
         }
       }
-      // 行信息
-      const margins = this.getMargins()
-      const pageHeight = this.getHeight()
-      const extraHeight = this.header.getExtraHeight()
-      const mainOuterHeight = this.getMainOuterHeight()
-      // 行布局起点为第一列的左上角；单列时与页面左上一致
-      const startX = this.getColumnStartX(0)
-      const startY = margins[0] + extraHeight
-      const surroundElementList = pickSurroundElementList(this.elementList)
-      this.rowList = this.computeRowList({
-        startX,
-        startY,
-        pageHeight,
-        mainOuterHeight,
-        isPagingMode,
-        innerWidth,
-        surroundElementList,
-        elementList: this.elementList
-      })
-      // 页面信息
-      this.pageRowList = this._computePageList()
-      // 位置信息
-      this.position.computePositionList()
-      // 区域信息
-      this.area.compute()
-      if (!this.isPrintMode()) {
-        // 搜索信息
-        const searchKeyword = this.search.getSearchKeyword()
-        if (searchKeyword) {
-          this.search.compute(searchKeyword)
+      if (mainNeedsCompute && this._skipMainRowCompute) {
+        // setPageScale 已在外层把 rowList / element.metrics / table cache 等
+        // scale-相关字段就地乘以 ratio。computeRowList 在 25 页文档上是
+        // setPageScale 的主要耗时来源（O(N) 元素遍历 + 类型分支 + measureText
+        // 缓存命中开销 + listStyle / surround / 分页判定），但实际产生的输出
+        // 等价于「按 ratio 缩放上一帧 rowList」——直接跳过，让下面 O(N) 算术
+        // 依赖（pageRowList / positionList / area）从已就地缩放的 rowList 重派生。
+        this._mainLayoutSig = this._buildLayoutSig({ isPagingMode, innerWidth })
+        // 浮动元素 list 中存的是按旧 scale 算出的像素坐标——清空后由
+        // computePositionList 从元素重新挑出 SURROUND/FLOAT_TOP/FLOAT_BOTTOM
+        // 在新 scale 下重建。
+        this.position.setFloatPositionList([])
+        this.pageRowList = this._computePageList()
+        this.position.computePositionList()
+        this.area.compute()
+        if (!this.isPrintMode()) {
+          const searchKeyword = this.search.getSearchKeyword()
+          if (searchKeyword) {
+            this.search.compute(searchKeyword)
+          }
+          this.control.computeHighlightList()
         }
-        // 控件关键词高亮
-        this.control.computeHighlightList()
-      }
-      // 涂鸦信息
-      if (this.isGraffitiMode()) {
-        this.graffiti.compute()
+        if (this.isGraffitiMode()) {
+          this.graffiti.compute()
+        }
+      } else if (mainNeedsCompute) {
+        // 行信息
+        const margins = this.getMargins()
+        const pageHeight = this.getHeight()
+        const extraHeight = this.header.getExtraHeight()
+        const mainOuterHeight = this.getMainOuterHeight()
+        // 行布局起点为第一列的左上角；单列时与页面左上一致
+        const startX = this.getColumnStartX(0)
+        const startY = margins[0] + extraHeight
+        // PERF-PLAN follow-up：当主列表无 SURROUND 浮动元素时，skip O(N) 扫描——
+        // 维护一个增量计数缓存，spliceElementList 同步更新；首次或失效后重新统计。
+        if (this._mainSurroundCount === null) {
+          let count = 0
+          for (let e = 0; e < this.elementList.length; e++) {
+            if (this.elementList[e].imgDisplay === ImageDisplay.SURROUND)
+              count++
+          }
+          this._mainSurroundCount = count
+        }
+        const surroundElementList =
+          this._mainSurroundCount === 0
+            ? []
+            : pickSurroundElementList(this.elementList)
+        // PERF-PLAN §2.6：表格操作/图像缩放/块缩放直接更改元素属性后调用
+        // render()，不经过 spliceElementList 故 _dirtyRange 保持为 null。
+        // 利用位置上下文或 curIndex 自动标脏，使 _tryBuildResumeFrom 能够
+        // 启用增量布局，避免回退到 full computeRowList。
+        if (!this._dirtyRange && isMainZone && !isTextInput) {
+          const ctx = this.position.getPositionContext()
+          if (ctx.isTable && ctx.index !== undefined) {
+            this.markDirty(ctx.index, ctx.index)
+          } else if (curIndex !== undefined) {
+            const el = this.elementList[curIndex]
+            if (
+              el &&
+              (el.type === ElementType.IMAGE || el.type === ElementType.BLOCK)
+            ) {
+              this.markDirty(curIndex, curIndex)
+            }
+          }
+        }
+        // PERF-PLAN §2.2 / Phase 2B：在「上一帧 row checkpoint 仍然有效 + 已有 dirty
+        // 区间提示 + 布局签名未变」时尝试启用增量布局。
+        // dirty 在首行时 prefix 为空，但仍可通过 convergence 复用尾部旧行。
+        const resumeFrom = this._tryBuildResumeFrom({
+          isPagingMode,
+          innerWidth
+        })
+        // 浮动元素列表清空策略：全量路径下按既有逻辑清空；增量路径下交给
+        // computePositionListIncremental 按 dirty 边界过滤，避免误删 prefix 浮动。
+        if (!resumeFrom) {
+          this.position.setFloatPositionList([])
+        }
+        // PERF-PLAN §2.3：incremental computeRowList 的循环在第一次迭代时仍把
+        // curRow 指向「前缀末尾行」（rowList[length-1]），如果新元素 isWrap=false
+        // 就会被 push 进该行——前缀末尾行的 elementList 因此可能被原地扩展。
+        // 我们在 computeRowList 之前先快照其长度，事后比对：长度变了说明这一行
+        // 的位置缓存不再可信，position 增量恢复点必须包含该行。
+        const lastPrefixRow = resumeFrom
+          ? resumeFrom.prefixRowList[resumeFrom.prefixRowList.length - 1]
+          : null
+        const lastPrefixRowOriginalCount =
+          lastPrefixRow?.elementList.length ?? 0
+        this.rowList = this.computeRowList({
+          startX,
+          startY,
+          pageHeight,
+          mainOuterHeight,
+          isPagingMode,
+          innerWidth,
+          surroundElementList,
+          elementList: this.elementList,
+          checkpointSink: this._mainRowCheckpoints,
+          resumeFrom: resumeFrom ?? undefined
+        })
+        trace?.mark(
+          resumeFrom?.convergenceTarget?.matched
+            ? 'computeRowList(incr+converged)'
+            : resumeFrom
+              ? 'computeRowList(incr)'
+              : 'computeRowList(full)'
+        )
+        // PERF-PLAN §2.2 / Phase 2B：收敛接驳——computeRowList 命中收敛后只
+        // 重排到匹配点。把 oldRowsAfterCut[match+1..] 作为尾部接回（按 dirty
+        // 处的元素索引漂移调整 startIndex），并把对应的旧 checkpoints 也接回，
+        // 与 _mainRowCheckpoints 保持平行索引。
+        // 同时记录复用窗口（fromNewRowGlobalIndex / deltaElems），稍后用于
+        // 收敛尾部 positionList 复用——前提是 pagination 稳定。
+        let convergedReuseInfo: {
+          fromNewRowGlobalIndex: number
+          deltaElems: number
+        } | null = null
+        // Fallback for partial pagination instability: positions from the first
+        // fully-stable page boundary are always safe to reuse even when dirty-zone
+        // row heights changed or some earlier pages gained/lost rows.
+        let stablePageConvergedReuse: {
+          fromNewRowGlobalIndex: number
+          deltaElems: number
+        } | null = null
+        if (resumeFrom && resumeFrom.convergenceTarget.matched !== null) {
+          const target = resumeFrom.convergenceTarget
+          const matchedIdx = target.matched!.atOldIdx
+          const reusedRows = target.oldRowsAfterCut.slice(matchedIdx + 1)
+          const reusedCkpts = target.oldCheckpointsAfterCut.slice(
+            matchedIdx + 1
+          )
+          if (reusedRows.length) {
+            // deltaElems：dirty 处实际位移量。匹配的旧行 vs 增量产出的同 logical
+            // 行——后者的 startIndex 已是 NEW 坐标，前者是 OLD。
+            const matchedOldRow = target.oldRowsAfterCut[matchedIdx]
+            const matchedNewRow = this.rowList[this.rowList.length - 1]
+            const deltaElems =
+              matchedNewRow.startIndex - matchedOldRow.startIndex
+            const baseRowIdx = this.rowList.length
+            for (let r = 0; r < reusedRows.length; r++) {
+              const old = reusedRows[r]
+              // 浅克隆——保留行内元素引用 / metrics，但改写 startIndex / rowIndex
+              // 到新坐标，避免污染上一帧 rowList 引用。
+              this.rowList.push({
+                ...old,
+                startIndex: old.startIndex + deltaElems,
+                rowIndex: baseRowIdx + r
+              })
+            }
+            // checkpoints 也要并行扩展——下一帧的 _tryBuildResumeFrom 会要求
+            // checkpointSink.length === rowList.length。旧 checkpoints 在收敛
+            // 后仍然有效（state 仅依赖 dirty 之前的元素，未变）。
+            if (this._mainRowCheckpoints.length < this.rowList.length) {
+              for (
+                let r = 0;
+                r < reusedCkpts.length &&
+                this._mainRowCheckpoints.length < this.rowList.length;
+                r++
+              ) {
+                this._mainRowCheckpoints.push(reusedCkpts[r])
+              }
+            }
+            // baseRowIdx 是「第一个被复用的旧行」在 NEW rowList 中的全局 index。
+            // PERF-PLAN §2.9：若 dirty 区域内任一行高度变更，convergedReuse
+            // 不能回收旧位置对象——旧 Y 坐标已失效。此时不传 convergedReuseInfo，
+            // computePositionListIncremental 会为重排区域后的复用行逐一重新计算坐标。
+            let anyHeightChanged = false
+            const oldCutStart = target.oldRowsAfterCut
+            const newCutStart = this.rowList.slice(
+              resumeFrom.prefixRowList.length,
+              baseRowIdx
+            )
+            const cmpCount = Math.min(oldCutStart.length, newCutStart.length)
+            for (let cmp = 0; cmp < cmpCount; cmp++) {
+              if (oldCutStart[cmp].height !== newCutStart[cmp].height) {
+                anyHeightChanged = true
+                break
+              }
+            }
+            if (!anyHeightChanged) {
+              convergedReuseInfo = {
+                fromNewRowGlobalIndex: baseRowIdx,
+                deltaElems
+              }
+            }
+            // Stable-page fallback: even when some pages gained/lost rows (line
+            // wraps, etc.), find the first page P where all pages P..end have
+            // identical row counts to the previous frame. P's first row has
+            // Y = page startY (margin), so it's a safe position-reuse boundary
+            // regardless of what changed above it.
+            if (
+              this._prevPageRowCounts !== null &&
+              this._prevPageRowCounts.length === this.pageRowList.length
+            ) {
+              const prevCounts = this._prevPageRowCounts
+              let fp = this.pageRowList.length
+              for (let p = this.pageRowList.length - 1; p >= 0; p--) {
+                if (prevCounts[p] !== this.pageRowList[p].length) break
+                fp = p
+              }
+              // fp=0 means all pages stable — paginationStable handles that.
+              // fp>0 means pages 0..fp-1 changed; pages fp..end are stable.
+              if (fp > 0 && fp < this.pageRowList.length) {
+                let sri = 0
+                for (let p = 0; p < fp; p++) sri += this.pageRowList[p].length
+                if (sri >= baseRowIdx) {
+                  stablePageConvergedReuse = {
+                    fromNewRowGlobalIndex: sri,
+                    deltaElems
+                  }
+                }
+              }
+            }
+          }
+        }
+        // 验证桩（PERF-PLAN §2.2 「validation harness」）：若启用，则同时跑一遍
+        // 全量布局并按 IRow 关键字段 diff，发现增量分支结果与全量不一致时立刻
+        // 上报错误。仅供 dev / 回归验证使用，正常生产路径请保持关闭。
+        if (resumeFrom && this._isPerfValidateLayoutEnabled()) {
+          this._validateIncrementalLayout({
+            startX,
+            startY,
+            pageHeight,
+            mainOuterHeight,
+            isPagingMode,
+            innerWidth,
+            surroundElementList: pickSurroundElementList(this.elementList),
+            elementList: this.elementList
+          })
+        }
+        // 落盘本次布局签名，供下一帧增量决策使用
+        this._mainLayoutSig = this._buildLayoutSig({ isPagingMode, innerWidth })
+        // 页面信息
+        this.pageRowList = this._computePageList()
+        trace?.mark('_computePageList')
+        // 位置信息——PERF-PLAN §2.3 增量分支：仅当 §2.2 的增量路径成立时启用，
+        // 与 row prefix 同步保留 positionList prefix，省下 ~O(N) 对象构造。
+        if (resumeFrom && lastPrefixRow) {
+          // 前缀末尾行被原地扩展（curRow.elementList.push）→ 该行的 position
+          // 缓存不再准确，position 恢复点必须前移一行（包含该行的全部元素）。
+          // 否则前缀位置都是稳定的，按 §2.2 给出的 (fromRowGlobalIndex,
+          // fromElementIndex) 直接走。
+          const lastPrefixMutated =
+            lastPrefixRow.elementList.length !== lastPrefixRowOriginalCount
+          // 收敛尾部 position 复用：仅当行数收敛 + pagination 稳定（每页 row 数不变）
+          // 时启用——此前提下被复用旧行的 pageNo / coordinate 全部字节相等，只需
+          // 重写 .index。在用户的 25 页 typing 场景中，这一支把 computePositionList
+          // 从 ~25-130ms 降回 ~1-3ms。
+          const paginationStable =
+            convergedReuseInfo !== null &&
+            this._prevPageRowCounts !== null &&
+            this._prevPageRowCounts.length === this.pageRowList.length &&
+            this._prevPageRowCounts.every(
+              (n, idx) => n === this.pageRowList[idx].length
+            )
+          const convergedReuse = paginationStable
+            ? convergedReuseInfo
+            : (stablePageConvergedReuse ?? undefined)
+          if (lastPrefixMutated) {
+            this.position.computePositionListIncremental({
+              fromRowGlobalIndex: resumeFrom.prefixRowList.length - 1,
+              fromElementIndex: lastPrefixRow.startIndex,
+              convergedReuse: convergedReuse ?? undefined
+            })
+          } else {
+            this.position.computePositionListIncremental({
+              fromRowGlobalIndex: resumeFrom.prefixRowList.length,
+              fromElementIndex: resumeFrom.startElementIndex,
+              convergedReuse: convergedReuse ?? undefined
+            })
+          }
+        } else {
+          this.position.computePositionList()
+        }
+        trace?.mark(
+          resumeFrom ? 'computePositionList(incr)' : 'computePositionList(full)'
+        )
+        // 区域信息
+        this.area.compute()
+        trace?.mark('area.compute')
+        if (!this.isPrintMode()) {
+          // 搜索信息
+          const searchKeyword = this.search.getSearchKeyword()
+          if (searchKeyword) {
+            this.search.compute(searchKeyword)
+          }
+          // 控件关键词高亮
+          this.control.computeHighlightList()
+        }
+        // 涂鸦信息
+        if (this.isGraffitiMode()) {
+          this.graffiti.compute()
+        }
+        trace?.mark('search+control+graffiti')
       }
     }
     // 清除光标等副作用
@@ -3310,17 +6145,102 @@ export class Draw {
     if (prePageCount > curPageCount) {
       const deleteCount = prePageCount - curPageCount
       this.ctxList.splice(curPageCount, deleteCount)
-      this.pageList
-        .splice(curPageCount, deleteCount)
-        .forEach(page => page.remove())
+      const removedBases = this.pageList.splice(curPageCount, deleteCount)
+      this.decorationCtxList.splice(curPageCount, deleteCount)
+      this.decorationCanvasList.splice(curPageCount, deleteCount)
+      const removedWrappers = this.pageWrapperList.splice(
+        curPageCount,
+        deleteCount
+      )
+      // 优先移除 wrapper（带走 base + decoration）；单层模式 wrapper === base
+      // 直接移除 base 即可——为兼容旧引用关系两条路径都 try。
+      for (let i = 0; i < removedBases.length; i++) {
+        const base = removedBases[i]
+        const wrapper = removedWrappers[i]
+        if (wrapper && wrapper !== (base as unknown as HTMLDivElement)) {
+          wrapper.remove()
+        } else {
+          base.remove()
+        }
+      }
+      // 同步移除已绘制集合中的越界条目
+      for (const idx of Array.from(this._drawnPages)) {
+        if (idx >= curPageCount) this._drawnPages.delete(idx)
+      }
+      for (const idx of Array.from(this._decorationDrawnPages.keys())) {
+        if (idx >= curPageCount) this._decorationDrawnPages.delete(idx)
+      }
     }
-    // 绘制元素
-    // 连续页因为有高度的变化会导致canvas渲染空白，需立即渲染，否则会出现闪动
-    if (isLazy && isPagingMode) {
-      this._lazyRender()
+    const pagePaintPlan =
+      isPagingMode &&
+      isLazy &&
+      !isInit &&
+      !isFirstRender &&
+      !this._skipMainRowCompute
+        ? this._buildPagePaintPlan(preLayoutDirtyPageSpan)
+        : null
+    this._paintPlanFirstShiftedPage = pagePaintPlan?.firstShiftedPage ?? null
+    this._drawnPages.clear()
+    trace?.mark('pre-paint')
+    this._disconnectLazyRender()
+    const isPaintFilterEligible =
+      pagePaintPlan &&
+      this._dirtyRange !== null &&
+      !this._isDecorationActive() &&
+      this.mode !== EditorMode.PRINT
+    let effectiveSyncPages = pagePaintPlan?.syncPages ?? null
+    let effectiveDeferredPages = pagePaintPlan?.deferredPages ?? null
+    if (pagePaintPlan && isPaintFilterEligible) {
+      const needed = this._collectPagesNeedingPaint(
+        pagePaintPlan,
+        curIndex,
+        preLayoutDirtyPageSpan
+      )
+      const filteredSync = new Set<number>()
+      for (const pageNo of pagePaintPlan.syncPages) {
+        if (needed.has(pageNo)) filteredSync.add(pageNo)
+      }
+      // 保底：避免由于边界条件导致可见页一个都不画。
+      if (filteredSync.size) {
+        effectiveSyncPages = filteredSync
+        const filteredDeferred = new Set<number>()
+        for (const pageNo of pagePaintPlan.deferredPages) {
+          if (needed.has(pageNo)) filteredDeferred.add(pageNo)
+        }
+        effectiveDeferredPages = filteredDeferred
+      }
+    }
+    if (trace && pagePaintPlan) {
+      console.log(
+        `[PerfTrace] paintPlan shifted=${
+          pagePaintPlan.firstShiftedPage ?? 'none'
+        } sync=${(effectiveSyncPages ?? pagePaintPlan.syncPages).size} deferred=${(effectiveDeferredPages ?? pagePaintPlan.deferredPages).size}`,
+        {
+          syncPages: Array.from(
+            effectiveSyncPages ?? pagePaintPlan.syncPages
+          ).sort((a, b) => a - b),
+          deferredPages: Array.from(
+            effectiveDeferredPages ?? pagePaintPlan.deferredPages
+          ).sort((a, b) => a - b)
+        }
+      )
+    }
+    if (pagePaintPlan) {
+      this._immediateRender(effectiveSyncPages)
+      this._lazyRender(
+        effectiveDeferredPages ?? new Set<number>(),
+        effectiveSyncPages
+      )
     } else {
-      this._immediateRender()
+      // 连续页因为有高度的变化会导致 canvas 渲染空白，需立即渲染，否则会出现闪动。
+      // paging 模式在 fallback/full 策略下也同步渲染全部页面，避免可见页等待 observer 回调。
+      this._immediateRender(null)
     }
+    trace?.mark('paint')
+    // 落盘本次 row 数与清除 dirty 提示，供下次渲染做差分
+    this._prevPageRowCounts = this.pageRowList.map(rl => rl.length)
+    this._prevPageLayoutSignatures = this._getPageLayoutSignatures()
+    this.clearDirtyRange()
     // 光标重绘
     if (isSetCursor) {
       curIndex = this.setCursor(curIndex)
@@ -3333,10 +6253,27 @@ export class Draw {
       (isSubmitHistory && !isFirstRender) ||
       (curIndex !== undefined && this.historyManager.isStackEmpty())
     ) {
-      this.submitHistory(curIndex)
+      // 输入合批：连续文本输入仅在 idle / 非输入动作 / undo·redo 时落盘单个 snapshot
+      // 非首次（栈非空）且明确为输入路径时启用 batch；否则正常 submit（必要时
+      // 先 flush 已挂起的 typing batch，确保 history 顺序正确）。
+      // historyTypingBatchMs<=0 时关闭合批，保留每键一份 snapshot 的旧语义（默认）。
+      const batchMs = this.options.historyTypingBatchMs
+      const canBatch =
+        isTextInput && batchMs > 0 && !this.historyManager.isStackEmpty()
+      if (canBatch) {
+        this._typingBatchActive = true
+        this._typingBatchLastCurIndex = curIndex
+        this._refreshTypingBatchTimer()
+      } else {
+        this.flushTypingBatch()
+        this.submitHistory(curIndex)
+      }
     }
-    // 信息变动回调
-    nextTick(() => {
+    trace?.mark('history')
+    trace?.flush()
+    // 信息变动回调（使用微任务，避免一次宏任务排队带来的尾部开销，
+    // 同时让范围样式 / tableTool / contentChange 等回调与本次渲染落在同一帧内）
+    queueMicrotask(() => {
       // 选区样式
       this.range.setRangeStyle()
       // 重新唤起弹窗类控件
@@ -3415,7 +6352,223 @@ export class Draw {
     return curIndex
   }
 
+  /**
+   * 将连续文本输入合并为单个 history snapshot（PERF-PLAN §1.2）。
+   *
+   * 合批生效后，每次 keystroke 不再支付 9× deepClone 的代价；500ms 闲置或被
+   * 任何非输入动作 / undo / redo 中断时，会调用 {@link flushTypingBatch}
+   * 落盘一次最终的 snapshot。语义上等价于 Office/Google Docs 的「按词撤销」。
+   */
+  public isTypingBatchActive(): boolean {
+    return this._typingBatchActive
+  }
+
+  /** 立即将挂起的输入合批落盘（push 一份 history snapshot）。 */
+  public flushTypingBatch() {
+    if (!this._typingBatchActive) return
+    const curIndex = this._typingBatchLastCurIndex
+    this._typingBatchActive = false
+    this._typingBatchLastCurIndex = undefined
+    if (this._typingBatchTimer !== null) {
+      clearTimeout(this._typingBatchTimer)
+      this._typingBatchTimer = null
+    }
+    this.submitHistory(curIndex)
+  }
+
+  private _refreshTypingBatchTimer() {
+    if (this._typingBatchTimer !== null) clearTimeout(this._typingBatchTimer)
+    const idleMs = Math.max(1, this.options.historyTypingBatchMs)
+    this._typingBatchTimer = setTimeout(() => {
+      this._typingBatchTimer = null
+      this.flushTypingBatch()
+    }, idleMs)
+  }
+
   public submitHistory(curIndex: number | undefined) {
+    // PERF-PLAN §1.2 / Phase 1.2：尝试走 delta 分支——上一次 submit 之后只
+    // 经历了 main / table（含 tdPath）纯 splice，没有 deletable 跳过、没有
+    // listId 旁清理、没有 header / footer 改动、且初始 snapshot 已在栈底。
+    // 任何一项不满足都退回到 legacy snapshot（保留正确性兜底）。
+    const canUseDelta =
+      !this._deltaHistoryUnsafe &&
+      this._pendingHistoryMutations.length > 0 &&
+      this._preMutationMeta !== null &&
+      !this.historyManager.isStackEmpty() &&
+      this._pendingHistoryMutations.every(
+        m => m.scope === 'main' || (m.scope === 'table' && !!m.tdPath)
+      )
+    if (this.options.debugHistory) {
+      console.log('[canvas-editor submitHistory]', {
+        canUseDelta,
+        curIndex,
+        pendingMutationCount: this._pendingHistoryMutations.length,
+        deltaHistoryUnsafe: this._deltaHistoryUnsafe,
+        hasPreMutationMeta: this._preMutationMeta !== null,
+        historyEmpty: this.historyManager.isStackEmpty(),
+        mutationScopes: this._pendingHistoryMutations.map(m => m.scope)
+      })
+    }
+    if (canUseDelta) {
+      this._submitDeltaHistory(curIndex)
+    } else {
+      this._submitSnapshotHistory(curIndex)
+    }
+    // 任意分支结束都重置内部累加器，准备下一轮。
+    this._pendingHistoryMutations = []
+    this._deltaHistoryUnsafe = false
+    this._preMutationMeta = null
+  }
+
+  /**
+   * PERF-PLAN §1.2 / Phase 1.2：把累积的 splice 序列封装成一对正反应用闭包，
+   * 推入 history。每个 keystroke 不再付出 ~3× full deepClone 的代价，节省的
+   * 主要是：
+   *   1. `getSlimCloneElementList(this.elementList)` 一次完整遍历 + 对象拷贝；
+   *   2. `historyManager.execute(...)` 闭包内部还要再 deepClone 一遍 main /
+   *      header / footer / range / positionContext 共 5 处。
+   *
+   * delta 体积约等于 mutations 总条数 × （插入/删除元素个数）。对于持续打字
+   * 这类 batch，体积线性于「按了几个键」，与文档总长度脱钩。
+   */
+  private _submitDeltaHistory(curIndex: number | undefined) {
+    const mutations = this._pendingHistoryMutations.slice()
+    const metaBefore = this._preMutationMeta!
+    const metaAfter: IDeltaHistoryMeta = {
+      range: deepClone(this.range.getRange()),
+      positionContext: deepClone(this.position.getPositionContext()),
+      pageNo: this.pageNo,
+      zone: this.zone.getZone()
+    }
+    const curIndexAfter = curIndex
+    const curIndexBefore = metaBefore.range.startIndex
+    const _resolveTableTd = (tdPath: NonNullable<IMutationEvent['tdPath']>) => {
+      const el = this.elementList[tdPath.elementIdx]
+      if (!el?.trList) return null
+      const tr = el.trList[tdPath.trIdx]
+      return tr?.tdList?.[tdPath.tdIdx] ?? null
+    }
+    const applyForward = () => {
+      this._isReplayingHistory = true
+      try {
+        // 顺序重放：每条 mutation 对当前 elementList 再次执行 splice(start,
+        // removed.length, ...inserted)——等价于「把改动重新做一遍」。
+        for (let i = 0; i < mutations.length; i++) {
+          const m = mutations[i]
+          if (m.scope === 'table' && m.tdPath) {
+            const td = _resolveTableTd(m.tdPath)
+            if (td) {
+              td.value.splice(
+                m.start,
+                m.removed.length,
+                ...getSlimCloneElementList(m.inserted)
+              )
+              td._dirty = true
+            }
+          } else {
+            this.elementList.splice(
+              m.start,
+              m.removed.length,
+              ...getSlimCloneElementList(m.inserted)
+            )
+          }
+        }
+      } finally {
+        this._isReplayingHistory = false
+      }
+      this.zone.setZone(metaAfter.zone)
+      this.setPageNo(metaAfter.pageNo)
+      this.position.setPositionContext(deepClone(metaAfter.positionContext))
+      this.range.replaceRange(deepClone(metaAfter.range))
+      // 按完整 elementList 重新布局——比照 snapshot 路径，触发 dirty 信号
+      // 要让 §2.2 / §2.3 的增量分支也参与；这里对所有可能受影响的位置做最大
+      // 标脏，简单可靠。
+      const bounds = this._dirtyBoundsFromMutations(mutations)
+      if (bounds) this.markDirty(bounds.start, bounds.end)
+      this.render({
+        curIndex: curIndexAfter,
+        isSubmitHistory: false,
+        isSourceHistory: true
+      })
+    }
+    const applyBackward = () => {
+      this._isReplayingHistory = true
+      try {
+        // 反向重放：每条 mutation 倒序应用其逆——splice(start, inserted.length,
+        // ...removed)。注意必须从尾到头，因为后续 mutation 的 start 索引基于
+        // 前一条已经应用之后的坐标系。
+        for (let i = mutations.length - 1; i >= 0; i--) {
+          const m = mutations[i]
+          if (m.scope === 'table' && m.tdPath) {
+            const td = _resolveTableTd(m.tdPath)
+            if (td) {
+              td.value.splice(
+                m.start,
+                m.inserted.length,
+                ...getSlimCloneElementList(m.removed)
+              )
+              td._dirty = true
+            }
+          } else {
+            this.elementList.splice(
+              m.start,
+              m.inserted.length,
+              ...getSlimCloneElementList(m.removed)
+            )
+          }
+        }
+      } finally {
+        this._isReplayingHistory = false
+      }
+      this.zone.setZone(metaBefore.zone)
+      this.setPageNo(metaBefore.pageNo)
+      this.position.setPositionContext(deepClone(metaBefore.positionContext))
+      this.range.replaceRange(deepClone(metaBefore.range))
+      const bounds = this._dirtyBoundsFromMutations(mutations)
+      if (bounds) this.markDirty(bounds.start, bounds.end)
+      this.render({
+        curIndex: curIndexBefore,
+        isSubmitHistory: false,
+        isSourceHistory: true
+      })
+    }
+    this.historyManager.executeDelta({ applyForward, applyBackward })
+  }
+
+  /**
+   * 计算一组 mutations 影响的「最小 [start, end)」区间，用于 undo / redo
+   * 重渲染时给增量布局提供 dirty 提示。仅在主元素列表上有效。
+   */
+  private _dirtyBoundsFromMutations(
+    mutations: IMutationEvent[]
+  ): { start: number; end: number } | null {
+    if (mutations.length === 0) return null
+    let lo = Number.POSITIVE_INFINITY
+    let hi = -1
+    for (const m of mutations) {
+      // table-scope mutations: dirty the TABLE element's index
+      if (m.scope === 'table' && m.tdPath) {
+        const elIdx = m.tdPath.elementIdx
+        if (elIdx < lo) lo = elIdx
+        if (elIdx + 1 > hi) hi = elIdx + 1
+        continue
+      }
+      const len = Math.max(m.removed.length, m.inserted.length)
+      if (m.start < lo) lo = m.start
+      const endCandidate = m.start + len
+      if (endCandidate > hi) hi = endCandidate
+    }
+    if (hi < 0) return null
+    return { start: lo, end: hi }
+  }
+
+  /**
+   * Legacy 快照路径：兼容 property-only 命令、首次提交、跨分区改动等不能
+   * 用 delta 描述的场景。语义与 Phase 1.2 之前的 submitHistory 完全一致——
+   * 9× deepClone（主 / 页眉 / 页脚 / range / positionContext，构造时 4 次，
+   * 闭包内部 5 次）。代价比 delta 高，但只在罕见路径上发生。
+   */
+  private _submitSnapshotHistory(curIndex: number | undefined) {
     const positionContext = this.position.getPositionContext()
     const oldElementList = getSlimCloneElementList(this.elementList)
     const oldHeaderElementList = getSlimCloneElementList(
@@ -3429,13 +6582,22 @@ export class Draw {
     const oldPositionContext = deepClone(positionContext)
     const zone = this.zone.getZone()
     this.historyManager.execute(() => {
-      this.zone.setZone(zone)
-      this.setPageNo(pageNo)
-      this.position.setPositionContext(deepClone(oldPositionContext))
-      this.header.setElementList(deepClone(oldHeaderElementList))
-      this.footer.setElementList(deepClone(oldFooterElementList))
-      this.elementList = deepClone(oldElementList)
-      this.range.replaceRange(deepClone(oldRange))
+      this._isReplayingHistory = true
+      try {
+        this.zone.setZone(zone)
+        this.setPageNo(pageNo)
+        this.position.setPositionContext(deepClone(oldPositionContext))
+        this.header.setElementList(deepClone(oldHeaderElementList))
+        this.footer.setElementList(deepClone(oldFooterElementList))
+        this.elementList = deepClone(oldElementList)
+        this.range.replaceRange(deepClone(oldRange))
+        // 整个文档被快照全量替换——标脏全文以启用增量布局。
+        // _tryBuildResumeFrom 在 dirtyRowIndex===0 时构造空前缀 + 初始
+        // checkpoint 并从元素 0 恢复重排（PERF-PLAN §2.8）。
+        this.markDirty(0, this.elementList.length)
+      } finally {
+        this._isReplayingHistory = false
+      }
       this.render({
         curIndex,
         isSubmitHistory: false,
@@ -3445,6 +6607,22 @@ export class Draw {
   }
 
   public destroy() {
+    if (this._pendingRenderFrameId !== null) {
+      const caf =
+        typeof cancelAnimationFrame === 'function'
+          ? cancelAnimationFrame
+          : clearTimeout
+      caf(this._pendingRenderFrameId as number)
+      this._pendingRenderFrameId = null
+      this._pendingRenderPayload = null
+    }
+    if (this._typingBatchTimer !== null) {
+      clearTimeout(this._typingBatchTimer)
+      this._typingBatchTimer = null
+    }
+    this._typingBatchActive = false
+    this._typingBatchLastCurIndex = undefined
+    this._invalidatePaintCache()
     this.container.remove()
     this.globalEvent.removeEvent()
     this.scrollObserver.removeEvent()

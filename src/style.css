@@ -369,12 +369,36 @@ ul {
   background-image: url('./assets/images/justify.svg');
 }
 
+.menu-item__increase-indent i {
+  background-image: url('./assets/images/increase-indent.svg');
+}
+
+.menu-item__decrease-indent i {
+  background-image: url('./assets/images/decrease-indent.svg');
+}
+
 .menu-item__row-margin {
   position: relative;
 }
 
 .menu-item__row-margin i {
   background-image: url('./assets/images/row-margin.svg');
+}
+
+.menu-item__space-before i {
+  background-image: url('./assets/images/space-before.svg');
+}
+
+.menu-item__space-before .options {
+  width: 50px;
+}
+
+.menu-item__space-after i {
+  background-image: url('./assets/images/space-after.svg');
+}
+
+.menu-item__space-after .options {
+  width: 50px;
 }
 
 .menu-item__list {
@@ -555,6 +579,15 @@ ul {
 }
 
 .menu-item__page-break i {
+  background-image: url('./assets/images/page-break.svg');
+}
+
+.menu-item__section-break {
+  position: relative;
+}
+
+.menu-item__section-break>i {
+  /* Reuse the page-break icon — sub-menu disambiguates the four flavours. */
   background-image: url('./assets/images/page-break.svg');
 }
 
@@ -829,15 +862,14 @@ ul {
   box-shadow: rgb(158 161 165 / 40%) 0px 2px 12px 0px;
 }
 
-.comment {
-  width: 250px;
-  max-height: 650px;
+.comment-list {
   position: fixed;
-  transform: translateX(420px);
-  top: 200px;
+  top: 0;
   left: 50%;
-  overflow-y: auto;
-  transition: top 0.1s ease-out;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 8;
 }
 
 .figure-validation-list {
@@ -983,15 +1015,19 @@ ul {
 }
 
 .comment-item {
+  width: 250px;
   background: #ffffff;
   border: 1px solid #e2e6ed;
-  position: relative;
+  position: fixed;
+  transform: translateX(420px);
+  left: 50%;
   border-radius: 8px;
   padding: 15px;
   font-size: 14px;
-  margin-bottom: 20px;
   cursor: pointer;
-  transition: all .5s;
+  pointer-events: auto;
+  box-sizing: border-box;
+  transition: top 0.1s ease-out, border-color .5s, box-shadow .5s;
 }
 
 .comment-item:hover {

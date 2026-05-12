@@ -36,6 +36,16 @@ export class Command {
   public executeList: CommandAdapt['list']
   public executeRowFlex: CommandAdapt['rowFlex']
   public executeRowMargin: CommandAdapt['rowMargin']
+  public executeIncreaseIndent: CommandAdapt['increaseIndent']
+  public executeDecreaseIndent: CommandAdapt['decreaseIndent']
+  public executeSetIndent: CommandAdapt['setIndent']
+  public executeIncreaseRightIndent: CommandAdapt['increaseRightIndent']
+  public executeDecreaseRightIndent: CommandAdapt['decreaseRightIndent']
+  public executeSetRightIndent: CommandAdapt['setRightIndent']
+  public executeSpaceBefore: CommandAdapt['spaceBefore']
+  public executeSpaceAfter: CommandAdapt['spaceAfter']
+  public executeParagraphShading: CommandAdapt['paragraphShading']
+  public executeParagraphBorder: CommandAdapt['paragraphBorder']
   public executeInsertTable: CommandAdapt['insertTable']
   public executeInsertTableTopRow: CommandAdapt['insertTableTopRow']
   public executeInsertTableBottomRow: CommandAdapt['insertTableBottomRow']
@@ -65,6 +75,7 @@ export class Command {
   public executeSeparator: CommandAdapt['separator']
   public executePageBreak: CommandAdapt['pageBreak']
   public executeColumnBreak: CommandAdapt['columnBreak']
+  public executeSectionBreak: CommandAdapt['sectionBreak']
   public executeColumnLayout: CommandAdapt['columnLayout']
   public executeAddWatermark: CommandAdapt['addWatermark']
   public executeDeleteWatermark: CommandAdapt['deleteWatermark']
@@ -210,6 +221,16 @@ export class Command {
     this.executeList = adapt.list.bind(adapt)
     this.executeRowFlex = adapt.rowFlex.bind(adapt)
     this.executeRowMargin = adapt.rowMargin.bind(adapt)
+    this.executeIncreaseIndent = adapt.increaseIndent.bind(adapt)
+    this.executeDecreaseIndent = adapt.decreaseIndent.bind(adapt)
+    this.executeSetIndent = adapt.setIndent.bind(adapt)
+    this.executeIncreaseRightIndent = adapt.increaseRightIndent.bind(adapt)
+    this.executeDecreaseRightIndent = adapt.decreaseRightIndent.bind(adapt)
+    this.executeSetRightIndent = adapt.setRightIndent.bind(adapt)
+    this.executeSpaceBefore = adapt.spaceBefore.bind(adapt)
+    this.executeSpaceAfter = adapt.spaceAfter.bind(adapt)
+    this.executeParagraphShading = adapt.paragraphShading.bind(adapt)
+    this.executeParagraphBorder = adapt.paragraphBorder.bind(adapt)
     // 表格、图片上传、超链接、搜索、打印、图片操作
     this.executeInsertTable = adapt.insertTable.bind(adapt)
     this.executeInsertTableTopRow = adapt.insertTableTopRow.bind(adapt)
@@ -243,6 +264,7 @@ export class Command {
     this.executeSeparator = adapt.separator.bind(adapt)
     this.executePageBreak = adapt.pageBreak.bind(adapt)
     this.executeColumnBreak = adapt.columnBreak.bind(adapt)
+    this.executeSectionBreak = adapt.sectionBreak.bind(adapt)
     this.executeColumnLayout = adapt.columnLayout.bind(adapt)
     this.executeAddWatermark = adapt.addWatermark.bind(adapt)
     this.executeDeleteWatermark = adapt.deleteWatermark.bind(adapt)

@@ -1,5 +1,6 @@
 import { ImageDisplay } from '../../../dataset/enum/Common'
 import { ControlComponent } from '../../../dataset/enum/Control'
+import { EditorMode } from '../../../dataset/enum/Editor'
 import { ElementType } from '../../../dataset/enum/Element'
 import { CanvasEvent } from '../CanvasEvent'
 
@@ -43,15 +44,34 @@ export function mousemove(evt: MouseEvent, host: CanvasEvent) {
     host.isAllowDrop = true
     return
   }
-  if (!host.isAllowSelection || !host.mouseDownStartPosition) return
   const target = evt.target as HTMLDivElement
   const pageIndex = target.dataset.index
   // 设置pageNo
   if (pageIndex) {
     draw.setPageNo(Number(pageIndex))
   }
-  // 结束位置
   const position = draw.getPosition()
+  if (!host.isAllowSelection || !host.mouseDownStartPosition) {
+    const tableTool = draw.getTableTool()
+    if (draw.isReadonly() || draw.getMode() === EditorMode.FORM) {
+      tableTool.dispose()
+      return
+    }
+    const positionResult = position.getPositionByXY({
+      x: evt.offsetX,
+      y: evt.offsetY
+    })
+    if (positionResult.isTable && ~positionResult.index) {
+      tableTool.render({
+        positionContext: positionResult,
+        pageNo: pageIndex ? Number(pageIndex) : undefined
+      })
+    } else {
+      tableTool.dispose()
+    }
+    return
+  }
+  // 结束位置
   const positionResult = position.getPositionByXY({
     x: evt.offsetX,
     y: evt.offsetY
@@ -77,11 +97,22 @@ export function mousemove(evt: MouseEvent, host: CanvasEvent) {
   const endIndex = isTable ? tdValueIndex! : index
   // 判断是否是表格跨行/列
   const rangeManager = draw.getRange()
-  if (
+  const crossCell =
     isTable &&
     startIsTable &&
     (tdIndex !== startTdIndex || trIndex !== startTrIndex)
-  ) {
+  let isRangeChange = false
+  if (crossCell) {
+    isRangeChange = rangeManager.getIsRangeChange(
+      endIndex,
+      endIndex,
+      tableId,
+      startTdIndex,
+      tdIndex,
+      startTrIndex,
+      trIndex
+    )
+    if (!isRangeChange) return
     rangeManager.setRange(
       endIndex,
       endIndex,
@@ -121,6 +152,8 @@ export function mousemove(evt: MouseEvent, host: CanvasEvent) {
     ) {
       return
     }
+    isRangeChange = rangeManager.getIsRangeChange(start, end)
+    if (!isRangeChange) return
     rangeManager.setRange(start, end)
   }
   // 绘制

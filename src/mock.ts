@@ -529,6 +529,7 @@ export const commentList: IComment[] = [
 
 export const options: IEditorOption = {
   margins: [100, 120, 100, 120],
+  defaultRowMargin: 1.5,
   watermark: {
     data: 'CANVAS-EDITOR',
     size: 120
