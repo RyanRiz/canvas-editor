@@ -33,7 +33,18 @@ export function tab(evt: KeyboardEvent, host: CanvasEvent) {
   if (!rangeRow) return
   const positionList = draw.getPosition().getPositionList()
   const elementList = draw.getElementList()
+  // Tab mutates only the first element of each visual row. Draw.ts locks
+  // curRow.offsetX off the row's first element (see Draw.ts §"first-line-Tab +
+  // wrapped elements"), so indenting trailing elements is redundant for the
+  // current layout — but it becomes harmful after a wrap: bumping indent
+  // narrows the row, a tail element pushes to the next row carrying its
+  // freshly-set indent, and the next row's offsetX gets locked from it too →
+  // two visual rows indented for one Tab. Restricting the mutation to the
+  // row-leading element keeps "first-line indent" semantics stable under
+  // reflow. dirtyStart/dirtyEnd still span every row position so the
+  // incremental layout reflows the full affected row, not just its head.
   const affected: Array<{ el: IElement; oldIndent: number | undefined }> = []
+  const seenRows = new Set<string>()
   let dirtyStart = Number.POSITIVE_INFINITY
   let dirtyEnd = Number.NEGATIVE_INFINITY
   for (let p = 0; p < positionList.length; p++) {
@@ -43,7 +54,11 @@ export function tab(evt: KeyboardEvent, host: CanvasEvent) {
     if (rowSet.has(position.rowNo)) {
       const el = elementList[p]
       if (!el) continue
-      affected.push({ el, oldIndent: el.indent })
+      const rowKey = `${position.pageNo}:${position.rowNo}`
+      if (!seenRows.has(rowKey)) {
+        seenRows.add(rowKey)
+        affected.push({ el, oldIndent: el.indent })
+      }
       if (p < dirtyStart) dirtyStart = p
       if (p > dirtyEnd) dirtyEnd = p
     }

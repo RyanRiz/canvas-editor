@@ -5158,13 +5158,27 @@ export class Draw {
         lo = mid + 1
       } else {
         if (mid <= 0) return null
-        const pos = positionList[row.startIndex]
+        // Repaint includes the row directly above the dirty row. Partial paint
+        // relies on the previous frame's pixels for everything above clipTop,
+        // and computePositionListIncremental only refreshes positions from the
+        // dirty row onwards — the row above keeps its old IElementPosition.
+        // Any sub-pixel rounding between OLD and NEW row geometry, descender
+        // bleed, or paragraph-spacing baseHeight reset can let `y - 2` clip
+        // a hairline off the bottom of that preserved row. Because that row
+        // is < fromRowIndex it never gets redrawn, the seam survives, and
+        // it manifests as the "half missing" line until the next full repaint
+        // (e.g. triggered by a cursor move). Extending the repaint one row
+        // up costs at most one row's worth of drawRow work and removes the
+        // seam categorically — row N-1 gets cleared and redrawn from its
+        // preserved (and still-correct) old positions.
+        const safeFromRowIndex = mid - 1
+        const pos = positionList[rowList[safeFromRowIndex].startIndex]
         const y = pos?.coordinate?.leftTop?.[1]
         if (typeof y !== 'number' || !Number.isFinite(y)) return null
         const clipTop = Math.max(0, y - 2)
         return {
           clipTop,
-          fromRowIndex: mid
+          fromRowIndex: safeFromRowIndex
         }
       }
     }
