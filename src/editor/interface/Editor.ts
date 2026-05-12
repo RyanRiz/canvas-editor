@@ -79,6 +79,7 @@ export interface IEditorOption {
   resizerSize?: number
   marginIndicatorSize?: number
   marginIndicatorColor?: string
+  marginIndicatorDisabled?: boolean
   margins?: IMargin
   pageMode?: PageMode
   renderMode?: RenderMode

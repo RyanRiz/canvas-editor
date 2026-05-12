@@ -231,6 +231,7 @@ export function mergeOption(
     resizerSize: 5,
     marginIndicatorSize: 35,
     marginIndicatorColor: '#BABABA',
+    marginIndicatorDisabled: false,
     margins: [100, 120, 100, 120],
     pageMode: PageMode.PAGING,
     renderMode: RenderMode.SPEED,

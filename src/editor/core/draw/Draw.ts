@@ -4465,15 +4465,15 @@ export class Draw {
         } else if (element.type === ElementType.SEPARATOR) {
           this.separatorParticle.render(ctx, element, x, y)
         } else if (element.type === ElementType.PAGE_BREAK) {
-          if (this.mode !== EditorMode.CLEAN && !isPrintMode) {
+          if (this.mode !== EditorMode.CLEAN && !isPrintMode && !this.options.pageBreak.disabled) {
             this.pageBreakParticle.render(ctx, element, x, y)
           }
         } else if (element.type === ElementType.COLUMN_BREAK) {
-          if (this.mode !== EditorMode.CLEAN && !isPrintMode) {
+          if (this.mode !== EditorMode.CLEAN && !isPrintMode && !this.options.pageBreak.disabled) {
             this.pageBreakParticle.render(ctx, element, x, y)
           }
         } else if (element.type === ElementType.SECTION_BREAK) {
-          if (this.mode !== EditorMode.CLEAN && !isPrintMode) {
+          if (this.mode !== EditorMode.CLEAN && !isPrintMode && !this.options.sectionBreak.disabled) {
             this.sectionBreakParticle.render(ctx, element, x, y)
           }
         } else if (
@@ -4819,6 +4819,7 @@ export class Draw {
       footerDisabled: footer.disabled,
       pageNumberDisabled: pageNumber.disabled,
       pageBorderDisabled: pageBorder.disabled,
+      marginIndicatorDisabled: this.options.marginIndicatorDisabled,
       headerExtraHeight: this.header.getExtraHeight(),
       watermarkData: watermark.data,
       watermarkLayer: watermark.layer,
