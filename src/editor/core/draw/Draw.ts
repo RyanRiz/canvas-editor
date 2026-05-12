@@ -5816,10 +5816,13 @@ export class Draw {
       // 即便用户在 HEADER/FOOTER 区也必须刷新主体的 pageRowList / positionList，
       // 否则光标位置会停留在旧 scale 下、与已缩放的 rowList 出现 ½× 错位。
       const mainNeedsCompute =
-        isMainZone ||
         this._dirtyRange !== null ||
         this._prevPageRowCounts === null ||
-        this._skipMainRowCompute
+        this._skipMainRowCompute ||
+        (isMainZone &&
+          this._dirtyRange === null &&
+          this._prevPageRowCounts !== null &&
+          !this._isLayoutSigCompatible({ isPagingMode, innerWidth }))
       // 清空浮动元素位置信息（仅当本帧确实会重新布局主体时才清空，否则保留上次缓存）
       // PERF-PLAN §2.3：增量路径下浮动列表交给 computePositionListIncremental 自行
       // 按 dirty 边界过滤，因此这里不能无条件清空——延后到 _tryBuildResumeFrom 决定
@@ -6190,8 +6193,7 @@ export class Draw {
       isPagingMode &&
       isLazy &&
       !isInit &&
-      !isFirstRender &&
-      !this._skipMainRowCompute
+      !isFirstRender
         ? this._buildPagePaintPlan(preLayoutDirtyPageSpan)
         : null
     this._paintPlanFirstShiftedPage = pagePaintPlan?.firstShiftedPage ?? null
