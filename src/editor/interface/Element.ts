@@ -11,6 +11,7 @@ import { IBlock } from './Block'
 import { ICheckbox } from './Checkbox'
 import { IPadding } from './Common'
 import { IControl } from './Control'
+import { IParagraphBorder } from './ParagraphBorder'
 import { IPageColumns } from './PageColumns'
 import { IRadio } from './Radio'
 import { ITextDecoration } from './Text'
@@ -42,6 +43,12 @@ export interface IElementStyle {
   // `_applyParagraphSpacing` pattern) and read off the ZERO during render so
   // any row in the paragraph sees the same color.
   paragraphShading?: string
+  // MS Word paragraph border (`<w:pBdr>`) — block decoration that wraps the
+  // paragraph fragment (the rows of this paragraph on a single page/column),
+  // not individual text runs. Stamped on the paragraph's ZERO delimiter, same
+  // resolution path as `paragraphShading`. See `IParagraphBorder` for the
+  // fragment / cross-page behavior.
+  paragraphBorder?: IParagraphBorder
   italic?: boolean
   underline?: boolean
   strikeout?: boolean

@@ -44,6 +44,7 @@ import { RangeManager } from '../range/RangeManager'
 import { Background } from './frame/Background'
 import { Highlight } from './richtext/Highlight'
 import { ParagraphShading } from './richtext/ParagraphShading'
+import { ParagraphBorder as ParagraphBorderRenderer } from './richtext/ParagraphBorder'
 import { Margin } from './frame/Margin'
 import { Search } from './interactive/Search'
 import { Strikeout } from './richtext/Strikeout'
@@ -334,6 +335,7 @@ export class Draw {
   private strikeout: Strikeout
   private highlight: Highlight
   private paragraphShading: ParagraphShading
+  private paragraphBorder: ParagraphBorderRenderer
   private historyManager: HistoryManager
   private previewer: Previewer
   private imageParticle: ImageParticle
@@ -458,6 +460,7 @@ export class Draw {
     this.strikeout = new Strikeout(this)
     this.highlight = new Highlight(this)
     this.paragraphShading = new ParagraphShading(this)
+    this.paragraphBorder = new ParagraphBorderRenderer(this)
     this.previewer = new Previewer(this)
     this.imageParticle = new ImageParticle(this)
     this.laTexParticle = new LaTexParticle(this)
@@ -4307,6 +4310,15 @@ export class Draw {
     // shading (character-level over block-level), text overlays both, then
     // selection / search overlay on the decoration layer.
     this.paragraphShading.render(ctx, {
+      rowList: payload.rowList,
+      elementList: payload.elementList,
+      positionList: payload.positionList,
+      innerWidth: payload.innerWidth
+    })
+    // Paragraph border — fragment-aware block decoration. Painted *after*
+    // shading (so the stroke sits on top of the shaded band) and *before*
+    // highlight / text (matching Word's shading → border → text z-order).
+    this.paragraphBorder.render(ctx, {
       rowList: payload.rowList,
       elementList: payload.elementList,
       positionList: payload.positionList,

@@ -84,6 +84,7 @@ import {
   ITableInfoByEvent
 } from '../../interface/Event'
 import { IMargin } from '../../interface/Margin'
+import { IParagraphBorder } from '../../interface/ParagraphBorder'
 import { ILocationPosition, IPositionContext } from '../../interface/Position'
 import { IRange, RangeContext, RangeRect } from '../../interface/Range'
 import {
@@ -1585,6 +1586,96 @@ export class CommandAdapt {
       for (const { el, old } of oldHighlights) {
         if (old !== undefined) el.highlight = old
         else delete el.highlight
+      }
+    }
+    applyForward()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
+        this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(dirtyRange.start, dirtyRange.end)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+  }
+
+  /**
+   * Set or clear the MS Word `<w:pBdr>` paragraph border on every paragraph
+   * touched by the current selection. Stamping pattern is identical to
+   * `paragraphShading`:
+   *
+   *   1. Walk back from `startIndex` to find the first affected paragraph's
+   *      ZERO delimiter.
+   *   2. Walk forward to `endIndex` collecting every ZERO in between — each
+   *      one is one affected paragraph.
+   *   3. Capture old values *before* mutating so `applyBackward` restores
+   *      `undefined` correctly (property absent, not `undefined`-typed —
+   *      shadowing a future default style would be a real bug).
+   *
+   * Like paragraph shading, this mutation is layout-stable: the border
+   * doesn't change row metrics or wrap points, so the incremental renderer
+   * converges within the affected paragraph range without a full repaint.
+   * Pass `null` to clear the border.
+   */
+  public paragraphBorder(payload: IParagraphBorder | null) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const elementList = this.draw.getElementList()
+    let pz = startIndex
+    while (pz > 0 && elementList[pz]?.value !== ZERO) pz--
+    const oldValues: Array<{
+      el: (typeof elementList)[number]
+      old: IParagraphBorder | undefined
+    }> = []
+    for (let i = pz; i <= endIndex; i++) {
+      const el = elementList[i]
+      if (el?.value === ZERO) {
+        oldValues.push({ el, old: el.paragraphBorder })
+      }
+    }
+    if (!oldValues.length) return
+    // Extend the dirty end to the last element of the final affected paragraph
+    // so the incremental renderer is forced through the trailing row — the
+    // border touches every row of the paragraph, identical reasoning to
+    // paragraphShading above.
+    const posCtx = this.position.getPositionContext()
+    const paragraphEnd = (() => {
+      let end = endIndex
+      while (
+        end + 1 < elementList.length &&
+        elementList[end + 1]?.value !== ZERO
+      ) {
+        end++
+      }
+      return end
+    })()
+    const dirtyRange: { start: number; end: number } =
+      posCtx.isTable && posCtx.index !== undefined
+        ? { start: posCtx.index, end: posCtx.index }
+        : { start: pz, end: paragraphEnd }
+    const applyForward = () => {
+      for (const { el } of oldValues) {
+        if (payload === null) delete el.paragraphBorder
+        else el.paragraphBorder = payload
+      }
+    }
+    const applyBackward = () => {
+      for (const { el, old } of oldValues) {
+        if (old !== undefined) el.paragraphBorder = old
+        else delete el.paragraphBorder
       }
     }
     applyForward()
