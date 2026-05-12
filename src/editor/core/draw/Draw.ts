@@ -537,16 +537,24 @@ export class Draw {
   // 设置打印数据
   public setPrintData() {
     this.printModeData = {
-      header: this.header.getElementList(),
+      header: this.header.getVariantElementList('default'),
+      headerFirst: this.header.getVariantElementList('first'),
+      headerEven: this.header.getVariantElementList('even'),
       main: this.elementList,
-      footer: this.footer.getElementList()
+      footer: this.footer.getVariantElementList('default'),
+      footerFirst: this.footer.getVariantElementList('first'),
+      footerEven: this.footer.getVariantElementList('even')
     }
     // 过滤控件辅助元素
-    const clonePrintModeData = deepClone(this.printModeData)
+    const clonePrintModeData = deepClone(this.printModeData)!
     const editorDataKeys: (keyof Omit<IEditorData, 'graffiti'>)[] = [
       'header',
+      'headerFirst',
+      'headerEven',
       'main',
-      'footer'
+      'footer',
+      'footerFirst',
+      'footerEven'
     ]
     editorDataKeys.forEach(key => {
       clonePrintModeData[key] = this.control.filterAssistElement(
@@ -1567,6 +1575,36 @@ export class Draw {
     return this.footer
   }
 
+  public setHeaderOption(
+    payload: Partial<DeepRequired<IEditorOption>['header']>
+  ) {
+    Object.assign(this.options.header, payload)
+    this.render({
+      isSubmitHistory: false,
+      isSetCursor: false
+    })
+  }
+
+  public setFooterOption(
+    payload: Partial<DeepRequired<IEditorOption>['footer']>
+  ) {
+    Object.assign(this.options.footer, payload)
+    this.render({
+      isSubmitHistory: false,
+      isSetCursor: false
+    })
+  }
+
+  public setPageNumberOption(
+    payload: Partial<DeepRequired<IEditorOption>['pageNumber']>
+  ) {
+    Object.assign(this.options.pageNumber, payload)
+    this.render({
+      isSubmitHistory: false,
+      isSetCursor: false
+    })
+  }
+
   public getHyperlinkParticle(): HyperlinkParticle {
     return this.hyperlinkParticle
   }
@@ -1985,9 +2023,13 @@ export class Draw {
     // 同步block的最新数据
     this.blockParticle.update()
     const data: Required<IEditorData> = {
-      header: this.getHeaderElementList(),
+      header: this.header.getVariantElementList('default'),
+      headerFirst: this.header.getVariantElementList('first'),
+      headerEven: this.header.getVariantElementList('even'),
       main: mainElementList,
-      footer: this.getFooterElementList(),
+      footer: this.footer.getVariantElementList('default'),
+      footerFirst: this.footer.getVariantElementList('first'),
+      footerEven: this.footer.getVariantElementList('even'),
       graffiti: this.graffiti.getValue()
     }
     return data

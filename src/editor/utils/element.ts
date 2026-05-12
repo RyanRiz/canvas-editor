@@ -5,6 +5,7 @@ import {
   deleteProperty,
   getUUID,
   isArrayEqual,
+  isObjectEqual,
   omitObject,
   pickObject,
   splitText
@@ -610,6 +611,13 @@ export function isSameElementExceptValue(
       Array.isArray(source[key]) &&
       Array.isArray(target[key]) &&
       isArrayEqual(source[key], target[key])
+    ) {
+      continue
+    }
+    // extension对象引用不同但内容相等时不应判定为不同
+    if (
+      key === 'extension' &&
+      isObjectEqual(source[key], target[key])
     ) {
       continue
     }

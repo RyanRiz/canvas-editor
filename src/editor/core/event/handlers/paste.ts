@@ -16,6 +16,24 @@ import { CanvasEvent } from '../CanvasEvent'
 import { IOverrideResult } from '../../override/Override'
 import { normalizeLineBreak } from '../../../utils'
 
+// Plain-text paste should not inherit color / bold / italic / underline /
+// strikeout from the element under the cursor — mirrors the Ctrl+Shift+V
+// behavior in keydown/index.ts.
+function inputPlainText(host: CanvasEvent, text: string) {
+  const rangeManager = host.getDraw().getRange()
+  const prevDefaultStyle = rangeManager.getDefaultStyle()
+  rangeManager.setDefaultStyle(null)
+  rangeManager.setDefaultStyle({
+    bold: false,
+    color: '#000000',
+    italic: false,
+    underline: false,
+    strikeout: false
+  })
+  host.input(text)
+  rangeManager.setDefaultStyle(prevDefaultStyle)
+}
+
 export function pasteElement(host: CanvasEvent, elementList: IElement[]) {
   const draw = host.getDraw()
   if (
@@ -185,10 +203,16 @@ export async function pasteByApi(host: CanvasEvent, options?: IPasteOption) {
   // 优先读取编辑器内部粘贴板数据
   const clipboardText = await navigator.clipboard.readText()
   const editorClipboardData = getClipboardData()
+
+  if (options?.isPlainText && clipboardText) {
+    inputPlainText(host, clipboardText)
+    return
+  }
+
   if (
     editorClipboardData &&
     normalizeLineBreak(clipboardText) ===
-      normalizeLineBreak(editorClipboardData.text)
+    normalizeLineBreak(editorClipboardData.text)
   ) {
     pasteElement(host, editorClipboardData.elementList)
     return
@@ -197,7 +221,7 @@ export async function pasteByApi(host: CanvasEvent, options?: IPasteOption) {
   // 从内存粘贴板获取数据
   if (options?.isPlainText) {
     if (clipboardText) {
-      host.input(clipboardText)
+      inputPlainText(host, clipboardText)
     }
   } else {
     const clipboardData = await navigator.clipboard.read()

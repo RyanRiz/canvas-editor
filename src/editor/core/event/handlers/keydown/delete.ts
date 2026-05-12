@@ -106,13 +106,13 @@ export function del(evt: KeyboardEvent, host: CanvasEvent) {
   draw.getGlobalEvent().setCanvasEventAbility()
   if (curIndex === null) {
     rangeManager.setRange(startIndex, startIndex)
-    draw.scheduleRender({
+    draw.render({
       curIndex: startIndex,
       isSubmitHistory: false
     })
   } else {
     rangeManager.setRange(curIndex, curIndex)
-    draw.scheduleRender({
+    draw.render({
       curIndex
     })
   }

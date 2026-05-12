@@ -120,7 +120,7 @@ export function enter(evt: KeyboardEvent, host: CanvasEvent) {
   }
   if (~curIndex) {
     rangeManager.setRange(curIndex, curIndex)
-    draw.scheduleRender({ curIndex })
+    draw.render({ curIndex })
   }
   evt.preventDefault()
 }

@@ -18,7 +18,7 @@ import {
 } from '../../interface/Position'
 import { Draw } from '../draw/Draw'
 import { EditorMode, EditorZone } from '../../dataset/enum/Editor'
-import { isRectIntersect } from '../../utils'
+import { deepClone, isRectIntersect } from '../../utils'
 import { ImageDisplay } from '../../dataset/enum/Common'
 import { DeepRequired } from '../../interface/Common'
 import { EventBus } from '../event/eventbus/EventBus'
@@ -472,14 +472,10 @@ export class Position {
   ): IElementPosition[] {
     const { row, innerWidth } = payload
     const positionList: IElementPosition[] = []
-    // 浅拷贝即可：computePageRowPosition 不写回 row 的标量字段，
-    // 仅可能默认化共享元素的 imgFloatPosition（幂等）以及为表格元素重置
-    // td.positionList——本辅助调用仅用于行级预览（非表格行），无需 deepClone
-    // 整个元素子树。
     this.computePageRowPosition({
       positionList,
       innerWidth,
-      rowList: [{ ...row }],
+      rowList: [deepClone(row)],
       pageNo: 0,
       startX: 0,
       startY: 0,
@@ -779,6 +775,7 @@ export class Position {
     if (!isLastArea) {
       // 页眉页脚正文切换
       if (this.draw.getIsPagingMode()) {
+        const margins = this.draw.getMargins()
         // 页眉底部距离页面顶部距离
         const header = this.draw.getHeader()
         const headerHeight = header.getHeight()
@@ -788,25 +785,29 @@ export class Position {
         const pageHeight = this.draw.getHeight()
         const footerTopY =
           pageHeight - (footer.getFooterBottom() + footer.getHeight())
+        // 扩大页眉页脚命中区域：整个顶部/底部页边距都视为可点击
+        // (即使页眉/页脚为空也能点入编辑)
+        const headerHitBottomY = Math.max(headerBottomY, margins[0])
+        const footerHitTopY = Math.min(footerTopY, pageHeight - margins[2])
         // 判断所属位置是否属于页眉页脚区域
         if (isMainActive) {
-          // 页眉：当前位置小于页眉底部位置
-          if (y < headerBottomY) {
+          // 页眉：当前位置小于扩大后的页眉底部位置
+          if (y < headerHitBottomY) {
             return {
               index: -1,
               zone: EditorZone.HEADER
             }
           }
-          // 页脚：当前位置大于页脚顶部位置
-          if (y > footerTopY) {
+          // 页脚：当前位置大于扩大后的页脚顶部位置
+          if (y > footerHitTopY) {
             return {
               index: -1,
               zone: EditorZone.FOOTER
             }
           }
         } else {
-          // main区域：当前位置小于页眉底部位置 && 大于页脚顶部位置
-          if (y <= footerTopY && y >= headerBottomY) {
+          // main区域：当前位置在扩大后的页眉/页脚之间
+          if (y <= footerHitTopY && y >= headerHitBottomY) {
             return {
               index: -1,
               zone: EditorZone.MAIN

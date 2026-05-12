@@ -15,7 +15,15 @@ export const EDITOR_ELEMENT_STYLE_ATTR: Array<keyof IElement> = [
   'textDecoration'
 ]
 
-export const EDITOR_ROW_ATTR: Array<keyof IElement> = ['rowFlex', 'rowMargin', 'indent', 'rightIndent', 'spaceBefore', 'spaceAfter', 'paragraphShading']
+export const EDITOR_ROW_ATTR: Array<keyof IElement> = [
+  'rowFlex',
+  'rowMargin',
+  'indent',
+  'rightIndent',
+  'spaceBefore',
+  'spaceAfter',
+  'paragraphShading'
+]
 
 export const EDITOR_ELEMENT_COPY_ATTR: Array<keyof IElement> = [
   'type',
@@ -36,6 +44,7 @@ export const EDITOR_ELEMENT_COPY_ATTR: Array<keyof IElement> = [
   'groupIds',
   'rowMargin',
   'textDecoration',
+  'extension',
   'indent',
   'rightIndent',
   'spaceBefore',
@@ -44,6 +53,7 @@ export const EDITOR_ELEMENT_COPY_ATTR: Array<keyof IElement> = [
 ]
 
 export const EDITOR_ELEMENT_ZIP_ATTR: Array<keyof IElement> = [
+  'id',
   'type',
   'font',
   'size',

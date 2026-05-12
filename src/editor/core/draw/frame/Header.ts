@@ -4,10 +4,29 @@ import { DeepRequired } from '../../../interface/Common'
 import { IEditorOption } from '../../../interface/Editor'
 import { IElement, IElementPosition } from '../../../interface/Element'
 import { IRow } from '../../../interface/Row'
-import { pickSurroundElementList } from '../../../utils/element'
+import {
+  formatElementList,
+  pickSurroundElementList
+} from '../../../utils/element'
+import {
+  convertNumberToChinese,
+  convertNumberToRoman
+} from '../../../utils'
 import { Position } from '../../position/Position'
 import { Zone } from '../../zone/Zone'
 import { Draw } from '../Draw'
+
+export type ChromeVariant = 'default' | 'first' | 'even'
+
+interface IVariantLayout {
+  rowList: IRow[]
+  positionList: IElementPosition[]
+}
+
+interface IHeaderVariantInit {
+  first?: IElement[]
+  even?: IElement[]
+}
 
 export class Header {
   private draw: Draw
@@ -15,19 +34,35 @@ export class Header {
   private zone: Zone
   private options: DeepRequired<IEditorOption>
 
+  // Active-variant live data — what cursor / range / commands operate on.
   private elementList: IElement[]
   private rowList: IRow[]
   private positionList: IElementPosition[]
 
-  constructor(draw: Draw, data?: IElement[]) {
+  // Storage for the inactive variants. Active variant's content is the same
+  // reference as `elementList` so direct edits flow through automatically.
+  private variantStorage: Record<ChromeVariant, IElement[]>
+  private activeVariant: ChromeVariant
+  // Lazy-computed layouts for inactive variants (rendering only — no cursor).
+  private cachedVariantLayouts: Map<ChromeVariant, IVariantLayout>
+
+  constructor(draw: Draw, data?: IElement[], extras?: IHeaderVariantInit) {
     this.draw = draw
     this.position = draw.getPosition()
     this.zone = draw.getZone()
     this.options = draw.getOptions()
 
-    this.elementList = data || []
+    const defaultList = data || []
+    this.variantStorage = {
+      default: defaultList,
+      first: extras?.first ?? [],
+      even: extras?.even ?? []
+    }
+    this.activeVariant = 'default'
+    this.elementList = this.variantStorage.default
     this.rowList = []
     this.positionList = []
+    this.cachedVariantLayouts = new Map()
   }
 
   public getRowList(): IRow[] {
@@ -36,6 +71,8 @@ export class Header {
 
   public setElementList(elementList: IElement[]) {
     this.elementList = elementList
+    this.variantStorage[this.activeVariant] = elementList
+    this.cachedVariantLayouts.delete(this.activeVariant)
   }
 
   public getElementList(): IElement[] {
@@ -44,6 +81,62 @@ export class Header {
 
   public getPositionList(): IElementPosition[] {
     return this.positionList
+  }
+
+  public getActiveVariant(): ChromeVariant {
+    return this.activeVariant
+  }
+
+  public getVariantElementList(variant: ChromeVariant): IElement[] {
+    if (variant === this.activeVariant) return this.elementList
+    return this.variantStorage[variant]
+  }
+
+  public setVariantElementList(variant: ChromeVariant, list: IElement[]) {
+    this.variantStorage[variant] = list
+    if (variant === this.activeVariant) {
+      this.elementList = list
+    }
+    this.cachedVariantLayouts.delete(variant)
+  }
+
+  /**
+   * Switch the active variant. The current active variant's content is
+   * persisted into storage; the requested variant's content becomes the live
+   * elementList that cursor/range/commands operate on.
+   */
+  public setActiveVariant(variant: ChromeVariant) {
+    if (variant === this.activeVariant) return
+    // Persist current edits back into storage (elementList may have been
+    // re-bound by setElementList; ensure storage is in sync).
+    this.variantStorage[this.activeVariant] = this.elementList
+    this.activeVariant = variant
+    const next = this.variantStorage[variant]
+    // Ensure the variant's elementList has a ZERO terminator on first
+    // activation. formatElementList without `isForceCompensation` is
+    // idempotent — it only prepends ZERO when the first element doesn't
+    // already start with ZERO/\n, so toggling variants repeatedly will not
+    // accumulate empty paragraphs.
+    formatElementList(next, {
+      editorOptions: this.options
+    })
+    this.variantStorage[variant] = next
+    this.elementList = next
+    this.rowList = []
+    this.positionList = []
+    this.cachedVariantLayouts.clear()
+  }
+
+  /**
+   * Resolve which variant should be displayed on the given 0-indexed pageNo,
+   * honoring the firstPageEnabled / oddEvenEnabled options.
+   */
+  public resolveVariantForPage(pageNo: number): ChromeVariant {
+    const { firstPageEnabled, oddEvenEnabled } = this.options.header
+    if (firstPageEnabled && pageNo === 0) return 'first'
+    // pageNo is 0-indexed: page 1 -> 0 (odd), page 2 -> 1 (even), page 3 -> 2 (odd)
+    if (oddEvenEnabled && pageNo % 2 === 1) return 'even'
+    return 'default'
   }
 
   public compute() {
@@ -55,30 +148,42 @@ export class Header {
   public recovery() {
     this.rowList = []
     this.positionList = []
+    this.cachedVariantLayouts.clear()
   }
 
   private _computeRowList() {
+    this.rowList = this._computeRowListFor(this.elementList)
+  }
+
+  private _computeRowListFor(elementList: IElement[]): IRow[] {
     const innerWidth = this.draw.getInnerWidth()
     const margins = this.draw.getMargins()
-    const surroundElementList = pickSurroundElementList(this.elementList)
-    this.rowList = this.draw.computeRowList({
+    const surroundElementList = pickSurroundElementList(elementList)
+    return this.draw.computeRowList({
       startX: margins[3],
       startY: this.getHeaderTop(),
       innerWidth,
-      elementList: this.elementList,
+      elementList,
       surroundElementList
     })
   }
 
   private _computePositionList() {
+    this._computePositionListFor(this.rowList, this.positionList)
+  }
+
+  private _computePositionListFor(
+    rowList: IRow[],
+    positionList: IElementPosition[]
+  ) {
     const headerTop = this.getHeaderTop()
     const innerWidth = this.draw.getInnerWidth()
     const margins = this.draw.getMargins()
     const startX = margins[3]
     const startY = headerTop
     this.position.computePageRowPosition({
-      positionList: this.positionList,
-      rowList: this.rowList,
+      positionList,
+      rowList,
       pageNo: 0,
       startRowIndex: 0,
       startIndex: 0,
@@ -87,6 +192,19 @@ export class Header {
       innerWidth,
       zone: EditorZone.HEADER
     })
+  }
+
+  private _ensureVariantLayout(variant: ChromeVariant): IVariantLayout {
+    const cached = this.cachedVariantLayouts.get(variant)
+    if (cached) return cached
+    const elementList = this.variantStorage[variant] ?? []
+    const layout: IVariantLayout = { rowList: [], positionList: [] }
+    if (elementList.length) {
+      layout.rowList = this._computeRowListFor(elementList)
+      this._computePositionListFor(layout.rowList, layout.positionList)
+    }
+    this.cachedVariantLayouts.set(variant, layout)
+    return layout
   }
 
   public getHeaderTop(): number {
@@ -106,10 +224,13 @@ export class Header {
     return Math.floor(height * maxHeightRadioMapping[maxHeightRadio])
   }
 
-  public getHeight(): number {
+  public getHeight(pageNo?: number): number {
     if (this.options.header.disabled) return 0
     const maxHeight = this.getMaxHeight()
-    const rowHeight = this.getRowHeight()
+    const rowHeight =
+      pageNo === undefined
+        ? this.getRowHeight()
+        : this.getVariantRowHeight(this.resolveVariantForPage(pageNo))
     return rowHeight > maxHeight ? maxHeight : rowHeight
   }
 
@@ -117,42 +238,130 @@ export class Header {
     return this.rowList.reduce((pre, cur) => pre + cur.height, 0)
   }
 
-  public getExtraHeight(): number {
-    // 页眉上边距 + 实际高 - 页面上边距
+  private getVariantRowHeight(variant: ChromeVariant): number {
+    if (variant === this.activeVariant) return this.getRowHeight()
+    const layout = this._ensureVariantLayout(variant)
+    return layout.rowList.reduce((pre, cur) => pre + cur.height, 0)
+  }
+
+  public getExtraHeight(pageNo?: number): number {
     const margins = this.draw.getMargins()
-    const headerHeight = this.getHeight()
+    const headerHeight = this.getHeight(pageNo)
     const headerTop = this.getHeaderTop()
     const extraHeight = headerTop + headerHeight - margins[0]
     return extraHeight <= 0 ? 0 : extraHeight
   }
 
   public render(ctx: CanvasRenderingContext2D, pageNo: number) {
+    const variant = this.resolveVariantForPage(pageNo)
+    const isActive = variant === this.activeVariant
+    const elementList = isActive
+      ? this.elementList
+      : this.variantStorage[variant] ?? []
+    if (!elementList.length) return
+    const sourceRowList = isActive
+      ? this.rowList
+      : this._ensureVariantLayout(variant).rowList
+    const positionList = isActive
+      ? this.positionList
+      : this._ensureVariantLayout(variant).positionList
+    if (!sourceRowList.length) return
+
     ctx.save()
     ctx.globalAlpha = this.zone.isHeaderActive()
       ? 1
       : this.options.header.inactiveAlpha
     const innerWidth = this.draw.getInnerWidth()
     const maxHeight = this.getMaxHeight()
-    // 超出最大高度不渲染
+    // Clip rows that overflow the configured maxHeight band.
     const rowList: IRow[] = []
     let curRowHeight = 0
-    for (let r = 0; r < this.rowList.length; r++) {
-      const row = this.rowList[r]
+    for (let r = 0; r < sourceRowList.length; r++) {
+      const row = sourceRowList[r]
       if (curRowHeight + row.height > maxHeight) {
         break
       }
       rowList.push(row)
       curRowHeight += row.height
     }
-    this.draw.drawRow(ctx, {
-      elementList: this.elementList,
-      positionList: this.positionList,
-      rowList,
-      pageNo,
-      startIndex: 0,
-      innerWidth,
-      zone: EditorZone.HEADER
-    })
-    ctx.restore()
+    // Substitute live page-number tokens just for this draw pass; restore
+    // afterwards so the canonical value (kept in storage / serialized output)
+    // stays the user-typed placeholder.
+    const restore = applyPageNumberTokens(elementList, this.draw, pageNo)
+    try {
+      this.draw.drawRow(ctx, {
+        elementList,
+        positionList,
+        rowList,
+        pageNo,
+        startIndex: 0,
+        innerWidth,
+        zone: EditorZone.HEADER
+      })
+    } finally {
+      restore()
+      ctx.restore()
+    }
+  }
+}
+
+/**
+ * Substitutes element.value for any element flagged with `pageNumberKind`
+ * with the live value computed for the given pageNo. Returns a function that
+ * restores the original values.
+ */
+export function applyPageNumberTokens(
+  elementList: IElement[],
+  draw: Draw,
+  pageNo: number
+): () => void {
+  const opts = draw.getOptions()
+  const pageNumberOpt = opts.pageNumber
+  const fallbackType = pageNumberOpt?.numberType ?? 'arabic'
+  const startPageNo = pageNumberOpt?.startPageNo ?? 1
+  const explicitFrom = pageNumberOpt?.fromPageNo ?? 0
+  // `Different first page` treats page 0 as a cover/title page and restarts
+  // numbering on page 1. Honor it whenever either header or footer has the
+  // flag on, so authors enabling it for one zone get the expected numbering
+  // in the other.
+  const skipFirstCover =
+    !!opts.header?.firstPageEnabled || !!opts.footer?.firstPageEnabled
+  const effectiveFrom = Math.max(explicitFrom, skipFirstCover ? 1 : 0)
+  const totalPages = draw.getPageCount()
+  const restoreList: [IElement, string][] = []
+  for (let i = 0; i < elementList.length; i++) {
+    const el = elementList[i]
+    if (!el || !el.pageNumberKind) continue
+    const fmt = el.pageNumberFormat ?? fallbackType
+    let value: string
+    if (el.pageNumberKind === 'pageCount') {
+      value = formatPageNumber(Math.max(0, totalPages - effectiveFrom), fmt)
+    } else if (pageNo < effectiveFrom) {
+      // Cover/skipped page — render the placeholder as empty so nothing
+      // visible appears for the page-number element on page 1.
+      value = ''
+    } else {
+      value = formatPageNumber(pageNo + startPageNo - effectiveFrom, fmt)
+    }
+    restoreList.push([el, el.value])
+    el.value = value
+  }
+  return () => {
+    for (const [el, original] of restoreList) {
+      el.value = original
+    }
+  }
+}
+
+function formatPageNumber(n: number, kind: string): string {
+  switch (kind) {
+    case 'chinese':
+      return convertNumberToChinese(n)
+    case 'roman-upper':
+      return convertNumberToRoman(n, true)
+    case 'roman-lower':
+      return convertNumberToRoman(n, false)
+    default:
+      return `${n}`
   }
 }
