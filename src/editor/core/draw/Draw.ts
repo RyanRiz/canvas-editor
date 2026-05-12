@@ -1,5 +1,5 @@
 import { version } from '../../../../package.json'
-import { PUNCTUATION_LIST, WRAP, ZERO } from '../../dataset/constant/Common'
+import { WRAP, ZERO } from '../../dataset/constant/Common'
 import { RowFlex } from '../../dataset/enum/Row'
 import {
   IAppendElementListOption,
@@ -177,10 +177,6 @@ interface IPagePaintPlan {
   firstShiftedPage: number | null
   syncPages: Set<number>
   deferredPages: Set<number>
-}
-
-interface IPagePaintPlanOption {
-  isPageGeometryChange?: boolean
 }
 
 interface IDirtyPageSpan {
@@ -2446,8 +2442,7 @@ export class Draw {
       this.render({
         isSubmitHistory: false,
         isSourceHistory: true,
-        isSetCursor: false,
-        isPageGeometryChange: true
+        isSetCursor: false
       })
     }
     const applyBackward = () => {
@@ -2461,8 +2456,7 @@ export class Draw {
       this.render({
         isSubmitHistory: false,
         isSourceHistory: true,
-        isSetCursor: false,
-        isPageGeometryChange: true
+        isSetCursor: false
       })
     }
     // No-op guard: clicking the same paper-direction / margin button twice
@@ -2500,8 +2494,7 @@ export class Draw {
     }
     this.render({
       isSubmitHistory: false,
-      isSetCursor: false,
-      isPageGeometryChange: true
+      isSetCursor: false
     })
     this.historyManager.executeDelta({ applyForward, applyBackward })
   }
@@ -3278,7 +3271,6 @@ export class Draw {
       startY = 0,
       pageHeight: payloadPageHeight = 0,
       mainOuterHeight: payloadMainOuterHeight = 0,
-      reuseIntrinsicMetrics = false,
       checkpointSink,
       resumeFrom
     } = payload
@@ -3302,11 +3294,8 @@ export class Draw {
     } = this.options
     const defaultBasicRowMarginHeight = this.getDefaultBasicRowMarginHeight()
     const ctx = this._getMeasureCtx()
-    const hasListElements = elementList.some(el => !!el.listId)
     // 计算列表偏移宽度
-    const listStyleMap = hasListElements
-      ? this.listParticle.computeListStyle(ctx, elementList)
-      : new Map<string, number>()
+    const listStyleMap = this.listParticle.computeListStyle(ctx, elementList)
     let rowList: IRow[]
     let currentPageColumns: Required<IPageColumns>
     let currentSectionProperties: Required<ISectionProperties>
@@ -3345,40 +3334,6 @@ export class Draw {
       if (count <= 1) return baseInner
       const totalGap = this.getColumnGap(pageColumns) * (count - 1)
       return Math.floor((baseInner - totalGap) / count)
-    }
-    const getReusableIntrinsicMetrics = (
-      element: IElement
-    ): IElementMetrics | null => {
-      if (!reuseIntrinsicMetrics) return null
-      const cached = (element as IRowElement).metrics
-      if (!cached) return null
-      switch (element.type) {
-        case ElementType.IMAGE:
-        case ElementType.TABLE:
-        case ElementType.SEPARATOR:
-        case ElementType.PAGE_BREAK:
-        case ElementType.COLUMN_BREAK:
-        case ElementType.SECTION_BREAK:
-        case ElementType.BLOCK:
-          return null
-        default: {
-          const naturalWidth =
-            (element as unknown as { _naturalWidth?: number })._naturalWidth ??
-            cached.width
-          return {
-            width: naturalWidth,
-            height: cached.height,
-            boundingBoxAscent: cached.boundingBoxAscent,
-            boundingBoxDescent: cached.boundingBoxDescent
-          }
-        }
-      }
-    }
-    const getReusableNaturalWidth = (element?: IElement | null): number | null => {
-      if (!reuseIntrinsicMetrics || !element) return null
-      const naturalWidth = (element as unknown as { _naturalWidth?: number })
-        ._naturalWidth
-      return typeof naturalWidth === 'number' ? naturalWidth : null
     }
 
     if (resumeFrom) {
@@ -3664,7 +3619,6 @@ export class Draw {
         boundingBoxAscent: 0,
         boundingBoxDescent: 0
       }
-      const reusableIntrinsicMetrics = getReusableIntrinsicMetrics(element)
       // 实际可用宽度
       // When the second slot of a row is about to be filled (isStartElement),
       // lock curRow.offsetX from the row's existing first element's indent.
@@ -4133,8 +4087,6 @@ export class Draw {
         element.width = elementWidth
         metrics.width = elementWidth * scale
         metrics.height = height * scale
-        ;(element as unknown as { _naturalWidth?: number })._naturalWidth =
-          metrics.width
       } else if (
         element.type === ElementType.CHECKBOX ||
         element.controlComponent === ControlComponent.CHECKBOX
@@ -4144,23 +4096,12 @@ export class Draw {
         element.width = elementWidth
         metrics.width = elementWidth * scale
         metrics.height = height * scale
-        ;(element as unknown as { _naturalWidth?: number })._naturalWidth =
-          metrics.width
-      } else if (reusableIntrinsicMetrics) {
-        metrics.width = reusableIntrinsicMetrics.width
-        metrics.height = reusableIntrinsicMetrics.height
-        metrics.boundingBoxAscent =
-          reusableIntrinsicMetrics.boundingBoxAscent
-        metrics.boundingBoxDescent =
-          reusableIntrinsicMetrics.boundingBoxDescent
       } else if (element.type === ElementType.TAB) {
         metrics.width = defaultTabWidth * scale
         metrics.height = defaultSize * scale
         metrics.boundingBoxDescent = 0
         metrics.boundingBoxAscent =
           this.textParticle.getBasisWordBoundingBoxAscent(ctx, ctx.font)
-        ;(element as unknown as { _naturalWidth?: number })._naturalWidth =
-          metrics.width
       } else if (element.type === ElementType.BLOCK) {
         if (!element.width) {
           metrics.width = availableWidth
@@ -4180,8 +4121,6 @@ export class Draw {
         const fontMetrics = this.textParticle.measureText(ctx, element)
         metrics.width =
           (fontMetrics.width + defaultPadding[1] + defaultPadding[3]) * scale
-        ;(element as unknown as { _naturalWidth?: number })._naturalWidth =
-          metrics.width
         metrics.height = (element.size || defaultSize) * scale
         metrics.boundingBoxDescent = 0
         metrics.boundingBoxAscent =
@@ -4245,10 +4184,7 @@ export class Draw {
       const rowElement: IRowElement = Object.assign(element, {
         metrics,
         left: 0,
-        style:
-          reuseIntrinsicMetrics && (element as IRowElement).style
-            ? (element as IRowElement).style
-            : this.getElementFont(element, scale)
+        style: this.getElementFont(element, scale)
       })
       // 暂时只考虑非换行场景：控件开始时统计宽度，结束时消费宽度及还原
       if (rowElement.control?.minWidth) {
@@ -4279,33 +4215,11 @@ export class Draw {
           // 英文单词
           const word = `${preElement?.value || ''}${element.value}`
           if (this.WORD_LIKE_REG.test(word)) {
-            let width = 0
-            let endElement: IElement | null = null
-            if (reuseIntrinsicMetrics) {
-              let wordIndex = i
-              while (wordIndex < elementList.length) {
-                const wordElement = elementList[wordIndex]
-                if (
-                  (wordElement.type && wordElement.type !== ElementType.TEXT) ||
-                  !this.LETTER_REG.test(wordElement.value)
-                ) {
-                  endElement = wordElement
-                  break
-                }
-                width +=
-                  getReusableNaturalWidth(wordElement) ??
-                  (wordElement as IRowElement).metrics.width
-                wordIndex++
-              }
-            } else {
-              const measured = this.textParticle.measureWord(
-                ctx,
-                elementList,
-                i
-              )
-              width = measured.width
-              endElement = measured.endElement
-            }
+            const { width, endElement } = this.textParticle.measureWord(
+              ctx,
+              elementList,
+              i
+            )
             // 后面存在元素 && 单词宽度大于行可用宽度，无需折行
             const wordWidth = width * scale
             if (endElement && wordWidth <= availableWidth) {
@@ -4314,11 +4228,10 @@ export class Draw {
             }
           }
           // 标点符号
-          const punctuationWidth = reuseIntrinsicMetrics
-            ? nextElement && PUNCTUATION_LIST.includes(nextElement.value)
-              ? (getReusableNaturalWidth(nextElement) ?? 0) / scale
-              : 0
-            : this.textParticle.measurePunctuationWidth(ctx, nextElement)
+          const punctuationWidth = this.textParticle.measurePunctuationWidth(
+            ctx,
+            nextElement
+          )
           curRowWidth += punctuationWidth * scale
         }
       }
@@ -4332,23 +4245,21 @@ export class Draw {
       }
       listId = element.listId
       // 计算四周环绕导致的元素偏移量
-      if (surroundElementList.length) {
-        const surroundPosition = this.position.setSurroundPosition({
-          pageNo,
-          rowElement,
-          row: curRow,
-          rowElementRect: {
-            x,
-            y,
-            height,
-            width: metrics.width
-          },
-          availableWidth,
-          surroundElementList
-        })
-        x = surroundPosition.x
-        curRowWidth += surroundPosition.rowIncreaseWidth
-      }
+      const surroundPosition = this.position.setSurroundPosition({
+        pageNo,
+        rowElement,
+        row: curRow,
+        rowElementRect: {
+          x,
+          y,
+          height,
+          width: metrics.width
+        },
+        availableWidth,
+        surroundElementList
+      })
+      x = surroundPosition.x
+      curRowWidth += surroundPosition.rowIncreaseWidth
       x += metrics.width
       // 是否强制换行
       const isForceBreak =
@@ -4542,30 +4453,26 @@ export class Draw {
         ) {
           y = startY
           // 删除多余四周环绕型元素
-          if (surroundElementList.length) {
-            deleteSurroundElementList(surroundElementList, pageNo)
-          }
+          deleteSurroundElementList(surroundElementList, pageNo)
           pageNo += 1
         }
         // 计算下一行第一个元素是否存在环绕交叉
         rowElement.left = 0
         const nextRow = rowList[rowList.length - 1]
-        if (surroundElementList.length) {
-          const surroundPosition = this.position.setSurroundPosition({
-            pageNo,
-            rowElement,
-            row: nextRow,
-            rowElementRect: {
-              x,
-              y,
-              height,
-              width: metrics.width
-            },
-            availableWidth,
-            surroundElementList
-          })
-          x = surroundPosition.x
-        }
+        const surroundPosition = this.position.setSurroundPosition({
+          pageNo,
+          rowElement,
+          row: nextRow,
+          rowElementRect: {
+            x,
+            y,
+            height,
+            width: metrics.width
+          },
+          availableWidth,
+          surroundElementList
+        })
+        x = surroundPosition.x
         x += metrics.width
       }
       // PERF-PLAN §2.2 / Phase 2B：收敛检测——仅当本帧走增量恢复路径、且本次
@@ -6272,24 +6179,9 @@ export class Draw {
     return null
   }
 
-  private _collectVisibleSyncPages(
-    pageCount: number,
-    options: IPagePaintPlanOption = {}
-  ): Set<number> {
+  private _collectVisibleSyncPages(pageCount: number): Set<number> {
     const syncPages = new Set<number>()
     const overscan = Math.max(0, Math.floor(this.options.pagePaintOverscan))
-    if (options.isPageGeometryChange) {
-      const anchorPage = Math.min(
-        Math.max(0, this.intersectionPageNo),
-        Math.max(0, pageCount - 1)
-      )
-      const start = Math.max(0, anchorPage - overscan)
-      const end = Math.min(pageCount - 1, anchorPage + overscan)
-      for (let pageNo = start; pageNo <= end; pageNo++) {
-        syncPages.add(pageNo)
-      }
-      return syncPages
-    }
     for (let i = 0; i < this.visiblePageNoList.length; i++) {
       const visiblePageNo = this.visiblePageNoList[i]
       if (visiblePageNo < 0 || visiblePageNo >= pageCount) continue
@@ -6322,15 +6214,14 @@ export class Draw {
   }
 
   private _buildPagePaintPlan(
-    preLayoutDirtyPageSpan: IDirtyPageSpan | null = null,
-    options: IPagePaintPlanOption = {}
+    preLayoutDirtyPageSpan: IDirtyPageSpan | null = null
   ): IPagePaintPlan | null {
     if (!this.getIsPagingMode()) return null
     if (this.options.pagePaintStrategy === 'full') return null
     if (this.visiblePageNoList.length === 0) return null
     if (this._prevPageLayoutSignatures === null) return null
     const pageCount = this.pageRowList.length
-    const syncPages = this._collectVisibleSyncPages(pageCount, options)
+    const syncPages = this._collectVisibleSyncPages(pageCount)
     const curSignatures = this._getPageLayoutSignatures()
     const firstShiftedPage = this._findFirstShiftedPage(
       this._prevPageLayoutSignatures,
@@ -6342,7 +6233,7 @@ export class Draw {
         deferredPages.add(i)
       }
     }
-    if (this._dirtyRange !== null && !options.isPageGeometryChange) {
+    if (this._dirtyRange !== null) {
       const positionList = this.position.getOriginalMainPositionList()
       const startPos =
         positionList[Math.min(this._dirtyRange.start, positionList.length - 1)]
@@ -6357,7 +6248,7 @@ export class Draw {
         deferredPages.delete(endPos.pageNo)
       }
     }
-    if (preLayoutDirtyPageSpan && !options.isPageGeometryChange) {
+    if (preLayoutDirtyPageSpan) {
       for (
         let pageNo = preLayoutDirtyPageSpan.startPage;
         pageNo <= preLayoutDirtyPageSpan.endPage;
@@ -6594,10 +6485,6 @@ export class Draw {
         b.isFirstRender !== undefined ? b.isFirstRender : a.isFirstRender,
       isSourceHistory:
         b.isSourceHistory !== undefined ? b.isSourceHistory : a.isSourceHistory,
-      isPageGeometryChange:
-        b.isPageGeometryChange !== undefined
-          ? b.isPageGeometryChange
-          : a.isPageGeometryChange,
       // OR 合并
       isSubmitHistory: orTrue(a.isSubmitHistory, b.isSubmitHistory),
       isCompute: orTrue(a.isCompute, b.isCompute),
@@ -6663,8 +6550,7 @@ export class Draw {
       isSourceHistory = false,
       isFirstRender = false,
       isTextInput = false,
-      isDecorationOnly = false,
-      isPageGeometryChange = false
+      isDecorationOnly = false
     } = payload || {}
     let { curIndex } = payload || {}
     const innerWidth = this.getInnerWidth()
@@ -6834,12 +6720,10 @@ export class Draw {
         // PERF-PLAN §2.2 / Phase 2B：在「上一帧 row checkpoint 仍然有效 + 已有 dirty
         // 区间提示 + 布局签名未变」时尝试启用增量布局。
         // dirty 在首行时 prefix 为空，但仍可通过 convergence 复用尾部旧行。
-        const resumeFrom = isPageGeometryChange
-          ? null
-          : this._tryBuildResumeFrom({
-              isPagingMode,
-              innerWidth
-            })
+        const resumeFrom = this._tryBuildResumeFrom({
+          isPagingMode,
+          innerWidth
+        })
         // 浮动元素列表清空策略：全量路径下按既有逻辑清空；增量路径下交给
         // computePositionListIncremental 按 dirty 边界过滤，避免误删 prefix 浮动。
         if (!resumeFrom) {
@@ -6864,7 +6748,6 @@ export class Draw {
           innerWidth,
           surroundElementList,
           elementList: this.elementList,
-          reuseIntrinsicMetrics: isPageGeometryChange,
           checkpointSink: this._mainRowCheckpoints,
           resumeFrom: resumeFrom ?? undefined
         })
@@ -7112,9 +6995,7 @@ export class Draw {
       !isInit &&
       !isFirstRender &&
       !this._skipMainRowCompute
-        ? this._buildPagePaintPlan(preLayoutDirtyPageSpan, {
-            isPageGeometryChange
-          })
+        ? this._buildPagePaintPlan(preLayoutDirtyPageSpan)
         : null
     this._paintPlanFirstShiftedPage = pagePaintPlan?.firstShiftedPage ?? null
     this._drawnPages.clear()

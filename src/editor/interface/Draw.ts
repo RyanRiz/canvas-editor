@@ -41,10 +41,6 @@ export interface IRenderConfig {
   // 调用方需保证主元素列表未变更——否则视觉将停留在上一帧 base 文本。
   // 仅在 options.pageLayered.enable=true 且未设置 isCompute=true 时生效。
   isDecorationOnly?: boolean
-  // 页面几何（方向 / 纸张尺寸 / 页边距）变更时的 paint 策略提示。
-  // true 时优先保证当前 viewport 页同步更新，其余页面允许延迟到滚动进入视口
-  // 再重绘，避免一次 apply/undo 同步刷完整篇文档。
-  isPageGeometryChange?: boolean
 }
 
 /**
@@ -136,10 +132,6 @@ export interface IComputeRowListPayload {
   pageHeight?: number
   mainOuterHeight?: number
   surroundElementList?: IElement[]
-  // 页面几何变更（方向 / 纸张尺寸 / 页边距）时，允许 computeRowList 复用上一帧
-  // 已缓存的元素固有 metrics（字宽 / 基准 ascent / 固定控件尺寸）以减少整篇
-  // 文档重排中的逐元素 measureText 开销。
-  reuseIntrinsicMetrics?: boolean
   // PERF-PLAN §2.2 — Phase 2B: 增量布局
   // checkpointSink：当提供时，computeRowList 会在每个行边界写入一个 checkpoint，
   // 与 rowList 平行索引（checkpointSink[R] 描述「重新进入行 R 之前」的循环局部状态）。
