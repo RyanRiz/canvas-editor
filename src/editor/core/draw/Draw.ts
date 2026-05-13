@@ -308,6 +308,14 @@ export class Draw {
   // Fit-to-Width 在此路径下省下数百毫秒主线程时间。仅 setPageScale 内部使用，
   // render() 完成后立即清零；不应跨多次 render 持续。
   private _skipMainRowCompute: boolean
+  // PERF: lazy-positions tracking. When `isLazyPosition: true` is passed to
+  // render(), computePositionListIncremental stops after the visible-page
+  // range, leaving positions for pages >= this value stale (entries from the
+  // previous frame, wrong coordinates). Cleared by a full computePositionList
+  // pass — either the scheduled async refresh (`_lazyPositionRefreshTimer`)
+  // or an on-demand refresh just before painting a stale page.
+  private _lazyPositionStaleFromPageNo: number | null
+  private _lazyPositionRefreshTimer: ReturnType<typeof setTimeout> | null
   private pageNo: number
   private renderCount: number
   private pagePixelRatio: number | null
@@ -372,7 +380,7 @@ export class Draw {
   private selectionObserver: SelectionObserver
   private imageObserver: ImageObserver
   private graffiti: Graffiti
-  private ruler: Ruler
+  public ruler: Ruler
 
   private LETTER_REG: RegExp
   private WORD_LIKE_REG: RegExp
@@ -432,6 +440,10 @@ export class Draw {
     this._mainSurroundCount = null
     this._mainAreaCount = null
     this._skipMainRowCompute = false
+    // PERF: lazy-position state. See IRenderConfig.isLazyPosition (Draw.ts
+    // interface) and the lazy branch in render() / paintPageOnDom guards.
+    this._lazyPositionStaleFromPageNo = null
+    this._lazyPositionRefreshTimer = null
     this.pageNo = 0
     this.renderCount = 0
     this.pagePixelRatio = null
@@ -995,6 +1007,18 @@ export class Draw {
   }
 
   public paintPageOnDom(payload: IDrawPagePayload) {
+    // PERF: lazy-positions guard. If we're about to paint a page whose
+    // positionList entries are stale (left over from before a lazy render
+    // capped its position recompute), flush the deferred refresh first
+    // so we paint with correct coordinates. The fast-path "stale === null"
+    // check is essentially free — the heavy work only runs when needed
+    // and once per stale window.
+    if (
+      this._lazyPositionStaleFromPageNo !== null &&
+      payload.pageNo >= this._lazyPositionStaleFromPageNo
+    ) {
+      this._flushLazyPositionRefresh()
+    }
     this._drawPage(payload)
   }
 
@@ -2008,11 +2032,109 @@ export class Draw {
   }
 
   public setPaperMargin(payload: IMargin) {
+    // PERF: V-ruler margin drag on a 36-page / 28k-word document used to
+    // freeze for ~2.2s on mouseup — `computeRowList` accounts for 93% of
+    // that. Top/bottom margins don't change `innerWidth`, so text wrapping
+    // is unchanged; only `_computePageList` (page assignment + row offsetY)
+    // and `positionList` need refreshing. Reuse the same fast lane
+    // `setPageScale` uses (`_skipMainRowCompute`, see line 5943) when safe.
+    const oldInnerWidth = this.getInnerWidth()
     this.options.margins = payload
-    this.render({
-      isSubmitHistory: false,
-      isSetCursor: false
-    })
+    const newInnerWidth = this.getInnerWidth()
+    const innerWidthChanged = oldInnerWidth !== newInnerWidth
+    // Tables are split inside `computeRowList` (around line 3248) using
+    // `getMainOuterHeight()` which depends on top+bottom margins — skipping
+    // computeRowList for a doc with tables would leave split-points stale.
+    // Collect the index of each logical table's FIRST clone (paging clones
+    // share `pagingId`; single-page tables have no `pagingId`).
+    const tableFirstClones: number[] = []
+    const seenPagingIds = new Set<string>()
+    for (let i = 0; i < this.elementList.length; i++) {
+      const el = this.elementList[i]
+      if (el.type !== ElementType.TABLE) continue
+      const pid = (el as unknown as { pagingId?: string }).pagingId
+      if (pid && seenPagingIds.has(pid)) continue
+      if (pid) seenPagingIds.add(pid)
+      tableFirstClones.push(i)
+    }
+    const hasTable = tableFirstClones.length > 0
+    const canFastPath =
+      !innerWidthChanged &&
+      !hasTable &&
+      this.rowList.length > 0 &&
+      this._dirtyRange === null &&
+      this._prevPageRowCounts !== null &&
+      !this.isPrintMode()
+    if (canFastPath) {
+      this._skipMainRowCompute = true
+      // Force the paint plan to treat ALL pages as shifted. Top/bottom
+      // margin changes shift every page's contentStartY but don't show up
+      // in the row-based per-page signature (which captures row counts /
+      // height sums only). Without this, `_findFirstShiftedPage` returns
+      // `null`, `_collectPagesNeedingPaint` narrows `needed` to just the
+      // dirty page, `effectiveDeferredPages` ends up empty, and
+      // `_lazyRender` early-exits — leaving the visible page's canvas
+      // bitmap stale even though pageRowList was correctly updated.
+      this._prevPageLayoutSignatures = []
+      try {
+        this.render({ isSubmitHistory: false, isSetCursor: false })
+      } finally {
+        this._skipMainRowCompute = false
+      }
+      return
+    }
+    // Per-table-pass path: innerWidth unchanged but tables present.
+    // Process each table in its own render pass, reverse order. Each pass
+    // only needs to re-evaluate ONE table's split decisions; inter-table
+    // text doesn't depend on top/bottom margins so convergence engages
+    // immediately past the table being processed.
+    // Reverse order keeps earlier-table indices stable when later tables
+    // splice their paging clones (splice only shifts elements AFTER).
+    // Compared to a single dirty range `[firstTableIdx, lastTableIdx]`,
+    // this avoids reprocessing the text between tables (observed at
+    // 803 rows / 661ms on a 28k-word / 2-table doc).
+    const canPerTableDirty =
+      !innerWidthChanged &&
+      hasTable &&
+      this.rowList.length > 0 &&
+      this._dirtyRange === null &&
+      this._prevPageRowCounts !== null &&
+      !this.isPrintMode()
+    if (canPerTableDirty) {
+      for (let k = tableFirstClones.length - 1; k >= 0; k--) {
+        const idx = tableFirstClones[k]
+        this.markDirty(idx, idx)
+        // See comment in fast-path branch: force firstShiftedPage=0 so
+        // the paint plan keeps visible pages in `needed`. Clearing before
+        // EACH render is necessary because each render writes new sigs.
+        this._prevPageLayoutSignatures = []
+        this.render({ isSubmitHistory: false, isSetCursor: false })
+      }
+      // Each per-table render uses `resumeFrom` + `computePositionListIncremental`,
+      // which only refreshes positions from the resume point onward. The PREFIX
+      // before each table keeps stale `positionList` entries (x,y from OLD
+      // margins). Since the painter reads element coordinates from positionList
+      // (Draw.ts:4549-4554), pages before the first table — i.e. the visible
+      // top of the doc — render at the OLD top-margin Y, leaving content
+      // visually unshifted (and overlapping on undo).
+      //
+      // Run one extra fast-lane render to call the FULL computePositionList
+      // (`_skipMainRowCompute` branch at Draw.ts:5943 calls
+      // `this.position.computePositionList()` without an `incremental` flag),
+      // refreshing every page's positions in one pass. Cheap: ~30-50ms
+      // because the row list is already correct from the loop above.
+      this._skipMainRowCompute = true
+      this._prevPageLayoutSignatures = []
+      try {
+        this.render({ isSubmitHistory: false, isSetCursor: false })
+      } finally {
+        this._skipMainRowCompute = false
+      }
+      return
+    }
+    // Slow lane: innerWidth changed — must re-wrap from scratch.
+    this.markDirty(0, Math.max(0, this.getOriginalElementList().length - 1))
+    this.render({ isSubmitHistory: false, isSetCursor: false })
   }
 
   public getOriginValue(
@@ -5482,7 +5604,17 @@ export class Draw {
     if (!this.getIsPagingMode()) return null
     if (this.options.pagePaintStrategy === 'full') return null
     if (this.visiblePageNoList.length === 0) return null
-    if (this._prevPageLayoutSignatures === null) return null
+    // 首次渲染或 decoration-only 路径未落盘签名时，fallback 到仅同步可见
+    // 页 + overscan——而非 null（全量同步），避免滚动时 35 页全部同步绘制。
+    if (this._prevPageLayoutSignatures === null) {
+      const pageCount = this.pageRowList.length
+      const syncPages = this._collectVisibleSyncPages(pageCount)
+      const deferredPages = new Set<number>()
+      for (let i = 0; i < pageCount; i++) {
+        if (!syncPages.has(i)) deferredPages.add(i)
+      }
+      return { firstShiftedPage: null, syncPages, deferredPages }
+    }
     const pageCount = this.pageRowList.length
     const syncPages = this._collectVisibleSyncPages(pageCount)
     const curSignatures = this._getPageLayoutSignatures()
@@ -5530,11 +5662,54 @@ export class Draw {
         deferredPages.add(i)
       }
     }
+    // PERF-PLAN §2.9 safe-net：无论 shifted/dirty 区间多大，同步绘制
+    // 仅限可见页 + overscan + 被标记为 dirty 的页。其余始终延后。
+    // 避免滚动等高频操作中 _dirtyRange 意外宽泛时同步 35 页导致 >2s 卡顿。
+    const visibleSet = this._collectVisibleSyncPages(pageCount)
+    for (const p of syncPages) {
+      if (!visibleSet.has(p)) {
+        syncPages.delete(p)
+        deferredPages.add(p)
+      }
+    }
     return {
       firstShiftedPage,
       syncPages,
       deferredPages
     }
+  }
+
+  /**
+   * PERF: schedule a deferred full computePositionList to refresh the stale
+   * tail produced by a lazy-position render. Runs ~100ms after the trigger
+   * — long enough that the user's mouseup feels instant, short enough that
+   * a follow-up scroll usually finds positions already fresh. If the user
+   * scrolls to a stale page before this fires, `_lazyRender`'s observer
+   * (and the `paintPageOnDom` guard) calls `_flushLazyPositionRefresh`
+   * synchronously to ensure correct paint.
+   */
+  private _scheduleLazyPositionRefresh() {
+    if (this._lazyPositionRefreshTimer !== null) return
+    this._lazyPositionRefreshTimer = setTimeout(() => {
+      this._lazyPositionRefreshTimer = null
+      this._flushLazyPositionRefresh()
+    }, 100)
+  }
+
+  /**
+   * Force-flush any pending lazy-position refresh: run a full
+   * computePositionList and clear the stale marker. Cheap on a doc whose
+   * positions are already current (no-op) since position.computePositionList
+   * just rewrites the list — but we only get here when stale data exists.
+   */
+  private _flushLazyPositionRefresh() {
+    if (this._lazyPositionStaleFromPageNo === null) return
+    if (this._lazyPositionRefreshTimer !== null) {
+      clearTimeout(this._lazyPositionRefreshTimer)
+      this._lazyPositionRefreshTimer = null
+    }
+    this.position.computePositionList()
+    this._lazyPositionStaleFromPageNo = null
   }
 
   private _getMainIndexPageNo(index: number): number | null {
@@ -5762,7 +5937,12 @@ export class Draw {
       isDecorationOnly:
         a.isDecorationOnly === true && b.isDecorationOnly === true
           ? true
-          : undefined
+          : undefined,
+      // isLazyPosition merges as last-write-wins — a render that opts out
+      // shouldn't be silently kept in lazy mode just because an earlier
+      // coalesced payload requested it.
+      isLazyPosition:
+        b.isLazyPosition !== undefined ? b.isLazyPosition : a.isLazyPosition
     }
     // remoteDirtyRange：取区间并集
     if (a.remoteDirtyRange || b.remoteDirtyRange) {
@@ -5813,7 +5993,8 @@ export class Draw {
       isSourceHistory = false,
       isFirstRender = false,
       isTextInput = false,
-      isDecorationOnly = false
+      isDecorationOnly = false,
+      isLazyPosition = false
     } = payload || {}
     let { curIndex } = payload || {}
     const innerWidth = this.getInnerWidth()
@@ -5866,6 +6047,10 @@ export class Draw {
       // setCursor / history 都不应在 decoration-only 路径上跑——decoration 不
       // 改变光标位置（光标位置由 selection drag 期间另行 setRange 触发）。
       // history 同理——选区拖拽不需要进入 undo stack。
+      // 仍需写入 _prevPage* 签名，否则下次全量 render 时
+      // _buildPagePaintPlan 因签名缺失倒退到全页面同步。
+      this._prevPageRowCounts = this.pageRowList.map(rl => rl.length)
+      this._prevPageLayoutSignatures = this._getPageLayoutSignatures()
       return
     }
     // 计算文档信息
@@ -5930,6 +6115,12 @@ export class Draw {
         this.position.setFloatPositionList([])
         this.pageRowList = this._computePageList()
         this.position.computePositionList()
+        // Full position recompute — any pending lazy-stale tail is now fresh.
+        this._lazyPositionStaleFromPageNo = null
+        if (this._lazyPositionRefreshTimer !== null) {
+          clearTimeout(this._lazyPositionRefreshTimer)
+          this._lazyPositionRefreshTimer = null
+        }
         this.area.compute()
         if (!this.isPrintMode()) {
           const searchKeyword = this.search.getSearchKeyword()
@@ -6174,21 +6365,69 @@ export class Draw {
           const convergedReuse = paginationStable
             ? convergedReuseInfo
             : (stablePageConvergedReuse ?? undefined)
+          // PERF: lazy-positions hint. When the caller passes
+          // `isLazyPosition: true`, cap position recomputation at the
+          // visible window (+ overscan) and at the dirty zone's own page —
+          // both must be inside the processed range or the visible / dirty
+          // areas would render with stale coords. Off-screen pages keep
+          // their previous-frame entries and are refreshed lazily.
+          // Mutually exclusive with convergedReuse — the lazy tail restore
+          // doesn't honor `deltaElems` rewrites, so if the caller wants
+          // convergence reuse, lazy mode is bypassed.
+          let lazyMaxPageNo: number | undefined = undefined
+          if (isLazyPosition && convergedReuse === undefined) {
+            const overscan = 2
+            const visibleMax =
+              this.visiblePageNoList.length > 0
+                ? Math.max(...this.visiblePageNoList)
+                : 0
+            // Locate the dirty range's page in the freshly-built pageRowList.
+            let cumulativeRows = 0
+            let dirtyPageNo = 0
+            const targetRow = resumeFrom.prefixRowList.length
+            for (let p = 0; p < this.pageRowList.length; p++) {
+              cumulativeRows += this.pageRowList[p].length
+              if (cumulativeRows > targetRow) {
+                dirtyPageNo = p
+                break
+              }
+            }
+            lazyMaxPageNo = Math.min(
+              this.pageRowList.length - 1,
+              Math.max(visibleMax, dirtyPageNo) + overscan
+            )
+          }
+          let lazyResult: { stalePositionsFromElementIndex: number | null } = {
+            stalePositionsFromElementIndex: null
+          }
           if (lastPrefixMutated) {
-            this.position.computePositionListIncremental({
+            lazyResult = this.position.computePositionListIncremental({
               fromRowGlobalIndex: resumeFrom.prefixRowList.length - 1,
               fromElementIndex: lastPrefixRow.startIndex,
-              convergedReuse: convergedReuse ?? undefined
+              convergedReuse: convergedReuse ?? undefined,
+              maxPageNo: lazyMaxPageNo
             })
           } else {
-            this.position.computePositionListIncremental({
+            lazyResult = this.position.computePositionListIncremental({
               fromRowGlobalIndex: resumeFrom.prefixRowList.length,
               fromElementIndex: resumeFrom.startElementIndex,
-              convergedReuse: convergedReuse ?? undefined
+              convergedReuse: convergedReuse ?? undefined,
+              maxPageNo: lazyMaxPageNo
             })
+          }
+          if (
+            lazyResult.stalePositionsFromElementIndex !== null &&
+            lazyMaxPageNo !== undefined
+          ) {
+            // Stale tail exists. Stale-from-page = first page past the
+            // lazy cap. _lazyRender's observer + scheduled refresh below
+            // bring everything back to fresh before the user notices.
+            this._lazyPositionStaleFromPageNo = lazyMaxPageNo + 1
+            this._scheduleLazyPositionRefresh()
           }
         } else {
           this.position.computePositionList()
+          this._lazyPositionStaleFromPageNo = null
         }
         trace?.mark(
           resumeFrom ? 'computePositionList(incr)' : 'computePositionList(full)'

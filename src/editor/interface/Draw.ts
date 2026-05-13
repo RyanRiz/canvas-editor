@@ -40,6 +40,23 @@ export interface IRenderConfig {
   // 调用方需保证主元素列表未变更——否则视觉将停留在上一帧 base 文本。
   // 仅在 options.pageLayered.enable=true 且未设置 isCompute=true 时生效。
   isDecorationOnly?: boolean
+  /**
+   * PERF: Lazy-positions hint. When true, computePositionListIncremental
+   * stops after processing visible pages (+ overscan) and the dirty page.
+   * Off-screen pages keep their previous-frame `positionList` entries
+   * (stale — wrong coordinates) and are refreshed lazily, either on scroll
+   * via `_lazyRender`'s observer or via a setTimeout-scheduled full pass
+   * shortly after this render returns.
+   *
+   * Use case: H-ruler paragraph-indent drag on a long document. The drag
+   * shifts pagination for every page after the paragraph; computing fresh
+   * positions for all 28k post-paragraph elements is the dominant cost
+   * (~166ms observed). Visible page typically only needs ~3 pages worth.
+   *
+   * Caller is responsible for the dirty zone being well-defined
+   * (markDirty before render). Mutually exclusive with `isDecorationOnly`.
+   */
+  isLazyPosition?: boolean
 }
 
 /**

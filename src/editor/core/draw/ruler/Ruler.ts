@@ -123,6 +123,34 @@ export class Ruler {
   /** Document-level click listener that closes the open menu on outside click.
    *  Lazily attached when a menu opens, detached on close. */
   private menuOutsideClick: ((e: MouseEvent) => void) | null = null
+  /**
+   * Pending rAF id for `_scheduleRender`. We coalesce multiple ruler-affecting
+   * events fired in the same frame (`rangeStyleChange`, `pageScaleChange`, …)
+   * into one paint — on a 34-page doc each pass costs ~70 canvas resizes plus
+   * 70 paints, so even 2 events per frame would noticeably stall scrolling.
+   * `null` means no pending frame; otherwise the rAF callback will clear it.
+   */
+  private pendingRenderFrame: number | null = null
+  /**
+   * Paint-input signature per frame — `_renderNow` skips the per-frame paint
+   * pass entirely when the previous signature matches. Keyed by wrapper (so
+   * detaching a frame lets the entry become unreachable on the next
+   * `_syncFrames`). Inputs that change the signature: page width/height,
+   * scale, dpr, margins, unit, and (for the active page only) the active
+   * paragraph's indent / firstLineIndent / rightIndent / tabStops, plus
+   * table colgroup if in a table.
+   */
+  private framePaintKey = new WeakMap<HTMLDivElement, string>()
+  /**
+   * Last applied canvas-backing dimensions per frame. Reassigning
+   * `canvas.width`/`height` always clears the canvas and reallocates the
+   * pixel buffer — skipping the write when the value is identical is a big
+   * win at scale (35 frames × 2 canvases × 2 dims per `_syncFrames` call).
+   */
+  private frameDims = new WeakMap<
+    HTMLDivElement,
+    { hW: number; hH: number; vW: number; vH: number }
+  >()
 
   constructor(draw: Draw) {
     this.draw = draw
@@ -138,17 +166,22 @@ export class Ruler {
     document.addEventListener('mouseup', this.boundDocMouseUp)
 
     // Re-render the ruler on the events that change what it visualises.
-    // `rangeStyleChange` is the one that fires on every cursor move and on
-    // every selection change — including the indent / shading commands that
-    // pass `isSubmitHistory: false`. It's the single most reliable hook for
-    // keeping the active-paragraph markers in sync with the caret.
+    //  - `rangeStyleChange` — every cursor move / selection change, plus the
+    //    indent / shading commands that pass `isSubmitHistory: false`. The
+    //    single most reliable hook for keeping active-paragraph markers in
+    //    sync with the caret.
+    //  - `visiblePageNoListChange` — Draw fires this when the user scrolls
+    //    (after a 150 ms debounce in ScrollObserver). On large docs the
+    //    initial paint deliberately skips off-screen frames; this hook is
+    //    what lets them get painted on the first scroll that reveals them.
     if (this.eventBus) {
       const events: Array<keyof EventBusMap> = [
         'pageScaleChange',
         'pageSizeChange',
         'contentChange',
         'positionContextChange',
-        'rangeStyleChange'
+        'rangeStyleChange',
+        'visiblePageNoListChange'
       ]
       for (const ev of events) {
         const fn = () => this.render()
@@ -162,14 +195,86 @@ export class Ruler {
 
   // ─── public API ────────────────────────────────────────────────────────
 
-  /** Synchronise per-page frames with the current Draw.pageList and redraw all
-   *  ruler strips. Idempotent — safe to call after every Draw.render(). */
+  /**
+   * Schedule a ruler repaint. **rAF-coalesced** — multiple calls in the same
+   * frame collapse into one paint pass. This is the single most important
+   * cost lever on multi-page docs: ruler-affecting events
+   * (`rangeStyleChange`, `contentChange`, `pageScaleChange`, …) often fire in
+   * bursts (e.g. a typing batch resolves into rangeStyleChange + content
+   * change in the same tick), and without coalescing each one would
+   * synchronously do `_syncFrames` + 2N canvas paints. Public method kept
+   * `render` for backwards compat with internal call sites — actual work
+   * happens in `_renderNow` on the next animation frame.
+   */
   public render() {
     if (this.destroyed) return
     if (this.options.ruler.disabled) return
+    if (this.pendingRenderFrame !== null) return
+    this.pendingRenderFrame = requestAnimationFrame(() => {
+      this.pendingRenderFrame = null
+      if (this.destroyed || this.options.ruler.disabled) return
+      this._renderNow()
+    })
+  }
+
+  /**
+   * Synchronous render path. Called from the rAF callback in `render()` and
+   * also directly from drag-commit paths that want to see the marker move on
+   * the same frame (avoiding a one-frame visual lag between mouseup and the
+   * new marker position).
+   *
+   * Two layers of work-skipping:
+   *
+   *   1. **Visible-page filter** — paint only frames whose `pageNo` is in
+   *      Draw's current visible-page list (plus the active page, which the
+   *      caret pins regardless of viewport). On a 34-page document with one
+   *      or two visible pages, this turns a 35-frame paint loop into a
+   *      2-frame loop. Off-screen frames are deferred by clearing their
+   *      paint-key cache entry so they DO repaint the moment they become
+   *      visible (`visiblePageNoListChange` is also wired to `render`).
+   *
+   *   2. **Paint-key cache** — even among visible frames, skip the per-
+   *      frame paint when none of its inputs changed since last render. On
+   *      cursor moves within the same page, only the active frame's key
+   *      changes; the others hit the cache and exit early.
+   *
+   * The first-render guard (`framePaintKey.size === 0`) ensures the very
+   * first render after the editor mounts paints ALL frames, not just the
+   * ones the visible-page list happens to know about (ScrollObserver runs
+   * with a setTimeout, so the visible list is empty on the synchronous
+   * first paint).
+   */
+  private _renderNow() {
     this.dpr = this.draw.getPagePixelRatio()
     this._syncFrames()
+    const visiblePages = this.draw.getVisiblePageNoList()
+    const activePage = this.draw.getPageNo()
+    // Only filter to visible pages if the list has been populated. On first
+    // render ScrollObserver hasn't fired yet, so the list is empty — we
+    // paint all frames in that case (initial paint pays for all visible
+    // pages up to viewport height; off-screen pages still skip via the
+    // paint-key cache once `visiblePageNoListChange` fires).
+    const filterToVisible = visiblePages.length > 0
+    const visible = filterToVisible ? new Set(visiblePages) : null
     for (const frame of this.frames) {
+      if (
+        visible &&
+        !visible.has(frame.pageNo) &&
+        frame.pageNo !== activePage
+      ) {
+        // Off-screen and not the active page — defer the paint by clearing
+        // the cache entry so the next render (typically triggered by
+        // `visiblePageNoListChange` on scroll) will repaint this frame.
+        // Note: we do NOT clear the canvas — its last painted state stays
+        // until the canvas is next overwritten. Off-screen content is
+        // invisible anyway and any indent/tab-stop marker is correct as
+        // long as the source paragraph didn't change.
+        this.framePaintKey.delete(frame.wrapper)
+        continue
+      }
+      const key = this._computePaintKey(frame)
+      if (this.framePaintKey.get(frame.wrapper) === key) continue
+      this.framePaintKey.set(frame.wrapper, key)
       this._paintHorizontal(frame)
       this._paintVertical(frame)
     }
@@ -178,6 +283,10 @@ export class Ruler {
   public destroy() {
     if (this.destroyed) return
     this.destroyed = true
+    if (this.pendingRenderFrame !== null) {
+      cancelAnimationFrame(this.pendingRenderFrame)
+      this.pendingRenderFrame = null
+    }
     this._closeContextMenu()
     document.removeEventListener('mousemove', this.boundDocMouseMove)
     document.removeEventListener('mouseup', this.boundDocMouseUp)
@@ -188,6 +297,83 @@ export class Ruler {
     }
     this.frames = []
     this._restoreContainerSpacing()
+  }
+
+  /**
+   * Build a paint-input signature for one page frame. The signature must
+   * include every value the paint path reads — change anything and the
+   * skip-on-equal logic in `_renderNow` would let a stale frame stay
+   * onscreen.
+   *
+   * Active-page-only inputs (indents, tabStops, table colgroup) are folded
+   * in only when the frame IS the active page; for inactive pages those
+   * inputs are irrelevant to the paint output, so omitting them lets
+   * inactive frames hit the cache as the caret hops around the active page.
+   */
+  private _computePaintKey(f: PageFrame): string {
+    const o = this.options
+    const m = this.draw.getMargins()
+    const isActive = f.pageNo === this.draw.getPageNo()
+    let suffix = ''
+    if (isActive) {
+      const ind = this._getActiveIndents()
+      const tabs = this._getActiveTabStops()
+      const tabHash = tabs.map(t => `${t.position}:${t.type}`).join(',')
+      const isTable = this.draw.getPosition().getPositionContext().isTable
+      let colHash = ''
+      if (isTable) {
+        const info = this._getActiveTableColInfo()
+        if (info) colHash = info.colgroup.join(',')
+      }
+      suffix =
+        '|' +
+        [
+          ind?.indent ?? 0,
+          ind?.firstLineIndent ?? 0,
+          ind?.rightIndent ?? 0,
+          tabHash,
+          isTable ? 1 : 0,
+          colHash
+        ].join('|')
+    }
+    return (
+      [
+        f.pageNo,
+        this.draw.getWidth(),
+        this.draw.getHeight(),
+        m[0],
+        m[1],
+        m[2],
+        m[3],
+        o.scale,
+        this.dpr,
+        o.ruler.unit,
+        isActive ? 1 : 0
+      ].join(',') + suffix
+    )
+  }
+
+  /** Show or hide the ruler without destroying it. Idempotent.
+   *  Pairs with `isVisible()` for external toggle buttons. */
+  public setVisible(visible: boolean) {
+    if (this.destroyed) return
+    if (visible === !this.options.ruler.disabled) return
+    if (visible) {
+      this.options.ruler.disabled = false
+      this._applyContainerSpacing()
+      this.render()
+    } else {
+      this._closeContextMenu()
+      for (const f of this.frames) this._detachFrame(f)
+      this.frames = []
+      this._restoreContainerSpacing()
+      this.options.ruler.disabled = true
+    }
+  }
+
+  /** Returns true when the ruler is currently visible. */
+  public isVisible(): boolean {
+    return !this.options.ruler.disabled && !this.destroyed
   }
 
   // ─── DOM lifecycle ─────────────────────────────────────────────────────
@@ -371,9 +557,16 @@ export class Ruler {
     // Tag the wrapper with its page index so `_frameFor` can resolve back to
     // the right PageFrame regardless of which inner element the event hit.
     wrapper.dataset.rulerPageIndex = String(pageNo)
-    wrapper.appendChild(corner)
-    wrapper.appendChild(hRuler)
-    wrapper.appendChild(vRuler)
+    // Batch the three child appends through a DocumentFragment. Each direct
+    // appendChild on a live DOM node can trigger style / layout invalidation
+    // for the subtree; pumping them through a fragment collapses three
+    // such hits per frame into one. With 35 wrappers that's the difference
+    // between 105 layout-invalidations and 35 on the initial render.
+    const fragment = document.createDocumentFragment()
+    fragment.appendChild(corner)
+    fragment.appendChild(hRuler)
+    fragment.appendChild(vRuler)
+    wrapper.appendChild(fragment)
 
     return {
       pageNo,
@@ -395,26 +588,66 @@ export class Ruler {
     delete f.wrapper.dataset.rulerPageIndex
   }
 
-  /** Update strip & canvas sizes to follow current page size, zoom, and DPR. */
+  /**
+   * Update strip & canvas sizes to follow current page size, zoom, and DPR.
+   *
+   * Important: assigning `canvas.width` or `canvas.height` ALWAYS clears the
+   * canvas and reallocates the GPU-backed pixel buffer, regardless of whether
+   * the new value differs from the old. For a 34-page document this method
+   * runs 35× per `_renderNow`, and an unconditional write was responsible for
+   * 70 canvas-clears per ruler render. We cache the last applied dimensions
+   * per wrapper and skip the writes when they match — common case during
+   * cursor moves where neither page size, zoom, nor DPR have changed.
+   *
+   * The same logic applies to inline style.width/height writes (cheaper but
+   * still forces a style recalc); the dim-cache short-circuit covers them
+   * too as a side effect of the early return.
+   */
   private _sizeFrame(f: PageFrame) {
     const pageW = this.draw.getWidth()
     const pageH = this.draw.getHeight()
     const s = this.size
+    const dpr = this.dpr || 1
+    const hW = Math.round(pageW * dpr)
+    const hH = Math.round(s * dpr)
+    const vW = Math.round(s * dpr)
+    const vH = Math.round(pageH * dpr)
+
+    const prev = this.frameDims.get(f.wrapper)
+    if (
+      prev &&
+      prev.hW === hW &&
+      prev.hH === hH &&
+      prev.vW === vW &&
+      prev.vH === vH
+    ) {
+      // Nothing changed since the last sizing pass — every assignment below
+      // would be a no-op for the renderer but a write to a layout-affecting
+      // property; bail out so the browser doesn't redo style recalc/paint
+      // for the strip.
+      return
+    }
 
     f.hRuler.style.width = `${pageW}px`
     f.vRuler.style.height = `${pageH}px`
 
-    const dpr = this.dpr || 1
-    f.hCanvas.width = Math.round(pageW * dpr)
-    f.hCanvas.height = Math.round(s * dpr)
+    f.hCanvas.width = hW
+    f.hCanvas.height = hH
     f.hCanvas.style.width = `${pageW}px`
     f.hCanvas.style.height = `${s}px`
     f.hCanvas.style.display = 'block'
-    f.vCanvas.width = Math.round(s * dpr)
-    f.vCanvas.height = Math.round(pageH * dpr)
+    f.vCanvas.width = vW
+    f.vCanvas.height = vH
     f.vCanvas.style.width = `${s}px`
     f.vCanvas.style.height = `${pageH}px`
     f.vCanvas.style.display = 'block'
+
+    this.frameDims.set(f.wrapper, { hW, hH, vW, vH })
+    // Backing buffer reallocated — invalidate the paint cache so the next
+    // paint pass for this frame actually runs (otherwise `_renderNow` would
+    // see an unchanged paint key and skip painting onto the now-blank
+    // canvas).
+    this.framePaintKey.delete(f.wrapper)
   }
 
   private _frameFor(el: HTMLElement): PageFrame {
@@ -1375,9 +1608,10 @@ export class Ruler {
   private _commitMargin(slot: 0 | 1 | 2 | 3, value: number) {
     const margins = this.options.margins.slice() as [number, number, number, number]
     margins[slot] = value
-    this.options.margins = margins
-    this.draw.markDirty(0, this.draw.getOriginalElementList().length - 1)
-    this.draw.render({ isSetCursor: false, isSubmitHistory: false })
+    // Route through setPaperMargin so top/bottom-only drags hit the
+    // computeRowList-skip fast path (Draw.ts:2010). Left/right drags fall
+    // back to the slow path internally because innerWidth changes.
+    this.draw.setPaperMargin(margins)
   }
 
   private _commitColumnWidth(
