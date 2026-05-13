@@ -529,11 +529,15 @@ export class RangeManager {
     // rowMargin is a row-level property set on the actual cursor element; read it
     // directly from rowIndexElement to avoid the ZERO-anchor skip in getAnchorElement
     // returning the next paragraph's element (which was not updated by the command).
-    const rowMargin = rowIndexElement?.rowMargin ?? curElement.rowMargin ?? this.options.defaultRowMargin
+    const rowMargin =
+      rowIndexElement?.rowMargin ??
+      curElement.rowMargin ??
+      this.options.defaultRowMargin
     const dashArray = curElement.dashArray || []
     const level = curElement.level || null
     const listType = curElement.listType || null
     const listStyle = curElement.listStyle || null
+    const listBulletChar = curElement.listBulletChar || null
     const textDecoration = underline ? curElement.textDecoration || null : null
     // 菜单
     const painter = !!this.draw.getPainterStyle()
@@ -587,6 +591,7 @@ export class RangeManager {
       level,
       listType,
       listStyle,
+      listBulletChar,
       groupIds,
       textDecoration,
       extension,

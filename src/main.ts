@@ -31,6 +31,14 @@ import { Dialog } from './components/dialog/Dialog'
 import { formatPrismToken } from './utils/prism'
 import { Signature } from './components/signature/Signature'
 import { debounce, nextTick } from './utils'
+import {
+  buildBulletGridSection,
+  buildBulletListStyle,
+  buildDocumentBulletsSection,
+  highlightSelectedBullet,
+  BULLET_SYMBOLS
+} from './components/listLibrary/bulletLibrary'
+import { openListLibraryDropdown } from './components/listLibrary/listLibraryDropdown'
 
 window.onload = function () {
   const isApple =
@@ -425,19 +433,123 @@ window.onload = function () {
     instance.command.executeSpaceAfter(Number(li.dataset.spaceAfter!))
   }
 
-  const listDom = document.querySelector<HTMLDivElement>('.menu-item__list')!
-  listDom.title = `列表(${isApple ? '⌘' : 'Ctrl'}+Shift+U)`
-  const listOptionDom = listDom.querySelector<HTMLDivElement>('.options')!
-  listDom.onclick = function () {
-    console.log('list')
-    listOptionDom.classList.toggle('visible')
+  // List Library: split-button entries (bullet / numbered / multilevel).
+  // Click the main icon → apply the last-used style for that family.
+  // Click the caret → open the Word-style library dropdown.
+  const bulletListDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__bullet-list'
+  )!
+  const numberedListDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__numbered-list'
+  )!
+  const multilevelListDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__multilevel-list'
+  )!
+  bulletListDom.title = `项目符号(${isApple ? '⌘' : 'Ctrl'}+Shift+U)`
+  numberedListDom.title = '编号'
+  multilevelListDom.title = '多级列表'
+
+  // Last-used styles per family (Word edge case 5).
+  let lastBulletChar = '●'
+
+  const collectDocumentBulletChars = (): string[] => {
+    const seen = new Set<string>()
+    const walk = (els: IElement[] | undefined): void => {
+      if (!els) return
+      for (const el of els) {
+        if (el.listBulletChar) seen.add(el.listBulletChar)
+        // Recurse into table cells if present.
+        const trList = el.trList
+        if (trList) {
+          for (const tr of trList) {
+            for (const td of tr.tdList) walk(td.value)
+          }
+        }
+      }
+    }
+    walk(instance.command.getValue().data.main)
+    return Array.from(seen).filter(c => !BULLET_SYMBOLS.includes(c))
   }
-  listOptionDom.onclick = function (evt) {
-    const li = evt.target as HTMLLIElement
-    const listType = <ListType>li.dataset.listType || null
-    const listStyle = <ListStyle>(<unknown>li.dataset.listStyle)
-    instance.command.executeList(listType, listStyle)
+
+  const applyBullet = (char: string): void => {
+    lastBulletChar = char
+    instance.command.executeList(ListType.UL, ListStyle.DISC)
+    instance.command.executeListStyle(buildBulletListStyle(char))
   }
+
+  let bulletDropdown: { close: () => void } | null = null
+  const openBulletLibrary = (anchor: HTMLElement): void => {
+    if (bulletDropdown) {
+      bulletDropdown.close()
+      bulletDropdown = null
+      return
+    }
+    const gridSection = buildBulletGridSection(char => {
+      applyBullet(char)
+      bulletDropdown?.close()
+    })
+    const docSection = buildDocumentBulletsSection(
+      collectDocumentBulletChars(),
+      char => {
+        applyBullet(char)
+        bulletDropdown?.close()
+      }
+    )
+    const activeChar = currentBulletChar()
+    highlightSelectedBullet(gridSection.tiles, activeChar)
+    if (docSection) highlightSelectedBullet(docSection.tiles, activeChar)
+    const sections = [
+      { body: gridSection.body },
+      ...(docSection
+        ? [{ header: 'Document Bullets', body: docSection.body }]
+        : [])
+    ]
+    const handle = openListLibraryDropdown({
+      anchor,
+      title: 'Bullet Library',
+      sections,
+      defineNewLabel: 'Define New Bullet…',
+      onDefineNew: () => {
+        // Placeholder until Prompt 4 dialog ships.
+        alert('Define New Bullet — coming soon')
+        bulletDropdown?.close()
+      },
+      onNone: () => {
+        instance.command.executeList(null)
+      },
+      onClose: () => {
+        bulletDropdown = null
+      }
+    })
+    bulletDropdown = handle
+  }
+
+  // Track current bullet char from rangeStyle (set in the listener below).
+  let activeBulletChar: string | null = null
+  const currentBulletChar = (): string | null => activeBulletChar
+
+  bulletListDom
+    .querySelector<HTMLElement>('.split-main')!
+    .addEventListener('click', () => applyBullet(lastBulletChar))
+  bulletListDom
+    .querySelector<HTMLElement>('.split-caret')!
+    .addEventListener('click', evt => {
+      evt.stopPropagation()
+      openBulletLibrary(evt.currentTarget as HTMLElement)
+    })
+
+  // Slice B/C will wire numbered + multilevel. Until then, the main button
+  // applies the engine's default ordered list so the toolbar stays usable.
+  numberedListDom
+    .querySelector<HTMLElement>('.split-main')!
+    .addEventListener('click', () => {
+      instance.command.executeList(ListType.OL, ListStyle.DECIMAL)
+    })
+  multilevelListDom
+    .querySelector<HTMLElement>('.split-main')!
+    .addEventListener('click', () => {
+      instance.command.executeList(ListType.OL, ListStyle.LEGAL)
+    })
 
   // 4. | 表格 | 图片 | 超链接 | 分割线 | 水印 | 代码块 | 分隔符 | 控件 | 复选框 | LaTeX | 日期选择器
   const tableDom = document.querySelector<HTMLDivElement>('.menu-item__table')!
@@ -2383,23 +2495,21 @@ window.onload = function () {
       titleOptionDom.querySelector('li:first-child')!.classList.add('active')
     }
 
-    // 列表
-    listOptionDom
-      .querySelectorAll<HTMLLIElement>('li')
-      .forEach(li => li.classList.remove('active'))
-    if (payload.listType) {
-      listDom.classList.add('active')
-      const listType = payload.listType
-      const listStyle =
-        payload.listType === ListType.OL ? ListStyle.DECIMAL : payload.listType
-      const curListDom = listOptionDom.querySelector<HTMLLIElement>(
-        `[data-list-type='${listType}'][data-list-style='${listStyle}']`
-      )
-      if (curListDom) {
-        curListDom.classList.add('active')
+    // List Library: drive the three split-button active states from the
+    // caret's current list context. Bullet char tracked separately so the
+    // dropdown can pre-highlight the matching tile when reopened.
+    bulletListDom.classList.remove('active')
+    numberedListDom.classList.remove('active')
+    multilevelListDom.classList.remove('active')
+    activeBulletChar = payload.listBulletChar ?? null
+    if (payload.listType === ListType.UL) {
+      bulletListDom.classList.add('active')
+    } else if (payload.listType === ListType.OL) {
+      if (payload.listStyle === ListStyle.LEGAL) {
+        multilevelListDom.classList.add('active')
+      } else {
+        numberedListDom.classList.add('active')
       }
-    } else {
-      listDom.classList.remove('active')
     }
 
     // 批注
