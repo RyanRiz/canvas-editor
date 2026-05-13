@@ -58,8 +58,9 @@ describe('列表实时重编号 (Word parity)', () => {
     expect(glyphAt(e1, idx[3])).toBe('4.')
     expect(glyphAt(e1, idx[4])).toBe('5.')
 
-    // Convert item 3 (C) to bullet
-    cmd.executeSetRange(idx[2], idx[2])
+    // Select only item 3 (C) as a range — NOT collapsed cursor
+    // Word parity: range selection only affects highlighted paragraphs
+    cmd.executeSetRange(idx[2], idx[2] + 1)
     cmd.executeList(ListType.UL)
 
     const e2 = cmd.getElementList()
@@ -233,10 +234,10 @@ describe('列表实时重编号 (Word parity)', () => {
     })
     setOrderedList(cmd)
 
-    // Convert last item (C) to UL
+    // Select only last item (C) as a RANGE — not collapsed cursor
     const e1 = cmd.getElementList()
     const idx = getListStartIndices(e1)
-    cmd.executeSetRange(idx[2], idx[2])
+    cmd.executeSetRange(idx[2], idx[2] + 1)
     cmd.executeList(ListType.UL)
 
     const e2 = cmd.getElementList()
@@ -291,15 +292,16 @@ describe('列表实时重编号 (Word parity)', () => {
 
     const e1 = cmd.getElementList()
     const idx = getListStartIndices(e1)
+    // Select middle item as a RANGE — only that item changes to bullet
     const mid = idx[250]
-
     const t0 = performance.now()
-    cmd.executeSetRange(mid, mid)
+    cmd.executeSetRange(mid, mid + 1)
     cmd.executeList(ListType.UL)
     const dt = performance.now() - t0
 
     const e2 = cmd.getElementList()
     const idx2 = getListStartIndices(e2)
+    // Word parity: range selection only affects the highlighted paragraph
     expect(glyphAt(e2, idx2[249])).toBe('250.')
     expect(glyphAt(e2, idx2[250])).toBe('•')
     expect(glyphAt(e2, idx2[251])).toBe('251.')

@@ -99,9 +99,11 @@ export class ListParticle {
       isSelected: boolean
     }
     const unifyRecords: UnifyRecord[] = []
-    // Selected paragraphs always get rewritten — even when starting from a
-    // plain (no-listId) paragraph, otherwise the toolbar can't add a list at
-    // all. Neighbouring list paragraphs only get their listId unified.
+    const isCollapsed = startIndex === endIndex
+    // When the selection is collapsed (cursor only, no highlight), apply
+    // the list toggle to the ENTIRE contiguous list block that the cursor
+    // sits in — matching Microsoft Word's behaviour. Range selections
+    // only affect the paragraphs that intersect the selection.
     for (const el of changeElementList) {
       unifyRecords.push({
         el,
@@ -122,7 +124,7 @@ export class ListParticle {
         listType: el.listType,
         listStyle: el.listStyle,
         listLevel: el.listLevel,
-        isSelected: false
+        isSelected: isCollapsed
       })
     }
     const applyForward = () => {
@@ -182,10 +184,45 @@ export class ListParticle {
     if (isReadonly) return
     const { startIndex, endIndex } = this.range.getRange()
     if (!~startIndex && !~endIndex) return
-    const changeElementList = this.range
+    let changeElementList = this.range
       .getRangeParagraphElementList()
       ?.filter(el => el.listId)
     if (!changeElementList || !changeElementList.length) return
+    // Word parity: when the selection is collapsed and the cursor sits
+    // inside a list, remove the list from the ENTIRE contiguous block
+    // (same listId), not just the one paragraph the cursor touches.
+    const isCollapsed = startIndex === endIndex
+    let didExpandBlock = false
+    if (isCollapsed && changeElementList[0]?.listId) {
+      const blockListId = changeElementList[0].listId
+      const mainList = this.draw.getElementList()
+      let blockStart = mainList.indexOf(changeElementList[0])
+      while (
+        blockStart > 0 &&
+        mainList[blockStart - 1]?.listId === blockListId
+      ) {
+        blockStart--
+      }
+      let blockEnd = mainList.indexOf(
+        changeElementList[changeElementList.length - 1]
+      )
+      while (
+        blockEnd < mainList.length - 1 &&
+        mainList[blockEnd + 1]?.listId === blockListId
+      ) {
+        blockEnd++
+      }
+      const expanded: IElement[] = []
+      for (let i = blockStart; i <= blockEnd; i++) {
+        if (mainList[i].listId === blockListId) {
+          expanded.push(mainList[i])
+        }
+      }
+      if (expanded.length > changeElementList.length) {
+        changeElementList = expanded
+        didExpandBlock = true
+      }
+    }
     // 如果需要补换行符，走一次性手动 delta（同时捕获元素插入与属性删除）
     const elementList = this.draw.getElementList()
     const endElement = elementList[endIndex]
@@ -251,7 +288,18 @@ export class ListParticle {
         this.draw.render({ curIndex, isSetCursor })
       }
     })
-    this.draw.markDirty(startIndex, endIndex)
+    // Compute dirty range — expand to full block when we broadened scope
+    let dirtyStart = startIndex
+    let dirtyEnd = endIndex
+    if (didExpandBlock && changeElementList.length) {
+      dirtyStart = elementList.indexOf(changeElementList[0])
+      dirtyEnd = elementList.indexOf(
+        changeElementList[changeElementList.length - 1]
+      )
+      if (dirtyStart < 0) dirtyStart = startIndex
+      if (dirtyEnd < 0) dirtyEnd = endIndex
+    }
+    this.draw.markDirty(dirtyStart, dirtyEnd)
     this.draw.cancelScheduledRender()
     this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
