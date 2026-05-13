@@ -160,50 +160,6 @@ export class ListParticle {
       }
     }
     applyForward()
-    // TEMP DEBUG (Word-parity bullet-in-middle bug): dump the contiguous
-    // list span and post-apply state so we can compare against the rendered
-    // glyphs. Remove once the symptom is gone in production.
-    /* eslint-disable no-console */
-    try {
-      const summarize = (el: IElement) =>
-        `${
-          el.value === ZERO ? '[ZERO]' : JSON.stringify(el.value)
-        } id=${el.listId ?? '-'} t=${el.listType ?? '-'} s=${
-          el.listStyle ?? '-'
-        } lvl=${el.listLevel ?? '-'} wrap=${el.listWrap ?? '-'}`
-      console.log(
-        '[CE setList] firstChangeIdx=',
-        firstChangeIdx,
-        'lastChangeIdx=',
-        lastChangeIdx,
-        'spanStart=',
-        spanStart,
-        'spanEnd=',
-        spanEnd,
-        'unifiedListId=',
-        unifiedListId,
-        'listType=',
-        listType,
-        'listStyle=',
-        listStyle
-      )
-      console.log(
-        '[CE setList] span dump:\n' +
-          mainList
-            .slice(spanStart, spanEnd + 1)
-            .map((el, i) => `  [${spanStart + i}] ${summarize(el)}`)
-            .join('\n')
-      )
-      console.log(
-        '[CE setList] changeElementList:\n' +
-          changeElementList
-            .map((el, i) => `  [${i}] ${summarize(el)}`)
-            .join('\n')
-      )
-    } catch {
-      /* ignore */
-    }
-    /* eslint-enable no-console */
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
     this.draw.getHistoryManager().executeDelta({
@@ -216,7 +172,7 @@ export class ListParticle {
         this.draw.render({ curIndex, isSetCursor })
       }
     })
-    this.draw.markDirty(startIndex, endIndex)
+    this.draw.markDirty(spanStart, spanEnd)
     this.draw.cancelScheduledRender()
     this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
