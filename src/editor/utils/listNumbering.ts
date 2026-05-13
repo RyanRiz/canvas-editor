@@ -122,13 +122,24 @@ export function computeListGlyphMap(
   elementList: IElement[]
 ): Map<number, IListGlyphResult> {
   const out = new Map<number, IListGlyphResult>()
-  let curListId: string | undefined
+  // Per-(listId, listType) counters. Buckets the counter so mid-list
+  // interruptions (e.g. one paragraph converted to a different list-type)
+  // don't pollute the surrounding count — and stray leading-ZERO elements
+  // whose listType differs from the rest go into their own bucket instead of
+  // bumping the visible OL counter. Matches Word's "continue across
+  // interruption" behavior.
+  const countersByKey = new Map<string, number[]>()
   let counters: number[] = new Array(LIST_MAX_LEVEL).fill(0)
   for (let i = 0; i < elementList.length; i++) {
     const el = elementList[i]
-    if (el.listId !== curListId) {
-      curListId = el.listId
-      counters = new Array(LIST_MAX_LEVEL).fill(0)
+    if (el.listId) {
+      const key = `${el.listId}|${el.listType ?? ''}`
+      let bucket = countersByKey.get(key)
+      if (!bucket) {
+        bucket = new Array(LIST_MAX_LEVEL).fill(0)
+        countersByKey.set(key, bucket)
+      }
+      counters = bucket
     }
     if (!isListItemStart(el)) continue
     const level = clampLevel(el.listLevel)
