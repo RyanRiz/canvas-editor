@@ -226,6 +226,45 @@ describe('菜单-列表-多级缩进', () => {
       expect(map.get(2)?.glyph).to.eq('2.')
       expect(map.get(4)?.glyph).to.eq('3.')
     })
+
+    // Word parity: when a middle OL item is converted to a bullet, the
+    // numbered sequence around the bullet must keep counting (1,2,3,•,4,5)
+    // — both right after the change (different listId for the bullet) and
+    // after a save/reload round-trip (same listId for everything, since
+    // setList now reuses adjacent listId).
+    it('mid-list bullet keeps surrounding OL numbering continuous (Word parity)', () => {
+      const split = [
+        ...makeListItem('x', 1, ListType.OL, ListStyle.DECIMAL, 'a'),
+        ...makeListItem('x', 1, ListType.OL, ListStyle.DECIMAL, 'b'),
+        ...makeListItem('x', 1, ListType.OL, ListStyle.DECIMAL, 'c'),
+        ...makeListItem('y', 1, ListType.UL, ListStyle.DISC, 'd'),
+        ...makeListItem('x', 1, ListType.OL, ListStyle.DECIMAL, 'e'),
+        ...makeListItem('x', 1, ListType.OL, ListStyle.DECIMAL, 'f')
+      ]
+      const splitMap = computeListGlyphMap(split)
+      expect(splitMap.get(0)?.glyph).to.eq('1.')
+      expect(splitMap.get(2)?.glyph).to.eq('2.')
+      expect(splitMap.get(4)?.glyph).to.eq('3.')
+      expect(splitMap.get(6)?.glyph).to.eq('•')
+      expect(splitMap.get(8)?.glyph).to.eq('4.')
+      expect(splitMap.get(10)?.glyph).to.eq('5.')
+
+      const shared = [
+        ...makeListItem('x', 1, ListType.OL, ListStyle.DECIMAL, 'a'),
+        ...makeListItem('x', 1, ListType.OL, ListStyle.DECIMAL, 'b'),
+        ...makeListItem('x', 1, ListType.OL, ListStyle.DECIMAL, 'c'),
+        ...makeListItem('x', 1, ListType.UL, ListStyle.DISC, 'd'),
+        ...makeListItem('x', 1, ListType.OL, ListStyle.DECIMAL, 'e'),
+        ...makeListItem('x', 1, ListType.OL, ListStyle.DECIMAL, 'f')
+      ]
+      const sharedMap = computeListGlyphMap(shared)
+      expect(sharedMap.get(0)?.glyph).to.eq('1.')
+      expect(sharedMap.get(2)?.glyph).to.eq('2.')
+      expect(sharedMap.get(4)?.glyph).to.eq('3.')
+      expect(sharedMap.get(6)?.glyph).to.eq('•')
+      expect(sharedMap.get(8)?.glyph).to.eq('4.')
+      expect(sharedMap.get(10)?.glyph).to.eq('5.')
+    })
   })
 
   describe('state preservation through indent', () => {

@@ -51,38 +51,168 @@ export class ListParticle {
       this.unsetList()
       return
     }
-    const listId = getUUID()
-    // 捕获旧值供 delta 历史逆操作
-    const oldValues = changeElementList.map(el => ({
-      el,
-      listId: el.listId,
-      listType: el.listType,
-      listStyle: el.listStyle
-    }))
-    changeElementList.forEach(el => {
-      el.listId = listId
-      el.listType = listType
-      el.listStyle = listStyle
-      el.listLevel = 1
-    })
+    // Word parity: when the selected paragraph(s) already belong to a list,
+    // keep the existing numbering continuous across an interrupted block
+    // (e.g. OL→bullet→OL stays 1,2,3,•,4,5) even if legacy data fragmented
+    // the surrounding list into several listIds.
+    //
+    // Walk the contiguous list span around the selection (every neighbouring
+    // paragraph that already has a listId) and unify everyone under one
+    // listId. Then apply the new type/style only to the selected paragraphs.
+    // After this, the whole logical list shares a single listId so the
+    // bucket counter in computeListGlyphMap keeps counting across the
+    // interruption.
+    const mainList = this.draw.getElementList()
+    const firstChangeIdx = mainList.indexOf(changeElementList[0])
+    const lastChangeIdx = mainList.indexOf(
+      changeElementList[changeElementList.length - 1]
+    )
+    // Walk outward from the selection only through neighbours that share the
+    // SAME listId as the selected paragraph. Walking through any-listId
+    // sweeps in unrelated list paragraphs (e.g. an empty list-paragraph at
+    // the document top), which then pollute the counter and make numbering
+    // skip ahead. Same-listId matches the "this is one logical list" intent.
+    const seedListId = changeElementList.find(el => el.listId)?.listId
+    let spanStart = firstChangeIdx
+    if (seedListId) {
+      while (spanStart > 0 && mainList[spanStart - 1]?.listId === seedListId) {
+        spanStart--
+      }
+    }
+    let spanEnd = lastChangeIdx
+    if (seedListId) {
+      while (
+        spanEnd < mainList.length - 1 &&
+        mainList[spanEnd + 1]?.listId === seedListId
+      ) {
+        spanEnd++
+      }
+    }
+    const unifiedListId = seedListId || getUUID()
+    const changeSet = new Set(changeElementList)
+    type UnifyRecord = {
+      el: IElement
+      listId: string | undefined
+      listType: ListType | undefined
+      listStyle: ListStyle | undefined
+      listLevel: number | undefined
+      isSelected: boolean
+    }
+    const unifyRecords: UnifyRecord[] = []
+    // Selected paragraphs always get rewritten — even when starting from a
+    // plain (no-listId) paragraph, otherwise the toolbar can't add a list at
+    // all. Neighbouring list paragraphs only get their listId unified.
+    for (const el of changeElementList) {
+      unifyRecords.push({
+        el,
+        listId: el.listId,
+        listType: el.listType,
+        listStyle: el.listStyle,
+        listLevel: el.listLevel,
+        isSelected: true
+      })
+    }
+    for (let p = spanStart; p <= spanEnd && p < mainList.length; p++) {
+      const el = mainList[p]
+      if (!el.listId) continue
+      if (changeSet.has(el)) continue
+      unifyRecords.push({
+        el,
+        listId: el.listId,
+        listType: el.listType,
+        listStyle: el.listStyle,
+        listLevel: el.listLevel,
+        isSelected: false
+      })
+    }
+    const applyForward = () => {
+      for (const rec of unifyRecords) {
+        rec.el.listId = unifiedListId
+        if (rec.isSelected) {
+          rec.el.listType = listType
+          rec.el.listStyle = listStyle
+          rec.el.listLevel = 1
+        }
+      }
+    }
+    const applyBackward = () => {
+      for (const rec of unifyRecords) {
+        if (rec.listId === undefined) {
+          delete rec.el.listId
+        } else {
+          rec.el.listId = rec.listId
+        }
+        if (rec.listType === undefined) {
+          delete rec.el.listType
+        } else {
+          rec.el.listType = rec.listType
+        }
+        if (rec.listStyle === undefined) {
+          delete rec.el.listStyle
+        } else {
+          rec.el.listStyle = rec.listStyle
+        }
+        if (rec.listLevel === undefined) {
+          delete rec.el.listLevel
+        } else {
+          rec.el.listLevel = rec.listLevel
+        }
+      }
+    }
+    applyForward()
+    // TEMP DEBUG (Word-parity bullet-in-middle bug): dump the contiguous
+    // list span and post-apply state so we can compare against the rendered
+    // glyphs. Remove once the symptom is gone in production.
+    /* eslint-disable no-console */
+    try {
+      const summarize = (el: IElement) =>
+        `${
+          el.value === ZERO ? '[ZERO]' : JSON.stringify(el.value)
+        } id=${el.listId ?? '-'} t=${el.listType ?? '-'} s=${
+          el.listStyle ?? '-'
+        } lvl=${el.listLevel ?? '-'} wrap=${el.listWrap ?? '-'}`
+      console.log(
+        '[CE setList] firstChangeIdx=',
+        firstChangeIdx,
+        'lastChangeIdx=',
+        lastChangeIdx,
+        'spanStart=',
+        spanStart,
+        'spanEnd=',
+        spanEnd,
+        'unifiedListId=',
+        unifiedListId,
+        'listType=',
+        listType,
+        'listStyle=',
+        listStyle
+      )
+      console.log(
+        '[CE setList] span dump:\n' +
+          mainList
+            .slice(spanStart, spanEnd + 1)
+            .map((el, i) => `  [${spanStart + i}] ${summarize(el)}`)
+            .join('\n')
+      )
+      console.log(
+        '[CE setList] changeElementList:\n' +
+          changeElementList
+            .map((el, i) => `  [${i}] ${summarize(el)}`)
+            .join('\n')
+      )
+    } catch {
+      /* ignore */
+    }
+    /* eslint-enable no-console */
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
-    // 推入轻量 delta 历史
     this.draw.getHistoryManager().executeDelta({
       applyForward: () => {
-        for (const item of oldValues) {
-          item.el.listId = listId
-          item.el.listType = listType
-          item.el.listStyle = listStyle
-        }
+        applyForward()
         this.draw.render({ curIndex, isSetCursor })
       },
       applyBackward: () => {
-        for (const item of oldValues) {
-          item.el.listId = item.listId
-          item.el.listType = item.listType
-          item.el.listStyle = item.listStyle
-        }
+        applyBackward()
         this.draw.render({ curIndex, isSetCursor })
       }
     })

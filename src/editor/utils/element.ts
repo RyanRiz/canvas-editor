@@ -753,7 +753,16 @@ export function zipElementList(
         const valueList: IElement[] = []
         while (e < elementList.length) {
           const listE = elementList[e]
-          if (listId !== listE.listId) {
+          // Word parity: break the LIST group not just on listId change but
+          // also on listType / listStyle change, so a single logical list
+          // with a bullet break in the middle survives the
+          // zip → save → reload round-trip with the per-segment type/style
+          // intact.
+          if (
+            listId !== listE.listId ||
+            listType !== listE.listType ||
+            listStyle !== listE.listStyle
+          ) {
             e--
             break
           }
@@ -1861,16 +1870,19 @@ export function getSlimCloneElementList(elementList: IElement[]) {
   // still read as fresh — causing the next render's cell cache branch
   // (Draw.ts: canReuseCell) to reuse the metric-less rowList and crash in
   // computePageRowPosition at "x + metrics.width".
-  return deepCloneOmitKeys<IElement[], IRowElement & Partial<ITd>>(elementList, [
-    'metrics',
-    'style',
-    'rowList',
-    'positionList',
-    '_dirty',
-    '_cacheInnerWidth',
-    '_cacheScale',
-    '_cacheIsPagingMode'
-  ])
+  return deepCloneOmitKeys<IElement[], IRowElement & Partial<ITd>>(
+    elementList,
+    [
+      'metrics',
+      'style',
+      'rowList',
+      'positionList',
+      '_dirty',
+      '_cacheInnerWidth',
+      '_cacheScale',
+      '_cacheIsPagingMode'
+    ]
+  )
 }
 
 export function getIsBlockElement(element?: IElement) {
