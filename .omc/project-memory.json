@@ -1,0 +1,275 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1778566418957,
+  "projectRoot": "/var/www/html/canvas-editor",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": ">=24.13.1",
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
+      {
+        "name": "TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "cypress",
+        "version": "15.14.2",
+        "category": "testing"
+      },
+      {
+        "name": "vite",
+        "version": "8.0.10",
+        "category": "build"
+      },
+      {
+        "name": "vitest",
+        "version": "4.1.5",
+        "category": "testing"
+      },
+      {
+        "name": "vue",
+        "version": "3.5.33",
+        "category": "frontend"
+      }
+    ],
+    "packageManager": "pnpm",
+    "runtime": "Node.js 24.13.1"
+  },
+  "build": {
+    "buildCommand": "rtk tsc --noEmit 2>&1 | head -40",
+    "testCommand": null,
+    "lintCommand": "pnpm lint",
+    "devCommand": "pnpm dev",
+    "scripts": {
+      "dev": "vite",
+      "lib": "eslint . && tsc && vitest run && vite build --mode lib",
+      "build": "eslint . && tsc && vitest run && vite build --mode app",
+      "serve": "vite preview",
+      "lint": "eslint . && tsc --noEmit && vitest run",
+      "cypress:open": "cypress open",
+      "cypress:run": "cypress run",
+      "test:unit": "vitest run",
+      "test:unit:watch": "vitest",
+      "test:coverage": "vitest run --coverage",
+      "type:check": "tsc --noEmit",
+      "docs:dev": "vitepress dev docs",
+      "docs:build": "vitepress build docs",
+      "docs:preview": "vitepress preview docs",
+      "postinstall": "simple-git-hooks",
+      "pre-release": "node scripts/pre-release.js"
+    }
+  },
+  "conventions": {
+    "namingStyle": "camelCase",
+    "importStyle": "ES modules",
+    "testPattern": "*.test.ts",
+    "fileOrganization": "type-based"
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "scripts",
+      "src",
+      "tests"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "cypress": {
+      "path": "cypress",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1778566418943,
+      "keyFiles": [
+        "global.d.ts",
+        "tsconfig.json"
+      ]
+    },
+    "dist": {
+      "path": "dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 4,
+      "lastAccessed": 1778566418945,
+      "keyFiles": [
+        "canvas-editor.js",
+        "canvas-editor.js.map",
+        "canvas-editor.umd.cjs",
+        "canvas-editor.umd.cjs.map"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 1,
+      "lastAccessed": 1778566418946,
+      "keyFiles": [
+        "index.md"
+      ]
+    },
+    "scripts": {
+      "path": "scripts",
+      "purpose": "Build/utility scripts",
+      "fileCount": 2,
+      "lastAccessed": 1778566418951,
+      "keyFiles": [
+        "pre-release.js",
+        "verifyCommit.js"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 4,
+      "lastAccessed": 1778566418952,
+      "keyFiles": [
+        "main.ts",
+        "mock.ts",
+        "style.css",
+        "vite-env.d.ts"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 2,
+      "lastAccessed": 1778566418953,
+      "keyFiles": [
+        "setup.ts",
+        "smoke.test.ts"
+      ]
+    },
+    "cypress/fixtures": {
+      "path": "cypress/fixtures",
+      "purpose": "Test fixtures",
+      "fileCount": 2,
+      "lastAccessed": 1778566418953,
+      "keyFiles": [
+        "example.json",
+        "test.png"
+      ]
+    },
+    "dist/assets": {
+      "path": "dist/assets",
+      "purpose": "Static assets",
+      "fileCount": 4,
+      "lastAccessed": 1778566418953,
+      "keyFiles": [
+        "catalog-HUMXle8K.js.map",
+        "group-Bz5rW3In.js.map",
+        "value-CD6LjwT0.js.map"
+      ]
+    },
+    "dist/src": {
+      "path": "dist/src",
+      "purpose": "Source code",
+      "fileCount": 0,
+      "lastAccessed": 1778566418954,
+      "keyFiles": []
+    },
+    "docs/public": {
+      "path": "docs/public",
+      "purpose": "Public files",
+      "fileCount": 1,
+      "lastAccessed": 1778566418954,
+      "keyFiles": [
+        "favicon.png"
+      ]
+    },
+    "src/assets": {
+      "path": "src/assets",
+      "purpose": "Static assets",
+      "fileCount": 0,
+      "lastAccessed": 1778566418955,
+      "keyFiles": []
+    },
+    "src/components": {
+      "path": "src/components",
+      "purpose": "UI components",
+      "fileCount": 0,
+      "lastAccessed": 1778566418955,
+      "keyFiles": []
+    },
+    "src/utils": {
+      "path": "src/utils",
+      "purpose": "Utility functions",
+      "fileCount": 2,
+      "lastAccessed": 1778566418955,
+      "keyFiles": [
+        "index.ts",
+        "prism.ts"
+      ]
+    },
+    "tests/helpers": {
+      "path": "tests/helpers",
+      "purpose": "Helper functions",
+      "fileCount": 3,
+      "lastAccessed": 1778566418956,
+      "keyFiles": [
+        "async.ts",
+        "canvas.ts",
+        "range.ts"
+      ]
+    },
+    "tests/utils": {
+      "path": "tests/utils",
+      "purpose": "Utility functions",
+      "fileCount": 8,
+      "lastAccessed": 1778566418956,
+      "keyFiles": [
+        "clipboard.test.ts",
+        "element.test.ts",
+        "hotkey.test.ts"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/editor/core/draw/Draw.ts",
+      "accessCount": 8,
+      "lastAccessed": 1778567044803,
+      "type": "file"
+    },
+    {
+      "path": "src/editor/core/event/handlers/keydown/tab.ts",
+      "accessCount": 4,
+      "lastAccessed": 1778566985028,
+      "type": "file"
+    },
+    {
+      "path": "src/editor/core/command/CommandAdapt.ts",
+      "accessCount": 4,
+      "lastAccessed": 1778569564941,
+      "type": "file"
+    },
+    {
+      "path": "src/editor/core/command/Command.ts",
+      "accessCount": 2,
+      "lastAccessed": 1778567881150,
+      "type": "file"
+    },
+    {
+      "path": "package.json",
+      "accessCount": 1,
+      "lastAccessed": 1778567987795,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

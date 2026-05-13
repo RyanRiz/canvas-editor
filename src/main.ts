@@ -10,6 +10,7 @@ import Editor, {
   EditorMode,
   EditorZone,
   ElementType,
+  SectionBreakType,
   IBlock,
   ICatalogItem,
   IElement,
@@ -29,7 +30,7 @@ import Editor, {
 import { Dialog } from './components/dialog/Dialog'
 import { formatPrismToken } from './utils/prism'
 import { Signature } from './components/signature/Signature'
-import { debounce, nextTick, scrollIntoView } from './utils'
+import { debounce, nextTick } from './utils'
 
 window.onload = function () {
   const isApple =
@@ -347,6 +348,42 @@ window.onload = function () {
     instance.command.executeRowFlex(RowFlex.JUSTIFY)
   }
 
+  function isSelectionInList(): boolean {
+    const list = instance.command.getElementList()
+    const range = instance.command.getRange()
+    if (!range) return false
+    const start = Math.min(range.startIndex, range.endIndex)
+    const end = Math.max(range.startIndex, range.endIndex)
+    const lo = Math.max(0, start - 1)
+    const hi = Math.min(list.length - 1, end + 1)
+    for (let i = lo; i <= hi; i++) {
+      if (list[i]?.listId) return true
+    }
+    return false
+  }
+
+  const increaseIndentDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__increase-indent'
+  )!
+  increaseIndentDom.onclick = function () {
+    if (isSelectionInList()) {
+      instance.command.executeListIndent()
+    } else {
+      instance.command.executeIncreaseIndent()
+    }
+  }
+
+  const decreaseIndentDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__decrease-indent'
+  )!
+  decreaseIndentDom.onclick = function () {
+    if (isSelectionInList()) {
+      instance.command.executeListOutdent()
+    } else {
+      instance.command.executeDecreaseIndent()
+    }
+  }
+
   const rowMarginDom = document.querySelector<HTMLDivElement>(
     '.menu-item__row-margin'
   )!
@@ -358,6 +395,34 @@ window.onload = function () {
   rowOptionDom.onclick = function (evt) {
     const li = evt.target as HTMLLIElement
     instance.command.executeRowMargin(Number(li.dataset.rowmargin!))
+  }
+
+  const spaceBeforeDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__space-before'
+  )!
+  const spaceBeforeOptionDom =
+    spaceBeforeDom.querySelector<HTMLDivElement>('.options')!
+  spaceBeforeDom.onclick = function () {
+    console.log('space-before')
+    spaceBeforeOptionDom.classList.toggle('visible')
+  }
+  spaceBeforeOptionDom.onclick = function (evt) {
+    const li = evt.target as HTMLLIElement
+    instance.command.executeSpaceBefore(Number(li.dataset.spaceBefore!))
+  }
+
+  const spaceAfterDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__space-after'
+  )!
+  const spaceAfterOptionDom =
+    spaceAfterDom.querySelector<HTMLDivElement>('.options')!
+  spaceAfterDom.onclick = function () {
+    console.log('space-after')
+    spaceAfterOptionDom.classList.toggle('visible')
+  }
+  spaceAfterOptionDom.onclick = function (evt) {
+    const li = evt.target as HTMLLIElement
+    instance.command.executeSpaceAfter(Number(li.dataset.spaceAfter!))
   }
 
   const listDom = document.querySelector<HTMLDivElement>('.menu-item__list')!
@@ -735,6 +800,24 @@ window.onload = function () {
   pageBreakDom.onclick = function () {
     console.log('pageBreak')
     instance.command.executePageBreak()
+  }
+
+  const sectionBreakDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__section-break'
+  )!
+  const sectionBreakOptionDom =
+    sectionBreakDom.querySelector<HTMLDivElement>('.options')!
+  sectionBreakDom.onclick = function () {
+    console.log('sectionBreak')
+    sectionBreakOptionDom.classList.toggle('visible')
+  }
+  sectionBreakOptionDom.onmousedown = function (evt) {
+    const li = evt.target as HTMLLIElement
+    const raw = li.dataset.sectionBreak
+    sectionBreakOptionDom.classList.toggle('visible')
+    if (!raw) return
+    const type = raw as SectionBreakType
+    instance.command.executeSectionBreak({ type })
   }
 
   const watermarkDom = document.querySelector<HTMLDivElement>(
@@ -1753,11 +1836,12 @@ window.onload = function () {
   }
 
   // 模拟批注
-  const commentDom = document.querySelector<HTMLDivElement>('.comment')!
+  const commentListDom =
+    document.querySelector<HTMLDivElement>('.comment-list')!
   async function updateComment() {
     const groupIds = await instance.command.getGroupIds()
     for (const comment of commentList) {
-      const activeCommentDom = commentDom.querySelector<HTMLDivElement>(
+      const activeCommentDom = commentListDom.querySelector<HTMLDivElement>(
         `.comment-item[data-id='${comment.id}']`
       )
       // 编辑器是否存在对应成组id
@@ -1770,7 +1854,6 @@ window.onload = function () {
           commentItem.onclick = () => {
             instance.command.executeLocationGroup(comment.id)
           }
-          commentDom.append(commentItem)
           // 选区信息
           const commentItemTitle = document.createElement('div')
           commentItemTitle.classList.add('comment-item__title')
@@ -1799,12 +1882,52 @@ window.onload = function () {
           commentItemContent.classList.add('comment-item__content')
           commentItemContent.innerText = comment.content
           commentItem.append(commentItemContent)
-          commentDom.append(commentItem)
+          commentListDom.append(commentItem)
         }
       } else {
         // 编辑器内不存在对应成组id则dom则移除
         activeCommentDom?.remove()
       }
+    }
+    positionComments()
+  }
+  function positionComments() {
+    const elementList = instance.command.getElementList()
+    const positionList = instance.command.getPositionList()
+    const baseCanvases = document.querySelectorAll<HTMLCanvasElement>(
+      '.editor canvas.ce-page-base'
+    )
+    const canvases = baseCanvases.length
+      ? baseCanvases
+      : document.querySelectorAll<HTMLCanvasElement>('.editor canvas')
+    const items = commentListDom.querySelectorAll<HTMLDivElement>(
+      '.comment-item[data-id]'
+    )
+    type PositionedItem = { el: HTMLDivElement; desiredY: number }
+    const positioned: PositionedItem[] = []
+    for (const item of items) {
+      const id = item.getAttribute('data-id')
+      if (!id) continue
+      let targetPos = null
+      for (let i = 0; i < elementList.length; i++) {
+        if (elementList[i].groupIds?.includes(id)) {
+          targetPos = positionList[i]
+          break
+        }
+      }
+      if (!targetPos) continue
+      const canvas = canvases[targetPos.pageNo]
+      if (!canvas) continue
+      const canvasRect = canvas.getBoundingClientRect()
+      const screenY = canvasRect.top + targetPos.coordinate.leftTop[1]
+      positioned.push({ el: item, desiredY: screenY })
+    }
+    positioned.sort((a, b) => a.desiredY - b.desiredY)
+    let lastBottom = -Infinity
+    for (const { el, desiredY } of positioned) {
+      const actualY = Math.max(desiredY, lastBottom + PANEL_GAP)
+      el.style.top = `${actualY}px`
+      lastBottom = actualY + el.offsetHeight
     }
   }
   // Figure / Table JATS validation panels — one per IMAGE/TABLE element
@@ -2036,8 +2159,17 @@ window.onload = function () {
     const positionList = instance.command.getPositionList()
     const opts = instance.command.getOptions()
     const scale = opts.scale ?? 1
-    const canvases =
-      document.querySelectorAll<HTMLCanvasElement>('.editor canvas')
+    // PERF-PLAN — Strategy B：分层 canvas 后每页有 2 个 <canvas>（base + decoration）。
+    // 直接选择 .editor canvas 会得到 2× 数量、按 pageNo 索引就会拿到错误的 page
+    // ——典型症状是「1 页文档被识别为 2 页」/ 验证面板贴在错误位置。
+    // 优先用 .ce-page-base 选择器（分层模式）；分层关闭时退回 .editor canvas
+    // 兼容旧 DOM。
+    const baseCanvases = document.querySelectorAll<HTMLCanvasElement>(
+      '.editor canvas.ce-page-base'
+    )
+    const canvases = baseCanvases.length
+      ? baseCanvases
+      : document.querySelectorAll<HTMLCanvasElement>('.editor canvas')
     figureValidationListDom.innerHTML = ''
     type PanelEntry = {
       panel: HTMLDivElement
@@ -2101,66 +2233,6 @@ window.onload = function () {
       const panelHeight = entry.panel.offsetHeight
       lastBottom = actualY + panelHeight
     }
-
-    // Resolve collision between comment container and figure validations
-    const commentDom = document.querySelector<HTMLDivElement>('.comment')
-    if (commentDom) {
-      if (entries.length === 0 || commentDom.childElementCount === 0) {
-        commentDom.style.top = '200px'
-      } else {
-        let commentTop = 200
-        const commentHeight = commentDom.offsetHeight || 0
-        let overlappingDown = true
-        let iterations = 0
-
-        // Push down until no overlap
-        while (overlappingDown && iterations < 10) {
-          overlappingDown = false
-          for (const entry of entries) {
-            const pTop = parseFloat(entry.panel.style.top)
-            const pBottom = pTop + entry.panel.offsetHeight
-            if (
-              commentTop < pBottom + PANEL_GAP &&
-              commentTop + commentHeight > pTop - PANEL_GAP
-            ) {
-              commentTop = pBottom + PANEL_GAP
-              overlappingDown = true
-            }
-          }
-          iterations++
-        }
-
-        // If pushing down pushes it off the bottom of the screen, try pushing UP instead
-        if (commentTop + commentHeight > window.innerHeight - 20) {
-          commentTop = 200
-          let overlappingUp = true
-          iterations = 0
-          while (overlappingUp && iterations < 10) {
-            overlappingUp = false
-            // Iterate in reverse to push up above the highest clashing panel
-            for (let i = entries.length - 1; i >= 0; i--) {
-              const entry = entries[i]
-              const pTop = parseFloat(entry.panel.style.top)
-              const pBottom = pTop + entry.panel.offsetHeight
-              if (
-                commentTop < pBottom + PANEL_GAP &&
-                commentTop + commentHeight > pTop - PANEL_GAP
-              ) {
-                commentTop = pTop - commentHeight - PANEL_GAP
-                overlappingUp = true
-              }
-            }
-            iterations++
-          }
-          // Ensure we don't go off the top of the screen (min top: 10px)
-          if (commentTop < 10) {
-            commentTop = 10
-          }
-        }
-
-        commentDom.style.top = `${commentTop}px`
-      }
-    }
   }
   // Throttled scroll/resize re-positioning
   let panelRafId = 0
@@ -2169,6 +2241,7 @@ window.onload = function () {
     panelRafId = requestAnimationFrame(() => {
       panelRafId = 0
       renderFigureValidationPanels()
+      positionComments()
     })
   }
   window.addEventListener('scroll', schedulePanelUpdate, true)
@@ -2330,19 +2403,18 @@ window.onload = function () {
     }
 
     // 批注
-    commentDom
+    commentListDom
       .querySelectorAll<HTMLDivElement>('.comment-item')
       .forEach(commentItemDom => {
         commentItemDom.classList.remove('active')
       })
     if (payload.groupIds) {
       const [id] = payload.groupIds
-      const activeCommentDom = commentDom.querySelector<HTMLDivElement>(
+      const activeCommentDom = commentListDom.querySelector<HTMLDivElement>(
         `.comment-item[data-id='${id}']`
       )
       if (activeCommentDom) {
         activeCommentDom.classList.add('active')
-        scrollIntoView(commentDom, activeCommentDom)
       }
     }
 

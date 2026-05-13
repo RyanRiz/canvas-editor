@@ -4,6 +4,8 @@ import { isApple } from '../../../../utils/ua'
 import { isMod } from '../../../../utils/hotkey'
 import { CanvasEvent } from '../../CanvasEvent'
 import { backspace } from './backspace'
+import { ctrlBackspace } from './ctrlBackspace'
+import { ctrlEnter } from './ctrlEnter'
 import { del } from './delete'
 import { enter } from './enter'
 import { left } from './left'
@@ -17,10 +19,14 @@ export function keydown(evt: KeyboardEvent, host: CanvasEvent) {
   if (host.isComposing) return
   const draw = host.getDraw()
   // 键盘事件逻辑分发
-  if (evt.key === KeyMap.Backspace) {
+  if (isMod(evt) && evt.key === KeyMap.Backspace) {
+    ctrlBackspace(evt, host)
+  } else if (evt.key === KeyMap.Backspace) {
     backspace(evt, host)
   } else if (evt.key === KeyMap.Delete) {
     del(evt, host)
+  } else if (isMod(evt) && evt.key === KeyMap.Enter) {
+    ctrlEnter(evt, host)
   } else if (evt.key === KeyMap.Enter) {
     enter(evt, host)
   } else if (evt.key === KeyMap.Left) {

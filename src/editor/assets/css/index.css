@@ -77,3 +77,24 @@
   opacity: 0.5;
   pointer-events: none;
 }
+
+/* PERF-PLAN — Strategy B：分层 canvas。每页 wrapper 是 pageContainer 的直接子节点，
+   占据原 canvas 在 flex / block 流中的位置；wrapper 内部 base + decoration 用
+   absolute 完全重合堆叠。decoration 不接收任何指针事件——透传到下层 base。 */
+.ce-page-wrapper {
+  position: relative;
+  display: block;
+}
+
+.ce-page-base {
+  position: absolute;
+  left: 0;
+  top: 0;
+}
+
+.ce-page-decoration {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+}

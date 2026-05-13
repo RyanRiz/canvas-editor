@@ -1,7 +1,9 @@
 import { EDITOR_PREFIX } from '../../dataset/constant/Editor'
 import { EditorZone } from '../../dataset/enum/Editor'
 import { IEditorOption } from '../../interface/Editor'
-import { nextTick } from '../../utils'
+// PERF-PLAN §1.5：Zone change 通知不依赖 paint cycle，从 nextTick (setTimeout 0)
+// 升级到 queueMicrotask，省下一次 task-queue 回环（与 Cursor.ts:188 不同——
+// 那里 moveCursorToVisible 等待 canvas paint 完成，必须停在宏任务）。
 import { Draw } from '../draw/Draw'
 import { I18n } from '../i18n/I18n'
 import { ZoneTip } from './ZoneTip'
@@ -66,7 +68,7 @@ export class Zone {
     // 指示器
     this.drawZoneIndicator()
     // 回调
-    nextTick(() => {
+    queueMicrotask(() => {
       const listener = this.draw.getListener()
       if (listener.zoneChange) {
         listener.zoneChange(payload)

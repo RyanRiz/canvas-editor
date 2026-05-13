@@ -3,6 +3,7 @@ import { EDITOR_PREFIX } from '../../../../dataset/constant/Editor'
 import { TableOrder } from '../../../../dataset/enum/table/TableTool'
 import { DeepRequired } from '../../../../interface/Common'
 import { IEditorOption } from '../../../../interface/Editor'
+import { ICurrentPosition, IPositionContext } from '../../../../interface/Position'
 import { Position } from '../../../position/Position'
 import { RangeManager } from '../../../range/RangeManager'
 import { Draw } from '../../Draw'
@@ -47,6 +48,7 @@ export class TableTool {
   private anchorLine: HTMLDivElement | null
   private mousedownX: number
   private mousedownY: number
+  private renderSignature: string | null
 
   constructor(draw: Draw) {
     this.draw = draw
@@ -65,6 +67,7 @@ export class TableTool {
     this.anchorLine = null
     this.mousedownX = 0
     this.mousedownY = 0
+    this.renderSignature = null
   }
 
   public dispose() {
@@ -80,19 +83,37 @@ export class TableTool {
     this.toolTableSelectBtn = null
     this.toolColContainer = null
     this.toolBorderContainer = null
+    this.renderSignature = null
   }
 
-  public render() {
-    const { isTable, index, trIndex, tdIndex } =
-      this.position.getPositionContext()
+  public render(payload?: {
+    positionContext?: ICurrentPosition | IPositionContext
+    pageNo?: number
+  }) {
+    const {
+      isTable,
+      index,
+      trIndex,
+      tdIndex
+    } = payload?.positionContext || this.position.getPositionContext()
     if (!isTable) return
-    // 销毁之前工具
-    this.dispose()
     const elementList = this.draw.getOriginalElementList()
-    const positionList = this.position.getOriginalPositionList()
     const element = elementList[index!]
     // 表格工具配置禁用又非设计模式时不渲染
     if (element.tableToolDisabled && !this.draw.isDesignMode()) return
+    const hoverPageNo = payload?.pageNo ?? this.draw.getPageNo()
+    const signature = this._getRenderSignature({
+      index: index!,
+      trIndex: trIndex!,
+      tdIndex: tdIndex!,
+      pageNo: hoverPageNo,
+      element
+    })
+    if (signature === this.renderSignature) return
+    // 销毁之前工具
+    this.dispose()
+    this.renderSignature = signature
+    const positionList = this.position.getOriginalPositionList()
     // 渲染所需数据
     const {
       scale,
@@ -105,7 +126,7 @@ export class TableTool {
     } = position
     const height = this.draw.getHeight()
     const pageGap = this.draw.getPageGap()
-    const prePageHeight = this.draw.getPageNo() * (height + pageGap)
+    const prePageHeight = hoverPageNo * (height + pageGap)
     const tableX = leftTop[0]
     const tableY = leftTop[1] + prePageHeight
     const td = element.trList![trIndex!].tdList[tdIndex!]
@@ -371,6 +392,28 @@ export class TableTool {
     this.toolBorderContainer = borderContainer
   }
 
+  private _getRenderSignature(payload: {
+    index: number
+    trIndex: number
+    tdIndex: number
+    pageNo: number
+    element: IElement
+  }): string {
+    const { index, trIndex, tdIndex, pageNo, element } = payload
+    const colWidths = element.colgroup?.map(col => col.width).join(',') || ''
+    const rowHeights = element.trList?.map(tr => tr.height).join(',') || ''
+    return [
+      pageNo,
+      index,
+      trIndex,
+      tdIndex,
+      element.width || 0,
+      element.height || 0,
+      colWidths,
+      rowHeights
+    ].join('|')
+  }
+
   private _setAnchorActive(container: HTMLDivElement, index: number) {
     const children = container.children
     for (let c = 0; c < children.length; c++) {
@@ -437,6 +480,13 @@ export class TableTool {
       'mouseup',
       () => {
         let isChangeSize = false
+        // 捕获旧状态供 delta 逆操作
+        const trList = element.trList
+        const colgroup = element.colgroup
+        const oldTrHeights = trList?.map(tr => ({ height: tr.height, minHeight: tr.minHeight }))
+        const oldColWidths = colgroup?.map(c => c.width)
+        const oldTableWidth = element.width
+        const oldTranslateX = element.translateX
         // 改变尺寸
         if (order === TableOrder.ROW) {
           const trList = element.trList!
@@ -516,7 +566,35 @@ export class TableTool {
           }
         }
         if (isChangeSize) {
-          this.draw.render({ isSetCursor: false })
+          // 推入轻量 delta 历史：仅捕获修改前的尺寸快照，避免全量 snapshot
+          // (O(28k) clone)。逆操作按快照恢复 tr/colgroup/width/translateX。
+          const targetEl = element
+          this.draw.getHistoryManager().executeDelta({
+            applyForward: () => {},
+            applyBackward: () => {
+              const trl = targetEl.trList
+              const colg = targetEl.colgroup
+              if (oldTrHeights && trl) {
+                for (let t = 0; t < Math.min(oldTrHeights.length, trl.length); t++) {
+                  trl[t].height = oldTrHeights[t].height
+                  trl[t].minHeight = oldTrHeights[t].minHeight
+                }
+              }
+              if (oldColWidths && colg) {
+                for (let c = 0; c < Math.min(oldColWidths.length, colg.length); c++) {
+                  colg[c].width = oldColWidths[c]
+                }
+              }
+              if (oldTableWidth !== undefined) targetEl.width = oldTableWidth
+              targetEl.translateX = oldTranslateX
+              this.draw.markTableElementDirty(targetEl)
+              this.draw.cancelScheduledRender()
+              this.draw.render({ isSetCursor: true, isSubmitHistory: false })
+            }
+          })
+          this.draw.markTableElementDirty(element)
+          this.draw.cancelScheduledRender()
+          this.draw.render({ isSetCursor: true, isSubmitHistory: false })
         }
         // 还原副作用
         anchorLine.remove()

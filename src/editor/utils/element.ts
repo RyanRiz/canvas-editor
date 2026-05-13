@@ -1389,6 +1389,27 @@ export function createDomFromElementList(
         const pageBreakElement = document.createElement('div')
         pageBreakElement.style.breakAfter = 'page'
         clipboardDom.append(pageBreakElement)
+      } else if (element.type === ElementType.SECTION_BREAK) {
+        // CONTINUOUS section breaks deliberately do not force a page in the
+        // host renderer; NEXT_PAGE / EVEN_PAGE / ODD_PAGE do. CSS `break-after`
+        // covers the common page case; `left`/`right` map to even/odd parity.
+        const sectionBreakElement = document.createElement('div')
+        switch (element.sectionBreakType) {
+          case 'continuous':
+            // No forced page break — still emit a paragraph boundary.
+            break
+          case 'evenPage':
+            sectionBreakElement.style.breakAfter = 'left'
+            break
+          case 'oddPage':
+            sectionBreakElement.style.breakAfter = 'right'
+            break
+          case 'nextPage':
+          default:
+            sectionBreakElement.style.breakAfter = 'page'
+            break
+        }
+        clipboardDom.append(sectionBreakElement)
       } else if (
         !element.type ||
         element.type === ElementType.LATEX ||
@@ -1833,9 +1854,22 @@ export function getTextFromElementList(elementList: IElement[]) {
 }
 
 export function getSlimCloneElementList(elementList: IElement[]) {
-  return deepCloneOmitKeys<IElement[], IRowElement>(elementList, [
+  // Strip metrics/style and per-cell derived layout cache. Without this, a
+  // snapshot-restore (e.g. undo of indent / space-after, which mutate element
+  // props in place and go through _submitSnapshotHistory) would re-hydrate
+  // td.rowList whose row elements have no .metrics, while td._dirty / _cache*
+  // still read as fresh — causing the next render's cell cache branch
+  // (Draw.ts: canReuseCell) to reuse the metric-less rowList and crash in
+  // computePageRowPosition at "x + metrics.width".
+  return deepCloneOmitKeys<IElement[], IRowElement & Partial<ITd>>(elementList, [
     'metrics',
-    'style'
+    'style',
+    'rowList',
+    'positionList',
+    '_dirty',
+    '_cacheInnerWidth',
+    '_cacheScale',
+    '_cacheIsPagingMode'
   ])
 }
 

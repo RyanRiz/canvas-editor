@@ -22,6 +22,10 @@ export interface IRangeStyle {
   strikeout: boolean
   color: string | null
   highlight: string | null
+  // MS Word style paragraph shading — read off the caret's paragraph ZERO
+  // delimiter so the toolbar reflects the active paragraph's color regardless
+  // of where in the paragraph the caret sits.
+  paragraphShading: string | null
   rowFlex: RowFlex | null
   rowMargin: number
   dashArray: number[]
@@ -31,6 +35,10 @@ export interface IRangeStyle {
   groupIds: string[] | null
   textDecoration: ITextDecoration | null
   extension?: unknown | null
+  indent?: number | null
+  rightIndent?: number | null
+  spaceBefore?: number | null
+  spaceAfter?: number | null
 }
 
 export type IRangeStyleChange = (payload: IRangeStyle) => void

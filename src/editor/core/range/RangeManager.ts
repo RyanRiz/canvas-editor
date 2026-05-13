@@ -447,6 +447,10 @@ export class RangeManager {
         endTrIndex
       )
       this.setDefaultStyle(null)
+      // PERF-PLAN — Strategy B-γ：选区变更使装饰层缓存失效——下次
+      // decoration-only render 才会真正 _walkDecorationRow + 重画，否则直接命中
+      // 同版本缓存。
+      this.draw.bumpDecorationVersion()
     }
     this.range.zone = this.draw.getZone().getZone()
     // 激活控件
@@ -539,6 +543,30 @@ export class RangeManager {
     const groupIds = curElement.groupIds || null
     // 扩展字段
     const extension = curElement.extension ?? null
+    // 行级属性（缩进、段前段后间距）
+    // `indent` is stamped on every element of the paragraph by increaseIndent,
+    // so reading off the cursor element is fine. `spaceBefore`/`spaceAfter`/
+    // `rightIndent` are paragraph-level — `_applyParagraphSpacing` and
+    // `_mutateRightIndent` only stamp them onto the paragraph's ZERO delimiter.
+    // Walk backward from the cursor to that ZERO so the toolbar sees the
+    // active values regardless of where in the paragraph the caret sits
+    // (otherwise the input shows 0 until you happen to click at the very
+    // start of the paragraph).
+    const indent = (rowIndexElement ?? curElement).indent ?? 0
+    const paragraphZeroElement = (() => {
+      if (isCrossRowCol || !~endIndex) return rowIndexElement ?? curElement
+      const list = this.draw.getElementList()
+      let pz = endIndex
+      while (pz > 0 && list[pz]?.value !== ZERO) pz--
+      return list[pz] ?? rowIndexElement ?? curElement
+    })()
+    const rightIndent = paragraphZeroElement.rightIndent ?? 0
+    const spaceBefore = paragraphZeroElement.spaceBefore ?? 0
+    const spaceAfter = paragraphZeroElement.spaceAfter ?? 0
+    // Paragraph shading lives on the paragraph ZERO (same as spaceBefore /
+    // spaceAfter) — reading off the caret element would only see it when the
+    // caret happens to sit on the ZERO itself.
+    const paragraphShading = paragraphZeroElement.paragraphShading || null
     const rangeStyle: IRangeStyle = {
       type,
       undo,
@@ -552,6 +580,7 @@ export class RangeManager {
       strikeout,
       color,
       highlight,
+      paragraphShading,
       rowFlex,
       rowMargin,
       dashArray,
@@ -560,7 +589,11 @@ export class RangeManager {
       listStyle,
       groupIds,
       textDecoration,
-      extension
+      extension,
+      indent,
+      rightIndent,
+      spaceBefore,
+      spaceAfter
     }
     if (rangeStyleChangeListener) {
       rangeStyleChangeListener(rangeStyle)
@@ -594,6 +627,7 @@ export class RangeManager {
       strikeout: false,
       color: null,
       highlight: null,
+      paragraphShading: null,
       rowFlex: null,
       rowMargin,
       dashArray: [],
@@ -602,7 +636,11 @@ export class RangeManager {
       listStyle: null,
       groupIds: null,
       textDecoration: null,
-      extension: null
+      extension: null,
+      indent: null,
+      rightIndent: null,
+      spaceBefore: null,
+      spaceAfter: null
     }
     if (rangeStyleChangeListener) {
       rangeStyleChangeListener(rangeStyle)

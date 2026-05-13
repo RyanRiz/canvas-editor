@@ -16,6 +16,21 @@ describe('mergeOption', () => {
     expect(options.height).toBe(1123)
   })
 
+  it('默认启用 visible-sync-lazy 页面重绘策略', () => {
+    const options = mergeOption()
+    expect(options.pagePaintStrategy).toBe('visible-sync-lazy')
+    expect(options.pagePaintOverscan).toBe(1)
+  })
+
+  it('允许显式回退到 full 页面重绘策略', () => {
+    const options = mergeOption({
+      pagePaintStrategy: 'full',
+      pagePaintOverscan: 2
+    })
+    expect(options.pagePaintStrategy).toBe('full')
+    expect(options.pagePaintOverscan).toBe(2)
+  })
+
   it('嵌套 table 默认值合并', () => {
     const options = mergeOption({ table: { tdPadding: [0, 10, 10, 10] as any } })
     expect(options.table.tdPadding).toEqual([0, 10, 10, 10])

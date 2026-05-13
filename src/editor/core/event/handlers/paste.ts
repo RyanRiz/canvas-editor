@@ -205,8 +205,8 @@ export async function pasteByApi(host: CanvasEvent, options?: IPasteOption) {
   const editorClipboardData = getClipboardData()
 
   if (options?.isPlainText && clipboardText) {
-      inputPlainText(host, clipboardText)
-      return;
+    inputPlainText(host, clipboardText)
+    return
   }
 
   if (

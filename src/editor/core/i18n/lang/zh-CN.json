@@ -85,6 +85,13 @@
   "pageBreak": {
     "displayName": "分页符"
   },
+  "sectionBreak": {
+    "displayName": "分节符",
+    "nextPage": "下一页",
+    "continuous": "连续",
+    "evenPage": "偶数页",
+    "oddPage": "奇数页"
+  },
   "zone": {
     "headerTip": "双击编辑页眉",
     "footerTip": "双击编辑页脚"

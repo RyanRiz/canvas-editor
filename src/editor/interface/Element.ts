@@ -1,6 +1,7 @@
 import { ImageDisplay } from '../dataset/enum/Common'
 import { ControlComponent } from '../dataset/enum/Control'
 import { ElementType } from '../dataset/enum/Element'
+import { SectionBreakType } from '../dataset/enum/SectionBreak'
 import { ListStyle, ListType } from '../dataset/enum/List'
 import { ListNumberStyle } from './List'
 import { RowFlex } from '../dataset/enum/Row'
@@ -11,6 +12,7 @@ import { IBlock } from './Block'
 import { ICheckbox } from './Checkbox'
 import { IPadding } from './Common'
 import { IControl } from './Control'
+import { IParagraphBorder } from './ParagraphBorder'
 import { IPageColumns } from './PageColumns'
 import { IRadio } from './Radio'
 import { ITextDecoration } from './Text'
@@ -35,6 +37,19 @@ export interface IElementStyle {
   bold?: boolean
   color?: string
   highlight?: string
+  // MS Word paragraph shading — a paragraph-level background painted behind
+  // every row of the paragraph, indent-respecting and fragmenting across page
+  // boundaries. Distinct from `highlight` (character-level, glyph-tight). The
+  // value is stamped on the paragraph's ZERO delimiter element (see the
+  // `_applyParagraphSpacing` pattern) and read off the ZERO during render so
+  // any row in the paragraph sees the same color.
+  paragraphShading?: string
+  // MS Word paragraph border (`<w:pBdr>`) — block decoration that wraps the
+  // paragraph fragment (the rows of this paragraph on a single page/column),
+  // not individual text runs. Stamped on the paragraph's ZERO delimiter, same
+  // resolution path as `paragraphShading`. See `IParagraphBorder` for the
+  // fragment / cross-page behavior.
+  paragraphBorder?: IParagraphBorder
   italic?: boolean
   underline?: boolean
   strikeout?: boolean
@@ -42,6 +57,10 @@ export interface IElementStyle {
   rowMargin?: number
   letterSpacing?: number
   textDecoration?: ITextDecoration
+  indent?: number
+  rightIndent?: number
+  spaceBefore?: number
+  spaceAfter?: number
 }
 
 export interface IElementRule {
@@ -113,6 +132,14 @@ export interface ISuperscriptSubscript {
 export interface ISeparator {
   dashArray?: number[]
   lineWidth?: number
+}
+
+export interface ISectionBreakElement {
+  // Section break flavour (MS Word semantics). Only meaningful when
+  // `type === ElementType.SECTION_BREAK`; carried on the element rather than a
+  // dedicated node so the existing block-break plumbing (row.isPageBreak,
+  // ctrl-backspace atomic delete, clipboard serialization) can be reused.
+  sectionBreakType?: SectionBreakType
 }
 
 export interface IControlElement {
@@ -224,6 +251,7 @@ export type IElement = IElementBasic &
   IHyperlinkElement &
   ISuperscriptSubscript &
   ISeparator &
+  ISectionBreakElement &
   IControlElement &
   ICheckboxElement &
   IRadioElement &

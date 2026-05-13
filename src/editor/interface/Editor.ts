@@ -18,6 +18,7 @@ import { IImgCaptionOption, IListOption } from './Element'
 import { ILineBreakOption } from './LineBreak'
 import { IMargin } from './Margin'
 import { IPageBreak } from './PageBreak'
+import { ISectionBreak } from './SectionBreak'
 import { IPageColumns } from './PageColumns'
 import { IPageNumber } from './PageNumber'
 import { IPlaceholder } from './Placeholder'
@@ -35,6 +36,7 @@ import { IRange } from './Range'
 import { IGraffitiData, IGraffitiOption } from './Graffiti'
 import { IWhiteSpaceOption } from './WhiteSpace'
 import { IMagnifierOption } from './Magnifier'
+import { IPageLayeredOption } from './PageLayered'
 
 export interface IEditorData {
   header?: IElement[]
@@ -84,6 +86,12 @@ export interface IEditorOption {
   paperDirection?: PaperDirection
   inactiveAlpha?: number
   historyMaxRecordCount?: number
+  // 输入合批的闲置阈值（毫秒）。> 0 时启用：连续按键合并为单个 history snapshot，
+  // 闲置该时长后落盘；遇到非输入动作 / undo / redo 立即落盘。
+  // 0（默认）保留每键一份 snapshot 的旧语义。详见 PERF-PLAN §1.2。
+  historyTypingBatchMs?: number
+  // Enable verbose history/debug logging for submitHistory / undo / redo flows.
+  debugHistory?: boolean
   printPixelRatio?: number
   maskMargin?: IMargin
   letterClass?: string[]
@@ -105,6 +113,7 @@ export interface IEditorOption {
   placeholder?: IPlaceholder
   group?: IGroup
   pageBreak?: IPageBreak
+  sectionBreak?: ISectionBreak
   pageColumns?: IPageColumns
   zone?: IZoneOption
   background?: IBackgroundOption
@@ -120,6 +129,16 @@ export interface IEditorOption {
   imgCaption?: IImgCaptionOption
   list?: IListOption
   magnifier?: IMagnifierOption
+  // PERF-PLAN — Strategy B：分层 canvas + 装饰层独立重绘。
+  // 默认开启；selection drag / search-next 等高频交互省去全量 base 重绘。
+  pageLayered?: IPageLayeredOption
+  // 基础层页面重绘策略：
+  //  - `full`：每次内容 render 同步重绘所有页（保守回退）
+  //  - `visible-sync-lazy`：可见页 + overscan 同步，离屏页懒重绘
+  // 默认使用后者，以兼顾分页漂移正确性与多页文档的 typing latency。
+  pagePaintStrategy?: 'full' | 'visible-sync-lazy'
+  // visible-sync-lazy 模式下，可见页两侧额外同步重绘的页数。
+  pagePaintOverscan?: number
 }
 
 export interface IEditorResult {
