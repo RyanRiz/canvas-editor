@@ -302,17 +302,48 @@ export class Position {
     return { x, y, index }
   }
 
-  public computePositionList() {
-    // 置空原位置信息
-    this.positionList = []
+  public computePositionList(options?: {
+    /**
+     * Lazy-positions hint for the full recompute path. Stops after `maxPageNo`
+     * and preserves the OLD positionList entries beyond that page (stale —
+     * wrong coordinates), so the painter / area.compute / cursor logic still
+     * see defined entries at every index. Caller tracks the stale window and
+     * refreshes either on scroll (paintPageOnDom guard in Draw.ts) or via the
+     * scheduled async pass. Returns the first stale page index.
+     *
+     * Use case: left/right-margin drag triggers `_tryBuildResumeFrom`
+     * rejection (innerWidth signature mismatch) so the incremental position
+     * path can't engage. The full path used to compute every page (~150ms on
+     * 28k-element doc); with this hint we cap it at visible+overscan and
+     * lazy-refresh the rest.
+     */
+    maxPageNo?: number
+  }): { stalePositionsFromPageNo: number | null } {
+    const maxPageNo = options?.maxPageNo
     const pageRowList = this.draw.getPageRowList()
     const margins = this.draw.getMargins()
-    // 起始位置受页眉影响
     const header = this.draw.getHeader()
     const extraHeight = header.getExtraHeight()
     const startY = margins[0] + extraHeight
+    // Snapshot the OLD list ONLY when lazy mode is engaged — typical full
+    // recompute path stays allocation-free.
+    const oldList = maxPageNo !== undefined ? this.positionList : null
+    // 置空原位置信息
+    this.positionList = []
     let startRowIndex = 0
     for (let i = 0; i < pageRowList.length; i++) {
+      if (maxPageNo !== undefined && i > maxPageNo && oldList) {
+        // Lazy-mode early exit. Restore the tail from the snapshot so
+        // positionList still has defined entries at every index — those
+        // entries reflect the OLD layout (wrong pageNo / coordinates for
+        // the new layout), so callers must check staleness before depending
+        // on accuracy. paintPageOnDom in Draw.ts handles this for paint.
+        const newTailStart = this.positionList.length
+        for (let t = newTailStart; t < oldList.length; t++) {
+          this.positionList[t] = oldList[t]
+        }
+        return { stalePositionsFromPageNo: i }
+      }
       const rowList = pageRowList[i]
       if (!rowList?.length) continue
       for (let k = 0; k < rowList.length; k++) {
@@ -331,6 +362,7 @@ export class Position {
       }
       startRowIndex += rowList.length
     }
+    return { stalePositionsFromPageNo: null }
   }
 
   /**

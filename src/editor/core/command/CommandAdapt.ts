@@ -293,6 +293,10 @@ export class CommandAdapt {
   }
 
   public forceUpdate(options?: IForceUpdateOption) {
+    // Any external sync render must preempt an in-flight chunked reflow
+    // (e.g. setPaperMarginAsync running in the background): otherwise its
+    // trailing chunks would commit a rowList based on now-stale options.
+    this.draw.cancelChunkedReflow()
     const { isSubmitHistory = false } = options || {}
     this.range.clearRange()
     this.draw.render({
@@ -2974,8 +2978,26 @@ export class CommandAdapt {
     this.draw.setPaperSize(width, height)
   }
 
+  public paperSizeAsync(width: number, height: number) {
+    return this.draw.setPaperSizeAsync(width, height)
+  }
+
   public paperDirection(payload: PaperDirection) {
     this.draw.setPaperDirection(payload)
+  }
+
+  public paperDirectionAsync(payload: PaperDirection) {
+    return this.draw.setPaperDirectionAsync(payload)
+  }
+
+  /**
+   * Generic chunked-rAF reflow escape hatch. Use when you've mutated
+   * layout-affecting options that don't have a dedicated *Async wrapper
+   * (e.g. `defaultRowMargin`, `defaultTabWidth`, `defaultSize`). See
+   * `Draw.runChunkedFullReflow` for details.
+   */
+  public runChunkedFullReflow() {
+    return this.draw.runChunkedFullReflow()
   }
 
   public getPaperMargin(): number[] {
@@ -2984,6 +3006,10 @@ export class CommandAdapt {
 
   public setPaperMargin(payload: IMargin) {
     return this.draw.setPaperMargin(payload)
+  }
+
+  public setPaperMarginAsync(payload: IMargin) {
+    return this.draw.setPaperMarginAsync(payload)
   }
 
   public setMainBadge(payload: IBadge | null) {

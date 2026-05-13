@@ -155,6 +155,31 @@ export interface IComputeRowListPayload {
   // 仅在确认 dirty range 起点之前的所有行都未受影响时才安全。
   checkpointSink?: ILayoutCheckpoint[]
   resumeFrom?: IComputeRowListResumePayload
+  /**
+   * PERF: chunked-rAF support. When set, the main for-loop stops at the
+   * top of the iteration whose element index exceeds `maxElementIndex`,
+   * leaving `rowList` containing rows for elements processed so far. Used
+   * by `setPaperMarginAsync` to keep the main thread responsive during the
+   * inherent O(N) cost of re-wrapping every paragraph at a new innerWidth
+   * (left/right page-margin drag on a 28k-element doc costs ~2s).
+   *
+   * Pairs with `chunkSink` — caller passes both, and on break the
+   * pre-iteration loop state is captured into `chunkSink.state` so the
+   * caller can resume in a follow-up `computeRowList(..., resumeFrom)` call.
+   */
+  maxElementIndex?: number
+  chunkSink?: { state: IChunkResumeState | null }
+}
+
+/**
+ * PERF: pre-iteration loop state captured on chunked-rAF break. Has the
+ * same shape as `ILayoutCheckpoint` plus the element index where the next
+ * chunk should resume processing. Caller turns it into an
+ * `IComputeRowListResumePayload` (with the partial rowList as prefix) for
+ * the next chunk's call.
+ */
+export interface IChunkResumeState extends ILayoutCheckpoint {
+  startElementIndex: number
 }
 
 /**

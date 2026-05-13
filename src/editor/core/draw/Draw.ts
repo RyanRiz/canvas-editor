@@ -13,6 +13,8 @@ import {
   IGetValueOption,
   IConvergenceTarget,
   ILayoutCheckpoint,
+  IChunkResumeState,
+  IComputeRowListResumePayload,
   IPainterOption
 } from '../../interface/Draw'
 import { HistoryScope } from '../../interface/History'
@@ -316,6 +318,11 @@ export class Draw {
   // or an on-demand refresh just before painting a stale page.
   private _lazyPositionStaleFromPageNo: number | null
   private _lazyPositionRefreshTimer: ReturnType<typeof setTimeout> | null
+  // PERF: chunked-rAF setPaperMarginAsync — monotonic op id used to cancel
+  // a stale in-flight op when a new setPaperMargin / setPaperMarginAsync /
+  // render races in. The chunked driver bails out as soon as it observes
+  // its id no longer matches.
+  private _chunkedOpId: number
   private pageNo: number
   private renderCount: number
   private pagePixelRatio: number | null
@@ -444,6 +451,7 @@ export class Draw {
     // interface) and the lazy branch in render() / paintPageOnDom guards.
     this._lazyPositionStaleFromPageNo = null
     this._lazyPositionRefreshTimer = null
+    this._chunkedOpId = 0
     this.pageNo = 0
     this.renderCount = 0
     this.pagePixelRatio = null
@@ -2001,6 +2009,8 @@ export class Draw {
   }
 
   public setPaperSize(width: number, height: number) {
+    // Bump the chunked-op id so any in-flight setPaperSizeAsync abandons.
+    this._chunkedOpId++
     this.options.width = width
     this.options.height = height
     const dpr = this.getPagePixelRatio()
@@ -2017,6 +2027,8 @@ export class Draw {
   }
 
   public setPaperDirection(payload: PaperDirection) {
+    // Bump the chunked-op id so any in-flight setPaperDirectionAsync abandons.
+    this._chunkedOpId++
     const dpr = this.getPagePixelRatio()
     this.options.paperDirection = payload
     const width = this.getWidth()
@@ -2038,6 +2050,9 @@ export class Draw {
     // is unchanged; only `_computePageList` (page assignment + row offsetY)
     // and `positionList` need refreshing. Reuse the same fast lane
     // `setPageScale` uses (`_skipMainRowCompute`, see line 5943) when safe.
+    // Bump the chunked-op id so any in-flight `setPaperMarginAsync` abandons
+    // its remaining chunks before we mutate margins.
+    this._chunkedOpId++
     const oldInnerWidth = this.getInnerWidth()
     this.options.margins = payload
     const newInnerWidth = this.getInnerWidth()
@@ -2132,9 +2147,257 @@ export class Draw {
       }
       return
     }
-    // Slow lane: innerWidth changed — must re-wrap from scratch.
+    // Slow lane: innerWidth changed — must re-wrap from scratch. The
+    // computeRowList cost (~2.5s on 28k-element doc) is inherent to a
+    // viewport-width change, but the position-list cost (~150ms) is not:
+    // pass `isLazyPosition: true` so only visible+overscan pages get their
+    // positions recomputed eagerly. Off-screen pages keep their previous
+    // entries (stale) and refresh on-demand when scrolled to, or via the
+    // ~100ms async timer scheduled by render().
     this.markDirty(0, Math.max(0, this.getOriginalElementList().length - 1))
-    this.render({ isSubmitHistory: false, isSetCursor: false })
+    this.render({
+      isSubmitHistory: false,
+      isSetCursor: false,
+      isLazyPosition: true
+    })
+  }
+
+  /**
+   * Chunked-rAF flavour of setPaperMargin. When `innerWidth` changes
+   * (left/right page-margin drag), `computeRowList(full)` is the dominant
+   * cost — ~2.5s on a 28k-element doc because every paragraph re-wraps at
+   * the new width. The sync `setPaperMargin` blocks the main thread for
+   * that entire time; this async version splits the row-layout work into
+   * chunks separated by `requestAnimationFrame` so the browser stays
+   * responsive during the operation and the visible page repaints between
+   * chunks (progressive paint).
+   *
+   * Falls back to the sync `setPaperMargin` when `innerWidth` is unchanged
+   * (top/bottom margin drag): that's already fast (~30-200ms) and chunking
+   * would only add overhead.
+   *
+   * Concurrent calls cancel earlier ones via `_chunkedOpId`.
+   */
+  public async setPaperMarginAsync(payload: IMargin): Promise<void> {
+    const oldInnerWidth = this.getInnerWidth()
+    this.options.margins = payload
+    const newInnerWidth = this.getInnerWidth()
+    if (oldInnerWidth === newInnerWidth) {
+      // Top/bottom margin change — sync fast path is faster (no rAF overhead).
+      this.setPaperMargin(payload)
+      return
+    }
+    await this._runChunkedFullReflow()
+  }
+
+  /**
+   * Chunked-rAF flavour of setPaperSize. Changing paper dimensions changes
+   * `innerWidth` (smaller paper = less content width), forcing a full text
+   * re-wrap. Uses the same chunked pipeline as setPaperMarginAsync so the
+   * UI stays responsive and the visible page repaints progressively.
+   */
+  public async setPaperSizeAsync(width: number, height: number): Promise<void> {
+    this.options.width = width
+    this.options.height = height
+    const dpr = this.getPagePixelRatio()
+    const realWidth = this.getWidth()
+    const realHeight = this.getHeight()
+    this.container.style.width = `${realWidth}px`
+    for (let i = 0; i < this.pageList.length; i++) {
+      this._resizePageBacking(i, realWidth, realHeight, dpr)
+    }
+    await this._runChunkedFullReflow()
+  }
+
+  /**
+   * Chunked-rAF flavour of setPaperDirection (portrait ↔ landscape).
+   * Rotating page orientation swaps width/height (and rotates the margin
+   * array via getOriginalMargins), changing `innerWidth`. Re-uses the
+   * chunked pipeline.
+   */
+  public async setPaperDirectionAsync(
+    payload: PaperDirection
+  ): Promise<void> {
+    const dpr = this.getPagePixelRatio()
+    this.options.paperDirection = payload
+    const width = this.getWidth()
+    const height = this.getHeight()
+    this.container.style.width = `${width}px`
+    for (let i = 0; i < this.pageList.length; i++) {
+      this._resizePageBacking(i, width, height, dpr)
+    }
+    await this._runChunkedFullReflow()
+  }
+
+  /**
+   * Public escape hatch — generic chunked-rAF full-document reflow. Use
+   * this when you've mutated layout-affecting options that the dedicated
+   * `*Async` helpers (`setPaperMarginAsync`, `setPaperSizeAsync`,
+   * `setPaperDirectionAsync`) don't cover, e.g.:
+   *
+   *   editor.draw.getOptions().defaultRowMargin = 4
+   *   editor.draw.getOptions().defaultTabWidth = 40
+   *   await editor.draw.runChunkedFullReflow()
+   *
+   * Caller is responsible for any DOM-level side effects the dedicated
+   * helpers do (e.g. `container.style.width`, `_resizePageBacking` on each
+   * page). For pure layout-option changes that don't move the page DOM,
+   * those side effects aren't needed.
+   *
+   * Returns a Promise that resolves when the final render completes.
+   * Concurrent reflows cancel earlier ones via `_chunkedOpId`.
+   */
+  public runChunkedFullReflow(): Promise<void> {
+    return this._runChunkedFullReflow()
+  }
+
+  /**
+   * Cancel any in-flight chunked reflow. Safe to call when nothing is in
+   * flight (no-op). Used by `CommandAdapt.forceUpdate` so a synchronous
+   * render path (e.g. `updateOptions`, font/style commands) preempts any
+   * background chunked work that would otherwise complete with stale
+   * option values.
+   *
+   * Note: the dedicated sync `setPaperSize` / `setPaperDirection` /
+   * `setPaperMargin` already bump `_chunkedOpId` themselves, so calling
+   * this from them is redundant — but cheap.
+   */
+  public cancelChunkedReflow(): void {
+    this._chunkedOpId++
+  }
+
+  /**
+   * Shared chunked-rAF pipeline driver. Caller must have already mutated
+   * `this.options` (margins / width / height / paperDirection) so the
+   * derived getters (`getInnerWidth`, `getMargins`, …) return the new
+   * values. Strategy:
+   *
+   *  1. markDirty(0, N-1) so the trailing fast-lane render knows the doc
+   *     is dirty.
+   *  2. Reset `_mainRowCheckpoints` — we're rebuilding from scratch.
+   *  3. Loop: call `computeRowList` with `maxElementIndex` + `chunkSink`,
+   *     handing the partial rowList to `_progressivePaintVisible` between
+   *     chunks. Yield via `requestAnimationFrame` so the browser handles
+   *     events.
+   *  4. After the loop, set `this.rowList = result` and call `render()`
+   *     with `_skipMainRowCompute = true` — the fast-lane reuses the
+   *     freshly-built rowList and only does `_computePageList`, lazy
+   *     position list, area, and final paint.
+   *
+   * Concurrent reflows cancel via `_chunkedOpId`.
+   */
+  private async _runChunkedFullReflow(): Promise<void> {
+    const opId = ++this._chunkedOpId
+    this.markDirty(0, Math.max(0, this.getOriginalElementList().length - 1))
+    const margins = this.getMargins()
+    const pageHeight = this.getHeight()
+    const extraHeight = this.header.getExtraHeight()
+    const mainOuterHeight = this.getMainOuterHeight()
+    const startX = this.getColumnStartX(0)
+    const startY = margins[0] + extraHeight
+    const isPagingMode = this.getIsPagingMode()
+    const innerWidth = this.getInnerWidth()
+    const CHUNK_SIZE = 3000
+    const PROGRESSIVE_OVERSCAN = 2
+    // Estimate the element index that brackets the currently-visible
+    // viewport (plus a forward overscan), using the OLD positionList —
+    // still valid here because no chunk has mutated rowList yet. The
+    // first chunk is sized to fully cover this range so the user's
+    // viewport repaints with the new layout on the very first chunk
+    // instead of waiting for chunk 2/3 to reach the page-below-viewport.
+    // Inflated by 40% because a narrower innerWidth re-wrap typically
+    // produces more rows per page → the same elements end up spread
+    // across a wider page range in the new layout.
+    let firstChunkSize = CHUNK_SIZE
+    if (this.visiblePageNoList.length > 0) {
+      const lastVisible = Math.max(...this.visiblePageNoList)
+      const targetPage = lastVisible + PROGRESSIVE_OVERSCAN
+      const oldPositions = this.position.getOriginalMainPositionList()
+      if (oldPositions.length > 0) {
+        let lo = 0
+        let hi = oldPositions.length - 1
+        while (lo < hi) {
+          const mid = (lo + hi + 1) >> 1
+          const pn = oldPositions[mid]?.pageNo ?? 0
+          if (pn <= targetPage) lo = mid
+          else hi = mid - 1
+        }
+        // `lo` is the last OLD element index on (lastVisible + overscan).
+        // Inflate for new layout density and floor to at least CHUNK_SIZE
+        // so we never go SMALLER than the default — small viewports
+        // shouldn't make chunks tiny.
+        firstChunkSize = Math.max(CHUNK_SIZE, Math.ceil(lo * 1.4))
+        // Cap the first chunk so we don't end up doing the entire doc
+        // synchronously on a small doc viewed all at once. Default cap
+        // is 3× the regular chunk size — bounded freeze, still big
+        // enough to cover most viewports.
+        firstChunkSize = Math.min(firstChunkSize, CHUNK_SIZE * 3)
+      }
+    }
+    let resumeFrom: IComputeRowListResumePayload | undefined = undefined
+    let rowList: IRow[] = []
+    let nextChunkStart = 0
+    let isFirstChunk = true
+    this._mainRowCheckpoints = []
+    while (true) {
+      if (this._chunkedOpId !== opId) return
+      const chunkSink: { state: IChunkResumeState | null } = { state: null }
+      // First chunk uses the viewport-sized estimate so visible pages
+      // land in chunk 1's partial layout; subsequent chunks use the
+      // default size for balanced responsiveness.
+      const chunkSize = isFirstChunk ? firstChunkSize : CHUNK_SIZE
+      isFirstChunk = false
+      const maxIdx = nextChunkStart + chunkSize - 1
+      rowList = this.computeRowList({
+        startX,
+        startY,
+        pageHeight,
+        mainOuterHeight,
+        isPagingMode,
+        innerWidth,
+        elementList: this.elementList,
+        checkpointSink: this._mainRowCheckpoints,
+        resumeFrom,
+        maxElementIndex: maxIdx,
+        chunkSink
+      })
+      if (chunkSink.state === null) break
+      // Progressive paint — repaint visible pages + small forward overscan
+      // using the partial rowList so the layout converges progressively
+      // toward the new width instead of waiting until the very end.
+      this._progressivePaintVisible(rowList, PROGRESSIVE_OVERSCAN)
+      nextChunkStart = chunkSink.state.startElementIndex
+      resumeFrom = {
+        prefixRowList: rowList,
+        startElementIndex: chunkSink.state.startElementIndex,
+        checkpoint: {
+          x: chunkSink.state.x,
+          y: chunkSink.state.y,
+          pageNo: chunkSink.state.pageNo,
+          listId: chunkSink.state.listId,
+          listIndex: chunkSink.state.listIndex,
+          controlRealWidth: chunkSink.state.controlRealWidth,
+          currentPageColumns: chunkSink.state.currentPageColumns,
+          surroundElementList: chunkSink.state.surroundElementList
+        }
+      }
+      await new Promise<void>(resolve =>
+        requestAnimationFrame(() => resolve())
+      )
+    }
+    if (this._chunkedOpId !== opId) return
+    this.rowList = rowList
+    this.clearDirtyRange()
+    this._skipMainRowCompute = true
+    try {
+      this.render({
+        isSubmitHistory: false,
+        isSetCursor: false,
+        isLazyPosition: true
+      })
+    } finally {
+      this._skipMainRowCompute = false
+    }
   }
 
   public getOriginValue(
@@ -2862,7 +3125,9 @@ export class Draw {
       pageHeight = 0,
       mainOuterHeight = 0,
       checkpointSink,
-      resumeFrom
+      resumeFrom,
+      maxElementIndex,
+      chunkSink
     } = payload
     // surroundElementList 在循环里会就地裁剪（deleteSurroundElementList），
     // 因此在 resumeFrom 路径下不能继续沿用调用方传入的引用——
@@ -2968,6 +3233,34 @@ export class Draw {
       }
     }
     for (; i < elementList.length; i++) {
+      // PERF chunked-rAF: bail out at iteration top when we've reached the
+      // caller's chunk boundary. State right here is "before processing
+      // element i" — exactly what a follow-up resumeFrom call needs as
+      // its checkpoint. The `rowList` we've built so far becomes that
+      // call's `prefixRowList`. `break` (not `return`) so the paragraph
+      // indent + spacing post-process loops below run on the partial
+      // rowList — required for the progressive-paint path in
+      // setPaperMarginAsync, and idempotent for the next chunk's resume.
+      if (
+        maxElementIndex !== undefined &&
+        chunkSink &&
+        i > maxElementIndex
+      ) {
+        chunkSink.state = {
+          x,
+          y,
+          pageNo,
+          listId,
+          listIndex,
+          controlRealWidth,
+          currentPageColumns,
+          surroundElementList: surroundElementList.length
+            ? surroundElementList.slice()
+            : [],
+          startElementIndex: i
+        }
+        break
+      }
       // PERF-PLAN §2.2 / Phase 2B：在循环顶部（即「iter (i-1) END / iter i TOP」）
       // 捕获一份 checkpoint 候选；若本次迭代实际创建了新行（page-column 分支或
       // wrap 分支），就把它写入 sink；否则丢弃。仅当调用方传入 checkpointSink
@@ -5697,6 +5990,80 @@ export class Draw {
   }
 
   /**
+   * Progressive-paint helper used between chunked-rAF passes in
+   * `setPaperMarginAsync`. Takes the partial rowList produced by the chunk
+   * that just finished, computes pages for it, computes positions for the
+   * currently-visible pages only (lazy mode), and repaints those pages so
+   * the user sees the layout converging toward the new width during the
+   * multi-second compute pipeline instead of waiting for the final render.
+   *
+   * Correctness notes:
+   * - Partial pageRowList may be SHORTER than the previous frame's. We do
+   *   NOT touch this.pageList / canvas DOM — we only paint pages whose
+   *   index exists in BOTH partial pageRowList AND the existing pageList.
+   *   Pages past the partial layout retain their stale bitmap until the
+   *   final render() restores them.
+   * - Visible page geometry may not be FINAL — if a later chunk's table
+   *   split / paragraph wrap shifts a row from page N+1 back to page N,
+   *   the partial paint of page N is slightly off. The cumulative drift
+   *   converges by the final chunk, and the final render's full paint
+   *   reconciles everything. Acceptable for the perceived-snappiness win.
+   * - Caller has already set this._chunkedOpId; we don't re-check it
+   *   because the chunk we're painting for is the one that just ran.
+   */
+  private _progressivePaintVisible(
+    partialRowList: IRow[],
+    overscan: number = 0
+  ) {
+    if (!partialRowList.length) return
+    // Stash & swap so _computePageList / position list see the partial data.
+    this.rowList = partialRowList
+    this.pageRowList = this._computePageList()
+    // Pick the pages to repaint:
+    //   - currently visible pages (always)
+    //   - plus `overscan` pages past the last visible page when the partial
+    //     layout has already extended that far. This means as soon as a
+    //     chunk produces enough rows to cover the next viewport row, that
+    //     row paints — instead of waiting for the NEXT chunk to repaint.
+    // If visiblePageNoList is stale or empty, fall back to page 0.
+    const partialPageCount = this.pageRowList.length
+    if (partialPageCount === 0) return
+    let visible: number[]
+    if (this.visiblePageNoList.length > 0) {
+      const minV = Math.min(...this.visiblePageNoList)
+      const maxV = Math.max(...this.visiblePageNoList)
+      const targetMax = Math.min(partialPageCount - 1, maxV + overscan)
+      visible = []
+      for (let p = minV; p <= targetMax; p++) visible.push(p)
+    } else {
+      visible = partialPageCount > 0 ? [0] : []
+    }
+    if (visible.length === 0) return
+    const visibleMax = Math.max(...visible)
+    // Lazy positions: only compute up to the last visible page.
+    const stale = this.position.computePositionList({
+      maxPageNo: visibleMax
+    })
+    if (stale.stalePositionsFromPageNo !== null) {
+      this._lazyPositionStaleFromPageNo = stale.stalePositionsFromPageNo
+    } else {
+      this._lazyPositionStaleFromPageNo = null
+    }
+    const elementList = this.getOriginalMainElementList()
+    const positionList = this.position.getOriginalMainPositionList()
+    for (const pageNo of visible) {
+      if (!this.pageRowList[pageNo]) continue
+      if (!this.pageList[pageNo]) continue
+      this.paintPageOnDom({
+        elementList,
+        positionList,
+        rowList: this.pageRowList[pageNo],
+        pageNo
+      })
+    }
+  }
+
+  /**
    * Force-flush any pending lazy-position refresh: run a full
    * computePositionList and clear the stale marker. Cheap on a doc whose
    * positions are already current (no-op) since position.computePositionList
@@ -6426,8 +6793,47 @@ export class Draw {
             this._scheduleLazyPositionRefresh()
           }
         } else {
-          this.position.computePositionList()
-          this._lazyPositionStaleFromPageNo = null
+          // No resumeFrom — `_tryBuildResumeFrom` rejected (most often because
+          // innerWidth changed via a left/right margin drag). Full computeRowList
+          // already ran above; the only thing left to defer is the position list
+          // itself, which previously cost ~150ms for a 28k-element doc.
+          // In lazy mode, only process visible+overscan pages and the dirty page;
+          // tail entries are preserved (stale) from the previous frame.
+          if (isLazyPosition && this.visiblePageNoList.length > 0) {
+            const overscan = 2
+            const visibleMax = Math.max(...this.visiblePageNoList)
+            // Locate dirty page so we always include it even if visible is elsewhere.
+            let cumulativeRows = 0
+            let dirtyPageNo = 0
+            const targetRow = this._dirtyRange?.start ?? 0
+            for (let p = 0; p < this.pageRowList.length; p++) {
+              cumulativeRows += this.pageRowList[p].length
+              if (cumulativeRows > targetRow) {
+                dirtyPageNo = p
+                break
+              }
+            }
+            const lazyMaxPageNo = Math.min(
+              this.pageRowList.length - 1,
+              Math.max(visibleMax, dirtyPageNo) + overscan
+            )
+            const stale = this.position.computePositionList({
+              maxPageNo: lazyMaxPageNo
+            })
+            if (stale.stalePositionsFromPageNo !== null) {
+              this._lazyPositionStaleFromPageNo = stale.stalePositionsFromPageNo
+              this._scheduleLazyPositionRefresh()
+            } else {
+              this._lazyPositionStaleFromPageNo = null
+            }
+          } else {
+            this.position.computePositionList()
+            this._lazyPositionStaleFromPageNo = null
+            if (this._lazyPositionRefreshTimer !== null) {
+              clearTimeout(this._lazyPositionRefreshTimer)
+              this._lazyPositionRefreshTimer = null
+            }
+          }
         }
         trace?.mark(
           resumeFrom ? 'computePositionList(incr)' : 'computePositionList(full)'
