@@ -5121,23 +5121,30 @@ export class Draw {
           ) {
             this.underline.render(ctx)
           }
-          // 行间距
-          const rowMargin = this.getElementRowMargin(element)
           // 元素向左偏移量
           const offsetX = element.left || 0
           // 下标元素y轴偏移值
-          let offsetY = 0
+          let subscriptOffsetY = 0
           if (element.type === ElementType.SUBSCRIPT) {
-            offsetY = this.subscriptParticle.getOffsetY(element)
+            subscriptOffsetY = this.subscriptParticle.getOffsetY(element)
           }
           // 占位符不参与颜色计算
           const color = element.control?.underline
             ? this.options.underlineColor
             : element.color
+          // Anchor underline to the per-letter baseline. `offsetY` (from
+          // position) already places the text baseline; just step down by the
+          // glyph descent so the stroke sits flush under the letters. Using
+          // row.height or row.ascent overshoots whenever rowMargin /
+          // spaceBefore / spaceAfter inflate the row geometry — the stroke
+          // would float into the line-spacing gap. Baseline-anchor matches
+          // Google Docs / Word.
+          const baselineY =
+            y + offsetY + metrics.boundingBoxDescent + subscriptOffsetY
           this.underline.recordFillInfo(
             ctx,
             x - offsetX,
-            y + curRow.height - rowMargin + offsetY,
+            baselineY,
             metrics.width + offsetX,
             0,
             color,

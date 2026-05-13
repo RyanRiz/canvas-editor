@@ -389,6 +389,11 @@ export class RangeManager {
     if (!~startIndex && !~endIndex) return false
     const elementList = this.draw.getElementList()
     const startElement = elementList[startIndex]
+    const endElement = elementList[endIndex]
+    // Defensive: range indices can fall outside elementList briefly after
+    // structural edits (paste, splice, undo). Treat missing endpoints as
+    // non-input rather than crashing on `.controlId` access.
+    if (!startElement || !endElement) return false
     if (startIndex === endIndex) {
       return (
         (startElement.controlComponent !== ControlComponent.PRE_TEXT ||
@@ -397,7 +402,6 @@ export class RangeManager {
         startElement.controlComponent !== ControlComponent.POST_TEXT
       )
     }
-    const endElement = elementList[endIndex]
     // 选区前后不是控件 || 选区前不是控件或是后缀&&选区后不是控件或是后缀 || 选区在控件内
     return (
       (!startElement.controlId && !endElement.controlId) ||

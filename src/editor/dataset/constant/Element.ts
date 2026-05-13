@@ -73,6 +73,8 @@ export const EDITOR_ELEMENT_ZIP_ATTR: Array<keyof IElement> = [
   'rightIndent',
   'firstLineIndent',
   'tabStops',
+  'spaceBefore',
+  'spaceAfter',
   'paragraphShading',
   'dashArray',
   'trList',
