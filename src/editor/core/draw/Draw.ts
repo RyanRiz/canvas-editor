@@ -323,6 +323,12 @@ export class Draw {
   // render races in. The chunked driver bails out as soon as it observes
   // its id no longer matches.
   private _chunkedOpId: number
+  // True while `_runChunkedFullReflow` is between `markDirty` and its
+  // trailing fast-lane render. Read by `render()` to cancel chunks when an
+  // external render (typing / Enter / cursor mutation) lands mid-stream —
+  // otherwise the chunked fast-lane would overwrite the external render's
+  // result when chunks finish.
+  private _chunkedAsyncInFlight: boolean
   private pageNo: number
   private renderCount: number
   private pagePixelRatio: number | null
@@ -452,6 +458,7 @@ export class Draw {
     this._lazyPositionStaleFromPageNo = null
     this._lazyPositionRefreshTimer = null
     this._chunkedOpId = 0
+    this._chunkedAsyncInFlight = false
     this.pageNo = 0
     this.renderCount = 0
     this.pagePixelRatio = null
@@ -2288,6 +2295,7 @@ export class Draw {
    */
   private async _runChunkedFullReflow(): Promise<void> {
     const opId = ++this._chunkedOpId
+    this._chunkedAsyncInFlight = true
     this.markDirty(0, Math.max(0, this.getOriginalElementList().length - 1))
     const margins = this.getMargins()
     const pageHeight = this.getHeight()
@@ -2340,7 +2348,10 @@ export class Draw {
     let isFirstChunk = true
     this._mainRowCheckpoints = []
     while (true) {
-      if (this._chunkedOpId !== opId) return
+      if (this._chunkedOpId !== opId) {
+        this._chunkedAsyncInFlight = false
+        return
+      }
       const chunkSink: { state: IChunkResumeState | null } = { state: null }
       // First chunk uses the viewport-sized estimate so visible pages
       // land in chunk 1's partial layout; subsequent chunks use the
@@ -2385,10 +2396,36 @@ export class Draw {
         requestAnimationFrame(() => resolve())
       )
     }
-    if (this._chunkedOpId !== opId) return
+    if (this._chunkedOpId !== opId) {
+      this._chunkedAsyncInFlight = false
+      return
+    }
     this.rowList = rowList
+    if (this._mainRowCheckpoints.length !== rowList.length) {
+      console.warn(
+        '[ChunkedReflow] checkpoint/row length mismatch — clearing',
+        {
+          checkpoints: this._mainRowCheckpoints.length,
+          rows: rowList.length
+        }
+      )
+      this._mainRowCheckpoints = []
+    }
     this.clearDirtyRange()
     this._skipMainRowCompute = true
+    // Diag: log sig at chunked-finalization entry/exit so a subsequent
+    // _tryBuildResumeFrom "layout sig incompatible" rejection can be
+    // correlated with WHICH field drifted.
+    const preInner = this.getInnerWidth()
+    const prePaging = this.getIsPagingMode()
+    console.log('[ChunkedReflow] pre-finalize-render', {
+      innerWidth: preInner,
+      isPagingMode: prePaging,
+      scale: this.options.scale,
+      defaultSize: this.options.defaultSize,
+      defaultRowMargin: this.options.defaultRowMargin,
+      defaultTabWidth: this.options.defaultTabWidth
+    })
     try {
       this.render({
         isSubmitHistory: false,
@@ -2397,7 +2434,19 @@ export class Draw {
       })
     } finally {
       this._skipMainRowCompute = false
+      this._chunkedAsyncInFlight = false
     }
+    console.log('[ChunkedReflow] post-finalize-render', {
+      storedSig: this._mainLayoutSig,
+      currentSig: {
+        scale: this.options.scale,
+        innerWidth: this.getInnerWidth(),
+        isPagingMode: this.getIsPagingMode(),
+        defaultSize: this.options.defaultSize,
+        defaultRowMargin: this.options.defaultRowMargin,
+        defaultTabWidth: this.options.defaultTabWidth
+      }
+    })
   }
 
   public getOriginValue(
@@ -2558,17 +2607,40 @@ export class Draw {
     isPagingMode: boolean
     innerWidth: number
   }): boolean {
-    if (!this._mainLayoutSig) return false
+    if (!this._mainLayoutSig) {
+      console.log('[LayoutSig] incompatible: stored sig is null')
+      return false
+    }
     const cur = this._buildLayoutSig(extra)
     const old = this._mainLayoutSig
-    return (
+    const eq =
       cur.scale === old.scale &&
       cur.innerWidth === old.innerWidth &&
       cur.isPagingMode === old.isPagingMode &&
       cur.defaultSize === old.defaultSize &&
       cur.defaultRowMargin === old.defaultRowMargin &&
       cur.defaultTabWidth === old.defaultTabWidth
-    )
+    if (!eq) {
+      // Identify which field drifted — diagnostic for `_runChunkedFullReflow`
+      // and other chunked / async paths.
+      const diff: Record<string, { stored: unknown; current: unknown }> = {}
+      ;(
+        [
+          'scale',
+          'innerWidth',
+          'isPagingMode',
+          'defaultSize',
+          'defaultRowMargin',
+          'defaultTabWidth'
+        ] as const
+      ).forEach(k => {
+        if (cur[k] !== old[k]) {
+          diff[k] = { stored: old[k], current: cur[k] }
+        }
+      })
+      console.log('[LayoutSig] incompatible: field drift', diff)
+    }
+    return eq
   }
 
   /**
@@ -6328,6 +6400,16 @@ export class Draw {
   }
 
   public render(payload?: IDrawOption) {
+    // PERF chunked-rAF: if an async chunked reflow is in flight and an
+    // EXTERNAL render fires (typing / Enter / cursor mutation / option
+    // change), cancel the chunked op so its trailing fast-lane doesn't
+    // overwrite this render's result. `_skipMainRowCompute` distinguishes
+    // the chunked driver's OWN fast-lane render (which we want to allow)
+    // from external renders that arrived mid-stream.
+    if (this._chunkedAsyncInFlight && !this._skipMainRowCompute) {
+      this._chunkedOpId++
+      this._chunkedAsyncInFlight = false
+    }
     // 同步 render 进入时若仍有 rAF 队列：合并并取消，确保后续调用看到的视图与
     // history 是最新的（避免被即将到来的 rAF 回调覆盖）。
     if (this._pendingRenderPayload || this._pendingRenderFrameId !== null) {
