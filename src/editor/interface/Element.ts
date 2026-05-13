@@ -18,6 +18,7 @@ import { ITextDecoration } from './Text'
 import { ITitle } from './Title'
 import { IColgroup } from './table/Colgroup'
 import { ITr } from './table/Tr'
+import { ITabStop } from './Ruler'
 
 export interface IElementBasic {
   id?: string
@@ -58,6 +59,29 @@ export interface IElementStyle {
   textDecoration?: ITextDecoration
   indent?: number
   rightIndent?: number
+  /**
+   * MS Word-style first-line indent — an extra offset applied **only to the
+   * first row of the paragraph**, on top of `indent`. Stored as fractional
+   * tab-width units (same unit as `indent` / `rightIndent`), so the ruler can
+   * drive non-integer drags. Stamped on every element of the paragraph (mirrors
+   * `indent`); reads converge on the cursor element.
+   *
+   * Word's three left markers map as:
+   *   - First-line triangle position  = `indent + firstLineIndent`
+   *   - Hanging triangle position     = `indent`
+   *   - Left rectangle moves both     (preserves `firstLineIndent` delta)
+   */
+  firstLineIndent?: number
+  /**
+   * Word `<w:tabs>` — per-paragraph tab stops. Stamped on every element of the
+   * paragraph (mirrors `indent` / `firstLineIndent`). Positions are CSS pixels
+   * at scale=1, measured from the paragraph's left indent boundary.
+   *
+   * When a `\t` character is rendered, the layout walks `tabStops` for the
+   * first stop > current X; if none, falls back to the implicit default-tab
+   * grid (`options.ruler.defaultTabStopInterval` at scale=1).
+   */
+  tabStops?: ITabStop[]
   spaceBefore?: number
   spaceAfter?: number
 }

@@ -853,11 +853,22 @@ export class TableOperate {
       for (let c = 0; c < rowCol[r].length; c++) {
         const td = rowCol[r][c]
         if (td.rowIndex! < minRowIndex) minRowIndex = td.rowIndex!
-        if (td.rowIndex! + td.rowspan - 1 > maxRowIndex) maxRowIndex = td.rowIndex! + td.rowspan - 1
+        if (td.rowIndex! + td.rowspan - 1 > maxRowIndex)
+          maxRowIndex = td.rowIndex! + td.rowspan - 1
         if (td.colIndex! < minColIndex) minColIndex = td.colIndex!
-        if (td.colIndex! + td.colspan - 1 > maxColIndex) maxColIndex = td.colIndex! + td.colspan - 1
+        if (td.colIndex! + td.colspan - 1 > maxColIndex)
+          maxColIndex = td.colIndex! + td.colspan - 1
       }
     }
+
+    // 捕获旧值供 delta 逆操作
+    const oldValues = rowCol.flat().map(td => ({
+      td,
+      borderTypes: td.borderTypes?.slice() as TdBorder[] | undefined,
+      borderColor: td.borderColor,
+      borderWidth: td.borderWidth,
+      borderStyle: td.borderStyle
+    }))
 
     for (let r = 0; r < rowCol.length; r++) {
       const row = rowCol[r]
@@ -876,7 +887,6 @@ export class TableOperate {
             TdBorder.LEFT
           ]
         } else if (payload === TableBorder.EMPTY) {
-          // 保留空数组作为"明确无边框"标志，不 delete，避免网格线仍然渲染
           td.borderTypes = []
         } else if (payload === TableBorder.EXTERNAL) {
           td.borderTypes = []
@@ -894,91 +904,188 @@ export class TableOperate {
       }
     }
     const { endIndex } = this.range.getRange()
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {},
+      applyBackward: () => {
+        for (const item of oldValues) {
+          if (item.borderTypes !== undefined) {
+            item.td.borderTypes = item.borderTypes.slice()
+          } else {
+            delete (item.td as unknown as Record<string, unknown>).borderTypes
+          }
+          if (item.borderColor !== undefined) {
+            item.td.borderColor = item.borderColor
+          } else {
+            delete (item.td as unknown as Record<string, unknown>).borderColor
+          }
+          if (item.borderWidth !== undefined) {
+            item.td.borderWidth = item.borderWidth
+          } else {
+            delete (item.td as unknown as Record<string, unknown>).borderWidth
+          }
+          if (item.borderStyle !== undefined) {
+            item.td.borderStyle = item.borderStyle
+          } else {
+            delete (item.td as unknown as Record<string, unknown>).borderStyle
+          }
+        }
+        this.draw.render({
+          curIndex: endIndex,
+          isSetCursor: false,
+          isCompute: false,
+          isSubmitHistory: false
+        })
+      }
+    })
     this.draw.render({
       curIndex: endIndex,
       isSetCursor: false,
-      isCompute: false
+      isCompute: false,
+      isSubmitHistory: false
     })
   }
 
   public tableBorderColor(payload: string) {
     const rowCol = this.tableParticle.getRangeRowCol()
     if (!rowCol) return
-    for (let r = 0; r < rowCol.length; r++) {
-      const row = rowCol[r]
-      for (let c = 0; c < row.length; c++) {
-        const td = row[c]
-        td.borderColor = payload
-        // 确保所有四条边都被显式渲染，使颜色变化在所有边上生效
-        if (!td.borderTypes?.length) {
-          td.borderTypes = [
-            TdBorder.TOP,
-            TdBorder.RIGHT,
-            TdBorder.BOTTOM,
-            TdBorder.LEFT
-          ]
-        }
+    const flat = rowCol.flat()
+    const oldValues = flat.map(td => ({
+      td,
+      borderColor: td.borderColor,
+      borderTypes: td.borderTypes?.slice() as TdBorder[] | undefined
+    }))
+    for (const td of flat) {
+      td.borderColor = payload
+      if (!td.borderTypes?.length) {
+        td.borderTypes = [
+          TdBorder.TOP,
+          TdBorder.RIGHT,
+          TdBorder.BOTTOM,
+          TdBorder.LEFT
+        ]
       }
     }
     const { endIndex } = this.range.getRange()
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {},
+      applyBackward: () => {
+        for (const item of oldValues) {
+          if (item.borderColor !== undefined)
+            item.td.borderColor = item.borderColor
+          else delete (item.td as unknown as Record<string, unknown>).borderColor
+          if (item.borderTypes !== undefined)
+            item.td.borderTypes = item.borderTypes.slice()
+          else delete (item.td as unknown as Record<string, unknown>).borderTypes
+        }
+        this.draw.render({
+          curIndex: endIndex,
+          isSetCursor: false,
+          isCompute: false,
+          isSubmitHistory: false
+        })
+      }
+    })
     this.draw.render({
       curIndex: endIndex,
       isSetCursor: false,
-      isCompute: false
+      isCompute: false,
+      isSubmitHistory: false
     })
   }
 
   public tableBorderWidth(payload: number) {
     const rowCol = this.tableParticle.getRangeRowCol()
     if (!rowCol) return
-    for (let r = 0; r < rowCol.length; r++) {
-      const row = rowCol[r]
-      for (let c = 0; c < row.length; c++) {
-        const td = row[c]
-        td.borderWidth = payload
-        // 确保所有四条边都被显式渲染，使粗细变化在所有边上生效
-        if (!td.borderTypes?.length) {
-          td.borderTypes = [
-            TdBorder.TOP,
-            TdBorder.RIGHT,
-            TdBorder.BOTTOM,
-            TdBorder.LEFT
-          ]
-        }
+    const flat = rowCol.flat()
+    const oldValues = flat.map(td => ({
+      td,
+      borderWidth: td.borderWidth,
+      borderTypes: td.borderTypes?.slice() as TdBorder[] | undefined
+    }))
+    for (const td of flat) {
+      td.borderWidth = payload
+      if (!td.borderTypes?.length) {
+        td.borderTypes = [
+          TdBorder.TOP,
+          TdBorder.RIGHT,
+          TdBorder.BOTTOM,
+          TdBorder.LEFT
+        ]
       }
     }
     const { endIndex } = this.range.getRange()
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {},
+      applyBackward: () => {
+        for (const item of oldValues) {
+          if (item.borderWidth !== undefined)
+            item.td.borderWidth = item.borderWidth
+          else delete (item.td as unknown as Record<string, unknown>).borderWidth
+          if (item.borderTypes !== undefined)
+            item.td.borderTypes = item.borderTypes.slice()
+          else delete (item.td as unknown as Record<string, unknown>).borderTypes
+        }
+        this.draw.render({
+          curIndex: endIndex,
+          isSetCursor: false,
+          isCompute: false,
+          isSubmitHistory: false
+        })
+      }
+    })
     this.draw.render({
       curIndex: endIndex,
       isSetCursor: false,
-      isCompute: false
+      isCompute: false,
+      isSubmitHistory: false
     })
   }
 
   public tableBorderStyle(payload: TableBorderStyle) {
     const rowCol = this.tableParticle.getRangeRowCol()
     if (!rowCol) return
-    for (let r = 0; r < rowCol.length; r++) {
-      const row = rowCol[r]
-      for (let c = 0; c < row.length; c++) {
-        const td = row[c]
-        td.borderStyle = payload
-        // 确保所有四条边都被显式渲染，使样式变化在所有边上生效
-        if (!td.borderTypes?.length) {
-          td.borderTypes = [
-            TdBorder.TOP,
-            TdBorder.RIGHT,
-            TdBorder.BOTTOM,
-            TdBorder.LEFT
-          ]
-        }
+    const flat = rowCol.flat()
+    const oldValues = flat.map(td => ({
+      td,
+      borderStyle: td.borderStyle,
+      borderTypes: td.borderTypes?.slice() as TdBorder[] | undefined
+    }))
+    for (const td of flat) {
+      td.borderStyle = payload
+      if (!td.borderTypes?.length) {
+        td.borderTypes = [
+          TdBorder.TOP,
+          TdBorder.RIGHT,
+          TdBorder.BOTTOM,
+          TdBorder.LEFT
+        ]
       }
     }
     const { endIndex } = this.range.getRange()
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {},
+      applyBackward: () => {
+        for (const item of oldValues) {
+          if (item.borderStyle !== undefined)
+            item.td.borderStyle = item.borderStyle
+          else delete (item.td as unknown as Record<string, unknown>).borderStyle
+          if (item.borderTypes !== undefined)
+            item.td.borderTypes = item.borderTypes.slice()
+          else delete (item.td as unknown as Record<string, unknown>).borderTypes
+        }
+        this.draw.render({
+          curIndex: endIndex,
+          isSetCursor: false,
+          isCompute: false,
+          isSubmitHistory: false
+        })
+      }
+    })
     this.draw.render({
       curIndex: endIndex,
       isSetCursor: false,
-      isCompute: false
+      isCompute: false,
+      isSubmitHistory: false
     })
   }
 
@@ -995,34 +1102,51 @@ export class TableOperate {
       for (let c = 0; c < rowCol[r].length; c++) {
         const td = rowCol[r][c]
         if (td.rowIndex! < minRowIndex) minRowIndex = td.rowIndex!
-        if (td.rowIndex! + td.rowspan - 1 > maxRowIndex) maxRowIndex = td.rowIndex! + td.rowspan - 1
+        if (td.rowIndex! + td.rowspan - 1 > maxRowIndex)
+          maxRowIndex = td.rowIndex! + td.rowspan - 1
         if (td.colIndex! < minColIndex) minColIndex = td.colIndex!
-        if (td.colIndex! + td.colspan - 1 > maxColIndex) maxColIndex = td.colIndex! + td.colspan - 1
+        if (td.colIndex! + td.colspan - 1 > maxColIndex)
+          maxColIndex = td.colIndex! + td.colspan - 1
       }
     }
-    
+
     // 找出目标单元格：选区边缘的单元格
     const targetCells: ITd[] = []
     for (let r = 0; r < rowCol.length; r++) {
       const row = rowCol[r]
       for (let c = 0; c < row.length; c++) {
         const td = row[c]
-        if (payload === TdBorder.TOP && td.rowIndex === minRowIndex) targetCells.push(td)
-        if (payload === TdBorder.BOTTOM && td.rowIndex! + td.rowspan - 1 === maxRowIndex) targetCells.push(td)
-        if (payload === TdBorder.LEFT && td.colIndex === minColIndex) targetCells.push(td)
-        if (payload === TdBorder.RIGHT && td.colIndex! + td.colspan - 1 === maxColIndex) targetCells.push(td)
+        if (payload === TdBorder.TOP && td.rowIndex === minRowIndex)
+          targetCells.push(td)
+        if (
+          payload === TdBorder.BOTTOM &&
+          td.rowIndex! + td.rowspan - 1 === maxRowIndex
+        )
+          targetCells.push(td)
+        if (payload === TdBorder.LEFT && td.colIndex === minColIndex)
+          targetCells.push(td)
+        if (
+          payload === TdBorder.RIGHT &&
+          td.colIndex! + td.colspan - 1 === maxColIndex
+        )
+          targetCells.push(td)
       }
     }
 
     // 存在则设置边框类型，否则取消设置
     const isSetBorderType = targetCells.some(td => {
-      if (td.borderTypes === undefined) return false // 默认状态视为四边都有，所以不缺少该边框（需要 toggle off）
+      if (td.borderTypes === undefined) return false
       return !td.borderTypes.includes(payload)
     })
 
+    // 捕获旧值供 delta 逆操作
+    const oldValues = targetCells.map(td => ({
+      td,
+      borderTypes: td.borderTypes?.slice() as TdBorder[] | undefined
+    }))
+
     targetCells.forEach(td => {
       if (td.borderTypes === undefined) {
-        // 从默认状态切换时，先设置全部四边（表示接管网格线控制权）
         td.borderTypes = [
           TdBorder.TOP,
           TdBorder.RIGHT,
@@ -1040,13 +1164,31 @@ export class TableOperate {
           td.borderTypes.splice(borderTypeIndex, 1)
         }
       }
-      // 保留空数组作为"明确无边框"标志，不 delete
     })
     const { endIndex } = this.range.getRange()
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {},
+      applyBackward: () => {
+        for (const item of oldValues) {
+          if (item.borderTypes !== undefined) {
+            item.td.borderTypes = item.borderTypes.slice()
+          } else {
+            delete (item.td as unknown as Record<string, unknown>).borderTypes
+          }
+        }
+        this.draw.render({
+          curIndex: endIndex,
+          isSetCursor: false,
+          isCompute: false,
+          isSubmitHistory: false
+        })
+      }
+    })
     this.draw.render({
       curIndex: endIndex,
       isSetCursor: false,
-      isCompute: false
+      isCompute: false,
+      isSubmitHistory: false
     })
   }
 

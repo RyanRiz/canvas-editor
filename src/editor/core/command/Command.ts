@@ -101,8 +101,12 @@ export class Command {
   public executePageScaleMinus: CommandAdapt['pageScaleMinus']
   public executePageScaleAdd: CommandAdapt['pageScaleAdd']
   public executePaperSize: CommandAdapt['paperSize']
+  public executePaperSizeAsync: CommandAdapt['paperSizeAsync']
   public executePaperDirection: CommandAdapt['paperDirection']
+  public executePaperDirectionAsync: CommandAdapt['paperDirectionAsync']
+  public executeRunChunkedFullReflow: CommandAdapt['runChunkedFullReflow']
   public executeSetPaperMargin: CommandAdapt['setPaperMargin']
+  public executeSetPaperMarginAsync: CommandAdapt['setPaperMarginAsync']
   public executeSetMainBadge: CommandAdapt['setMainBadge']
   public executeSetAreaBadge: CommandAdapt['setAreaBadge']
   public executeInsertElementList: CommandAdapt['insertElementList']
@@ -293,8 +297,12 @@ export class Command {
     this.executePageScaleMinus = adapt.pageScaleMinus.bind(adapt)
     this.executePageScaleAdd = adapt.pageScaleAdd.bind(adapt)
     this.executePaperSize = adapt.paperSize.bind(adapt)
+    this.executePaperSizeAsync = adapt.paperSizeAsync.bind(adapt)
     this.executePaperDirection = adapt.paperDirection.bind(adapt)
+    this.executePaperDirectionAsync = adapt.paperDirectionAsync.bind(adapt)
+    this.executeRunChunkedFullReflow = adapt.runChunkedFullReflow.bind(adapt)
     this.executeSetPaperMargin = adapt.setPaperMargin.bind(adapt)
+    this.executeSetPaperMarginAsync = adapt.setPaperMarginAsync.bind(adapt)
     // 签章
     this.executeSetMainBadge = adapt.setMainBadge.bind(adapt)
     this.executeSetAreaBadge = adapt.setAreaBadge.bind(adapt)
