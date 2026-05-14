@@ -300,6 +300,9 @@ export class Draw {
   // spliceElementList 不应再次把事件推回 _pendingHistoryMutations，否则形成
   // 自相干循环：当前撤销动作会被自己再记录一次。
   private _isReplayingHistory: boolean
+  // 临时禁用历史记录，用于复合操作（如列表切换）内部的多步操作
+  // 合并为单个 undo 条目。由 disableHistory/enableHistory 控制。
+  private _historyDisabled: boolean
   // 「scale-only」快路径标志位。setPageScale 在确认仅缩放发生改动时已就地把
   // rowList / element.metrics / table cache 等 scale-相关字段乘以 ratio，因此
   // 下一帧 render() 不必再跑 O(N) 的 computeRowList——只需重做 _computePageList /
@@ -427,6 +430,7 @@ export class Draw {
     this._deltaHistoryUnsafe = false
     this._preMutationMeta = null
     this._isReplayingHistory = false
+    this._historyDisabled = false
     this._mainSurroundCount = null
     this._mainAreaCount = null
     this._skipMainRowCompute = false
@@ -1019,6 +1023,18 @@ export class Draw {
 
   public getHistoryManager(): HistoryManager {
     return this.historyManager
+  }
+
+  public disableHistory() {
+    this._historyDisabled = true
+  }
+
+  public enableHistory() {
+    this._historyDisabled = false
+  }
+
+  public isHistoryDisabled(): boolean {
+    return this._historyDisabled
   }
 
   public getPosition(): Position {
@@ -6412,6 +6428,8 @@ export class Draw {
   }
 
   public submitHistory(curIndex: number | undefined) {
+    console.log('[HIST-ENTER] submitHistory called, disabled:', this._historyDisabled, 'stack before:', this.historyManager['undoStack'].length)
+    if (this._historyDisabled) return
     // PERF-PLAN §1.2 / Phase 1.2：尝试走 delta 分支——上一次 submit 之后只
     // 经历了 main / table（含 tdPath）纯 splice，没有 deletable 跳过、没有
     // listId 旁清理、没有 header / footer 改动、且初始 snapshot 已在栈底。

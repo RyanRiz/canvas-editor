@@ -1,3 +1,4 @@
+console.log('SENTINEL-LIB-' + Date.now())
 import './assets/css/index.css'
 import { version } from '../../package.json'
 import { IEditorData, IEditorOption, IEditorResult } from './interface/Editor'
@@ -171,6 +172,11 @@ export default class Editor {
     // 插件
     const plugin = new Plugin(this)
     this.use = plugin.use.bind(plugin)
+    // Debug: expose instance globally for browser-side testing.
+    // Safe: idempotent, opt-out by deleting window.__canvasEditor after init.
+    if (typeof window !== 'undefined') {
+      ;(window as unknown as { __canvasEditor?: Editor }).__canvasEditor = this
+    }
   }
 }
 

@@ -2,7 +2,12 @@ import { ZERO } from '../../../dataset/constant/Common'
 import { LIST_INDENT_STEP } from '../../../dataset/constant/listLevel'
 import { ElementType } from '../../../dataset/enum/Element'
 import { KeyMap } from '../../../dataset/enum/KeyMap'
-import { ListStyle, ListType } from '../../../dataset/enum/List'
+import {
+  ListStyle,
+  ListType,
+  OlStyle,
+  UlStyle
+} from '../../../dataset/enum/List'
 import { DeepRequired } from '../../../interface/Common'
 import { IEditorOption } from '../../../interface/Editor'
 import { IElement, IElementPosition } from '../../../interface/Element'
@@ -31,6 +36,9 @@ export class ListParticle {
   private readonly MEASURE_BASE_TEXT = '0'
   private readonly LIST_GAP = 10
 
+  private currentUnorderedStyle: UlStyle = UlStyle.DISC
+  private currentOrderedStyle: OlStyle = OlStyle.DECIMAL
+
   constructor(draw: Draw) {
     this.draw = draw
     this.range = draw.getRange()
@@ -42,10 +50,27 @@ export class ListParticle {
     if (isReadonly) return
     const { startIndex, endIndex } = this.range.getRange()
     if (!~startIndex && !~endIndex) return
+    // Session memory: track the last-chosen style per list family so plain
+    // toolbar clicks always apply the same style uniformly across scope.
+    if (listStyle !== undefined) {
+      if (listType === ListType.UL) {
+        this.currentUnorderedStyle = listStyle as unknown as UlStyle
+      } else if (listType === ListType.OL) {
+        this.currentOrderedStyle = listStyle as unknown as OlStyle
+      }
+    }
+    // Resolve effective style: explicit arg wins, otherwise session default.
+    const effectiveStyle =
+      listStyle ??
+      (listType === ListType.UL
+        ? (this.currentUnorderedStyle as unknown as ListStyle)
+        : listType === ListType.OL
+          ? (this.currentOrderedStyle as unknown as ListStyle)
+          : undefined)
     const changeElementList = this.range.getRangeParagraphElementList()
     if (!changeElementList || !changeElementList.length) return
     const isUnsetList = changeElementList.find(
-      el => el.listType === listType && el.listStyle === listStyle
+      el => el.listType === listType && el.listStyle === effectiveStyle
     )
     if (isUnsetList || !listType) {
       this.unsetList()
@@ -91,7 +116,7 @@ export class ListParticle {
     const unifiedListId = seedListId || getUUID()
     const changeSet = new Set(changeElementList)
     type UnifyRecord = {
-      el: IElement
+      mainIndex: number
       listId: string | undefined
       listType: ListType | undefined
       listStyle: ListStyle | undefined
@@ -100,13 +125,15 @@ export class ListParticle {
     }
     const unifyRecords: UnifyRecord[] = []
     const isCollapsed = startIndex === endIndex
-    // When the selection is collapsed (cursor only, no highlight), apply
-    // the list toggle to the ENTIRE contiguous list block that the cursor
-    // sits in — matching Microsoft Word's behaviour. Range selections
-    // only affect the paragraphs that intersect the selection.
+    // Capture element positions by index, NOT by reference.
+    // _submitSnapshotHistory restores via `this.elementList = deepClone(...)`,
+    // which invalidates any captured element reference. Re-resolving via
+    // index at apply-time survives snapshot restore (indices stay stable).
     for (const el of changeElementList) {
+      const idx = mainList.indexOf(el)
+      if (idx < 0) continue
       unifyRecords.push({
-        el,
+        mainIndex: idx,
         listId: el.listId,
         listType: el.listType,
         listStyle: el.listStyle,
@@ -119,7 +146,7 @@ export class ListParticle {
       if (!el.listId) continue
       if (changeSet.has(el)) continue
       unifyRecords.push({
-        el,
+        mainIndex: p,
         listId: el.listId,
         listType: el.listType,
         listStyle: el.listStyle,
@@ -127,37 +154,44 @@ export class ListParticle {
         isSelected: isCollapsed
       })
     }
+    const draw = this.draw
     const applyForward = () => {
+      const list = draw.getElementList()
       for (const rec of unifyRecords) {
-        rec.el.listId = unifiedListId
+        const el = list[rec.mainIndex]
+        if (!el) continue
+        el.listId = unifiedListId
         if (rec.isSelected) {
-          rec.el.listType = listType
-          rec.el.listStyle = listStyle
-          rec.el.listLevel = 1
+          el.listType = listType
+          el.listStyle = effectiveStyle
+          el.listLevel = 1
         }
       }
     }
     const applyBackward = () => {
+      const list = draw.getElementList()
       for (const rec of unifyRecords) {
+        const el = list[rec.mainIndex]
+        if (!el) continue
         if (rec.listId === undefined) {
-          delete rec.el.listId
+          delete el.listId
         } else {
-          rec.el.listId = rec.listId
+          el.listId = rec.listId
         }
         if (rec.listType === undefined) {
-          delete rec.el.listType
+          delete el.listType
         } else {
-          rec.el.listType = rec.listType
+          el.listType = rec.listType
         }
         if (rec.listStyle === undefined) {
-          delete rec.el.listStyle
+          delete el.listStyle
         } else {
-          rec.el.listStyle = rec.listStyle
+          el.listStyle = rec.listStyle
         }
         if (rec.listLevel === undefined) {
-          delete rec.el.listLevel
+          delete el.listLevel
         } else {
-          rec.el.listLevel = rec.listLevel
+          el.listLevel = rec.listLevel
         }
       }
     }
@@ -167,11 +201,11 @@ export class ListParticle {
     this.draw.getHistoryManager().executeDelta({
       applyForward: () => {
         applyForward()
-        this.draw.render({ curIndex, isSetCursor })
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
       },
       applyBackward: () => {
         applyBackward()
-        this.draw.render({ curIndex, isSetCursor })
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
       }
     })
     this.draw.markDirty(spanStart, spanEnd)
@@ -241,14 +275,19 @@ export class ListParticle {
         start++
       }
     }
-    // 捕获变更前的所有状态
-    const oldValues = changeElementList.map(el => ({
-      el,
-      listId: el.listId,
-      listType: el.listType,
-      listStyle: el.listStyle,
-      listWrap: el.listWrap
-    }))
+    // Capture element positions by index, NOT by reference.
+    // _submitSnapshotHistory replaces this.elementList via deepClone, which
+    // invalidates element refs and the captured `elementList` variable too.
+    const oldValues = changeElementList
+      .map(el => ({
+        mainIndex: elementList.indexOf(el),
+        listId: el.listId,
+        listType: el.listType,
+        listStyle: el.listStyle,
+        listWrap: el.listWrap,
+        listLevel: el.listLevel
+      }))
+      .filter(v => v.mainIndex >= 0)
     // 应用变更
     if (needZeroInsert) {
       elementList.splice(zeroInsertIndex, 0, { value: ZERO })
@@ -262,30 +301,40 @@ export class ListParticle {
     })
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
+    const draw = this.draw
     this.draw.getHistoryManager().executeDelta({
       applyForward: () => {
-        if (needZeroInsert) {
-          elementList.splice(zeroInsertIndex, 0, { value: ZERO })
-        }
+        const list = draw.getElementList()
+        // Property writes BEFORE splice so pre-splice indices stay valid.
         for (const item of oldValues) {
-          delete item.el.listId
-          delete item.el.listType
-          delete item.el.listStyle
-          delete item.el.listWrap
+          const el = list[item.mainIndex]
+          if (!el) continue
+          delete el.listId
+          delete el.listType
+          delete el.listStyle
+          delete el.listWrap
+          delete el.listLevel
         }
-        this.draw.render({ curIndex, isSetCursor })
+        if (needZeroInsert) {
+          list.splice(zeroInsertIndex, 0, { value: ZERO })
+        }
+        draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
       },
       applyBackward: () => {
+        const list = draw.getElementList()
         if (needZeroInsert) {
-          elementList.splice(zeroInsertIndex, 1)
+          list.splice(zeroInsertIndex, 1)
         }
         for (const item of oldValues) {
-          item.el.listId = item.listId
-          item.el.listType = item.listType
-          item.el.listStyle = item.listStyle
-          if (item.listWrap !== undefined) item.el.listWrap = item.listWrap
+          const el = list[item.mainIndex]
+          if (!el) continue
+          el.listId = item.listId
+          el.listType = item.listType
+          el.listStyle = item.listStyle
+          if (item.listWrap !== undefined) el.listWrap = item.listWrap
+          if (item.listLevel !== undefined) el.listLevel = item.listLevel
         }
-        this.draw.render({ curIndex, isSetCursor })
+        draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
       }
     })
     // Compute dirty range — expand to full block when we broadened scope
@@ -379,6 +428,289 @@ export class ListParticle {
     return true
   }
 
+  /**
+   * Combined list toggle that sets the list type AND applies a style config
+   * within a single undo entry. Calling setList() then applyStyle() separately
+   * pushes two deltas — this method produces exactly one.
+   */
+  public setListWithStyle(
+    listType: ListType | null,
+    listStyle?: ListStyle,
+    styleConfig?: IListStyle
+  ) {
+    if (this.draw.isReadonly()) return
+    // ---- Phase 1: setList (same logic as public setList) ----
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    if (listStyle !== undefined) {
+      if (listType === ListType.UL) {
+        this.currentUnorderedStyle = listStyle as unknown as UlStyle
+      } else if (listType === ListType.OL) {
+        this.currentOrderedStyle = listStyle as unknown as OlStyle
+      }
+    }
+    const effectiveStyle =
+      listStyle ??
+      (listType === ListType.UL
+        ? (this.currentUnorderedStyle as unknown as ListStyle)
+        : listType === ListType.OL
+          ? (this.currentOrderedStyle as unknown as ListStyle)
+          : undefined)
+    let changeElementList = this.range.getRangeParagraphElementList()
+    if (!changeElementList || !changeElementList.length) return
+    // Only toggle-off when no explicit styleConfig was provided (plain toggle).
+    // When styleConfig is present (dropdown pick), the user wants to change
+    // the style — not toggle the list off — even if type+style happen to match.
+    const isUnsetList = !styleConfig && changeElementList.find(
+      el => el.listType === listType && el.listStyle === effectiveStyle
+    )
+    if (isUnsetList || !listType) {
+      this.unsetList()
+      return
+    }
+    const mainList = this.draw.getElementList()
+    // Word parity: when the selection is collapsed and the cursor sits in
+    // an existing list block, expand changeElementList to cover the entire
+    // contiguous listId block — so the style config (bullet char, format)
+    // gets applied uniformly across the whole logical list, not just the
+    // cursor paragraph. Range selections only affect their highlighted
+    // paragraphs (no expansion).
+    {
+      const isCollapsedCheck = startIndex === endIndex
+      const cursorListId = changeElementList[0]?.listId
+      if (isCollapsedCheck && cursorListId) {
+        let bStart = mainList.indexOf(changeElementList[0])
+        while (bStart > 0 && mainList[bStart - 1]?.listId === cursorListId) {
+          bStart--
+        }
+        let bEnd = mainList.indexOf(
+          changeElementList[changeElementList.length - 1]
+        )
+        while (
+          bEnd < mainList.length - 1 &&
+          mainList[bEnd + 1]?.listId === cursorListId
+        ) {
+          bEnd++
+        }
+        const expanded: IElement[] = []
+        for (let i = bStart; i <= bEnd; i++) {
+          if (mainList[i].listId === cursorListId) expanded.push(mainList[i])
+        }
+        if (expanded.length > changeElementList.length) {
+          console.log(
+            '[HIST-DROPDOWN] expanded changeElementList from cursor-only to full block: %d elements',
+            expanded.length
+          )
+          changeElementList = expanded
+        }
+      }
+    }
+    const firstChangeIdx = mainList.indexOf(changeElementList[0])
+    const lastChangeIdx = mainList.indexOf(
+      changeElementList[changeElementList.length - 1]
+    )
+    const seedListId = changeElementList.find(el => el.listId)?.listId
+    let spanStart = firstChangeIdx
+    if (seedListId) {
+      while (spanStart > 0 && mainList[spanStart - 1]?.listId === seedListId) {
+        spanStart--
+      }
+    }
+    let spanEnd = lastChangeIdx
+    if (seedListId) {
+      while (
+        spanEnd < mainList.length - 1 &&
+        mainList[spanEnd + 1]?.listId === seedListId
+      ) {
+        spanEnd++
+      }
+    }
+    const unifiedListId = seedListId || getUUID()
+    const changeSet = new Set(changeElementList)
+    type UnifyRecord = {
+      mainIndex: number
+      listId: string | undefined
+      listType: ListType | undefined
+      listStyle: ListStyle | undefined
+      listLevel: number | undefined
+      isSelected: boolean
+    }
+    const unifyRecords: UnifyRecord[] = []
+    const isCollapsed = startIndex === endIndex
+    for (const el of changeElementList) {
+      const idx = mainList.indexOf(el)
+      if (idx < 0) continue
+      unifyRecords.push({
+        mainIndex: idx,
+        listId: el.listId,
+        listType: el.listType,
+        listStyle: el.listStyle,
+        listLevel: el.listLevel,
+        isSelected: true
+      })
+    }
+    for (let p = spanStart; p <= spanEnd && p < mainList.length; p++) {
+      const el = mainList[p]
+      if (!el.listId) continue
+      if (changeSet.has(el)) continue
+      unifyRecords.push({
+        mainIndex: p,
+        listId: el.listId,
+        listType: el.listType,
+        listStyle: el.listStyle,
+        listLevel: el.listLevel,
+        isSelected: isCollapsed
+      })
+    }
+
+    console.log(
+      '[HIST-DROPDOWN] ListParticle.setListWithStyle: isCollapsed=%s changeElementList=%d unifyRecords=%d span=[%d,%d]',
+      isCollapsed,
+      changeElementList.length,
+      unifyRecords.length,
+      spanStart,
+      spanEnd
+    )
+
+    // ---- Phase 2: style-config capture (same logic as applyStyle) ----
+    const byLevel = styleConfig?.levels?.length
+      ? new Map<number, (typeof styleConfig.levels)[number]>()
+      : null
+    if (byLevel) {
+      for (const lvl of styleConfig!.levels) byLevel.set(lvl.level, lvl)
+    }
+    // When cursor is collapsed, apply style config (bullet char, number style)
+    // to the entire contiguous list block, not just the cursor's paragraph.
+    // Mirrors the block-expansion pattern in applyStyle().
+    if (isCollapsed && byLevel) {
+      const expanded: IElement[] = []
+      for (let p = spanStart; p <= spanEnd && p < mainList.length; p++) {
+        if (mainList[p].listId) {
+          expanded.push(mainList[p])
+        }
+      }
+      if (expanded.length > changeElementList.length) {
+        changeElementList = expanded
+        console.log(
+          '[HIST-DROPDOWN] expanded changeElementList from cursor-only to full block: %d elements',
+          expanded.length
+        )
+      }
+    }
+    const styleOldValues = byLevel
+      ? changeElementList
+          .map(el => ({
+            mainIndex: mainList.indexOf(el),
+            listFormat: el.listFormat,
+            listBulletChar: el.listBulletChar,
+            listNumberStyle: el.listNumberStyle
+          }))
+          .filter(v => v.mainIndex >= 0)
+      : []
+
+    // ---- Combined apply ----
+    const draw = this.draw
+    const applyForwardCombined = () => {
+      const list = draw.getElementList()
+      for (const rec of unifyRecords) {
+        const el = list[rec.mainIndex]
+        if (!el) continue
+        el.listId = unifiedListId
+        if (rec.isSelected) {
+          el.listType = listType
+          el.listStyle = effectiveStyle
+          el.listLevel = 1
+        }
+      }
+      if (byLevel) {
+        for (const item of styleOldValues) {
+          const el = list[item.mainIndex]
+          if (!el) continue
+          const lvl = el.listLevel ?? 1
+          const cfg = byLevel.get(lvl)
+          if (!cfg) continue
+          if (cfg.format) el.listFormat = cfg.format
+          if (cfg.numberStyle === 'bullet') {
+            if (cfg.bulletChar) {
+              el.listBulletChar = cfg.bulletChar
+              console.log(
+                '[HIST-DROPDOWN] applyForwardCombined: idx=%d listBulletChar=%s',
+                item.mainIndex,
+                cfg.bulletChar
+              )
+            }
+          } else if (cfg.numberStyle) {
+            el.listNumberStyle = cfg.numberStyle
+          }
+        }
+      }
+    }
+
+    const applyBackwardCombined = () => {
+      const list = draw.getElementList()
+      for (const rec of unifyRecords) {
+        const el = list[rec.mainIndex]
+        if (!el) continue
+        if (rec.listId === undefined) {
+          delete el.listId
+        } else {
+          el.listId = rec.listId
+        }
+        if (rec.listType === undefined) {
+          delete el.listType
+        } else {
+          el.listType = rec.listType
+        }
+        if (rec.listStyle === undefined) {
+          delete el.listStyle
+        } else {
+          el.listStyle = rec.listStyle
+        }
+        if (rec.listLevel === undefined) {
+          delete el.listLevel
+        } else {
+          el.listLevel = rec.listLevel
+        }
+      }
+      for (const item of styleOldValues) {
+        const el = list[item.mainIndex]
+        if (!el) continue
+        if (item.listFormat === undefined) {
+          delete el.listFormat
+        } else {
+          el.listFormat = item.listFormat
+        }
+        if (item.listBulletChar === undefined) {
+          delete el.listBulletChar
+        } else {
+          el.listBulletChar = item.listBulletChar
+        }
+        if (item.listNumberStyle === undefined) {
+          delete el.listNumberStyle
+        } else {
+          el.listNumberStyle = item.listNumberStyle
+        }
+      }
+    }
+
+    applyForwardCombined()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForwardCombined()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackwardCombined()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(spanStart, spanEnd)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+  }
+
   public computeListLayout(
     ctx: CanvasRenderingContext2D,
     elementList: IElement[]
@@ -454,27 +786,112 @@ export class ListParticle {
     if (this.draw.isReadonly()) return false
     const { startIndex, endIndex } = this.range.getRange()
     if (!~startIndex && !~endIndex) return false
-    const changeElementList = this.range
+    let changeElementList = this.range
       .getRangeParagraphElementList()
       ?.filter(el => el.listId)
     if (!changeElementList || !changeElementList.length) return false
     if (!style?.levels?.length) return false
+    // Word parity: when the selection is collapsed, apply the style
+    // config to the entire contiguous listId block — same expansion
+    // pattern used by setList() and unsetList(). Without this, the
+    // cursor paragraph gets properties (e.g. listBulletChar) that
+    // neighbor paragraphs lack, causing divergent glyph rendering.
+    const isCollapsed = startIndex === endIndex
+    if (isCollapsed && changeElementList[0]?.listId) {
+      const blockListId = changeElementList[0].listId
+      const mainList = this.draw.getElementList()
+      let blockStart = mainList.indexOf(changeElementList[0])
+      while (
+        blockStart > 0 &&
+        mainList[blockStart - 1]?.listId === blockListId
+      ) {
+        blockStart--
+      }
+      let blockEnd = mainList.indexOf(
+        changeElementList[changeElementList.length - 1]
+      )
+      while (
+        blockEnd < mainList.length - 1 &&
+        mainList[blockEnd + 1]?.listId === blockListId
+      ) {
+        blockEnd++
+      }
+      const expanded: IElement[] = []
+      for (let i = blockStart; i <= blockEnd; i++) {
+        if (mainList[i].listId === blockListId) {
+          expanded.push(mainList[i])
+        }
+      }
+      if (expanded.length > changeElementList.length) {
+        changeElementList = expanded
+      }
+    }
     const byLevel = new Map<number, (typeof style.levels)[number]>()
     for (const lvl of style.levels) byLevel.set(lvl.level, lvl)
-    changeElementList.forEach(el => {
-      const lvl = el.listLevel ?? 1
-      const cfg = byLevel.get(lvl)
-      if (!cfg) return
-      if (cfg.format) el.listFormat = cfg.format
-      if (cfg.numberStyle === 'bullet') {
-        if (cfg.bulletChar) el.listBulletChar = cfg.bulletChar
-      } else if (cfg.numberStyle) {
-        el.listNumberStyle = cfg.numberStyle
+    // Capture by index, not by reference, so deltas survive snapshot restore
+    // (deepClone of this.elementList).
+    const mainListForApply = this.draw.getElementList()
+    const oldValues = changeElementList
+      .map(el => ({
+        mainIndex: mainListForApply.indexOf(el),
+        listFormat: el.listFormat,
+        listBulletChar: el.listBulletChar,
+        listNumberStyle: el.listNumberStyle
+      }))
+      .filter(v => v.mainIndex >= 0)
+    const draw = this.draw
+    const applyForwardStyle = () => {
+      const list = draw.getElementList()
+      for (const item of oldValues) {
+        const el = list[item.mainIndex]
+        if (!el) continue
+        const lvl = el.listLevel ?? 1
+        const cfg = byLevel.get(lvl)
+        if (!cfg) continue
+        if (cfg.format) el.listFormat = cfg.format
+        if (cfg.numberStyle === 'bullet') {
+          if (cfg.bulletChar) el.listBulletChar = cfg.bulletChar
+        } else if (cfg.numberStyle) {
+          el.listNumberStyle = cfg.numberStyle
+        }
       }
-    })
+    }
+    const applyBackwardStyle = () => {
+      const list = draw.getElementList()
+      for (const item of oldValues) {
+        const el = list[item.mainIndex]
+        if (!el) continue
+        if (item.listFormat === undefined) {
+          delete el.listFormat
+        } else {
+          el.listFormat = item.listFormat
+        }
+        if (item.listBulletChar === undefined) {
+          delete el.listBulletChar
+        } else {
+          el.listBulletChar = item.listBulletChar
+        }
+        if (item.listNumberStyle === undefined) {
+          delete el.listNumberStyle
+        } else {
+          el.listNumberStyle = item.listNumberStyle
+        }
+      }
+    }
+    applyForwardStyle()
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
-    this.draw.render({ curIndex, isSetCursor })
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForwardStyle()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackwardStyle()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
     return true
   }
 

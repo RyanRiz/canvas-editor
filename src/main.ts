@@ -1,3 +1,4 @@
+console.log('🔥 CANVAS-EDITOR-BUILD-CHECK-' + new Date().toISOString())
 import { commentList, data, options } from './mock'
 import './style.css'
 import prism from 'prismjs'
@@ -473,8 +474,37 @@ window.onload = function () {
 
   const applyBullet = (char: string): void => {
     lastBulletChar = char
-    instance.command.executeList(ListType.UL, ListStyle.DISC)
-    instance.command.executeListStyle(buildBulletListStyle(char))
+    const standardStyle = bulletCharToUlStyle(char)
+    if (standardStyle) {
+      // Standard UlStyle (DISC/CIRCLE/SQUARE): executeList alone is
+      // sufficient — it sets listStyle which the renderer maps to the
+      // correct glyph. One command = one undo entry.
+      instance.command.executeList(ListType.UL, standardStyle)
+    } else {
+      // Custom bullet char: must also call executeListStyle to set
+      // listBulletChar. Batch both into one undo entry.
+      instance.draw.disableHistory()
+      instance.command.executeList(
+        ListType.UL,
+        ListStyle.DISC as unknown as ListStyle
+      )
+      instance.command.executeListStyle(buildBulletListStyle(char))
+      instance.draw.enableHistory()
+      instance.draw.submitHistory(undefined)
+    }
+  }
+
+  function bulletCharToUlStyle(char: string): ListStyle | undefined {
+    switch (char) {
+      case '●':
+        return ListStyle.DISC
+      case '○':
+        return ListStyle.CIRCLE
+      case '■':
+        return ListStyle.SQUARE
+      default:
+        return undefined
+    }
   }
 
   let bulletDropdown: { close: () => void } | null = null

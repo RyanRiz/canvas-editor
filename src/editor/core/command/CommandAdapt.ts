@@ -1305,6 +1305,17 @@ export class CommandAdapt {
     this.draw.getListParticle().applyStyle(style)
   }
 
+  public listWithStyle(
+    listType: ListType | null,
+    listStyle?: ListStyle,
+    styleConfig?: IListStyle
+  ) {
+    if (this.draw.isReadonly()) return
+    console.log("[HIST-DROPDOWN] CommandAdapt.listWithStyle: listType=%s listStyle=%s styleConfig.id=%s",
+      listType, listStyle, styleConfig?.id);
+    this.draw.getListParticle().setListWithStyle(listType, listStyle, styleConfig)
+  }
+
   public rowFlex(payload: RowFlex) {
     const isReadonly = this.draw.isReadonly()
     if (isReadonly) return

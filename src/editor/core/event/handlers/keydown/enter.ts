@@ -20,7 +20,7 @@ export function enter(evt: KeyboardEvent, host: CanvasEvent) {
   const elementList = draw.getElementList()
   const startElement = elementList[startIndex]
   const endElement = elementList[endIndex]
-  // 空列表项回车: L>1 升级，L1 退出列表 (Word parity)
+  // 空列表项回车: L>1 升级，L1 仅该项退出列表 (Word parity — single-item scope)
   if (isCollapsed && endElement.listId && endElement.value === ZERO) {
     const next = elementList[endIndex + 1]
     const isEmptyItem =
@@ -32,9 +32,98 @@ export function enter(evt: KeyboardEvent, host: CanvasEvent) {
       const level = endElement.listLevel ?? 1
       if (level > 1) {
         listParticle.outdent()
-      } else {
-        listParticle.unsetList()
+        evt.preventDefault()
+        return
       }
+      // Single-paragraph exit: remove list from only the cursor item.
+      // Items above keep their listId; items below get a fresh listId so
+      // they restart numbering as a new list block.
+      const exitedListId = endElement.listId
+      // Capture by index, NOT by reference. _submitSnapshotHistory replaces
+      // this.elementList via deepClone, invalidating element refs. Index-based
+      // lookup at apply-time survives that restore.
+      const exitOldValues = {
+        mainIndex: endIndex,
+        listId: endElement.listId,
+        listType: endElement.listType,
+        listStyle: endElement.listStyle,
+        listWrap: endElement.listWrap,
+        listLevel: endElement.listLevel
+      }
+      const newListId = getUUID()
+      // Collect indices of all elements below that share the old listId —
+      // they will be assigned a fresh listId so they become a new list block.
+      const belowIndices: number[] = []
+      let p = endIndex + 1
+      while (
+        p < elementList.length &&
+        elementList[p]?.listId === exitedListId
+      ) {
+        belowIndices.push(p)
+        p++
+      }
+
+      // Apply mutations
+      delete endElement.listId
+      delete endElement.listType
+      delete endElement.listStyle
+      delete endElement.listWrap
+      delete endElement.listLevel
+      for (const idx of belowIndices) {
+        const el = elementList[idx]
+        if (el) el.listId = newListId
+      }
+
+      // Push a single delta so undo/redo goes through applyBackward/applyForward
+      // directly instead of _restoreUndoStackTop snapshot replay.
+      const isSetCursor = true
+      const curIndex = endIndex
+      draw.getHistoryManager().executeDelta({
+        applyForward: () => {
+          const list = draw.getElementList()
+          const el = list[exitOldValues.mainIndex]
+          if (el) {
+            if (el.listId !== undefined) delete el.listId
+            if (el.listType !== undefined) delete el.listType
+            if (el.listStyle !== undefined) delete el.listStyle
+            if (el.listWrap !== undefined) delete el.listWrap
+            if (el.listLevel !== undefined) delete el.listLevel
+          }
+          for (const idx of belowIndices) {
+            const b = list[idx]
+            if (b) b.listId = newListId
+          }
+          draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+        },
+        applyBackward: () => {
+          const list = draw.getElementList()
+          const el = list[exitOldValues.mainIndex]
+          if (el) {
+            if (exitOldValues.listId === undefined) delete el.listId
+            else el.listId = exitOldValues.listId
+            if (exitOldValues.listType === undefined) delete el.listType
+            else el.listType = exitOldValues.listType
+            if (exitOldValues.listStyle === undefined) delete el.listStyle
+            else el.listStyle = exitOldValues.listStyle
+            if (exitOldValues.listWrap === undefined) delete el.listWrap
+            else el.listWrap = exitOldValues.listWrap
+            if (exitOldValues.listLevel === undefined) delete el.listLevel
+            else el.listLevel = exitOldValues.listLevel
+          }
+          for (const idx of belowIndices) {
+            const b = list[idx]
+            if (b) b.listId = exitedListId
+          }
+          draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+        }
+      })
+      draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      console.log(
+        '[HIST-ENTER] Branch A exit-list DELTA pushed, stack=',
+        (draw.getHistoryManager() as any).undoStack.length,
+        'redo=',
+        (draw.getHistoryManager() as any).redoStack.length
+      )
       evt.preventDefault()
       return
     }
@@ -42,6 +131,14 @@ export function enter(evt: KeyboardEvent, host: CanvasEvent) {
   // 列表块内换行
   let enterText: IElement = {
     value: ZERO
+  }
+  // Inherit list properties so Enter inside a non-empty list item creates a
+  // continuing list item (Word Desktop / Google Docs pattern).
+  if (startElement.listId) {
+    enterText.listId = startElement.listId
+    enterText.listType = startElement.listType
+    enterText.listStyle = startElement.listStyle
+    enterText.listLevel = startElement.listLevel ?? 1
   }
   if (evt.shiftKey && startElement.listId) {
     enterText.listWrap = true
@@ -130,6 +227,12 @@ export function enter(evt: KeyboardEvent, host: CanvasEvent) {
   if (~curIndex) {
     rangeManager.setRange(curIndex, curIndex)
     draw.render({ curIndex })
+    console.log(
+      '[HIST-ENTER] Branch C normal Enter — render called, stack=',
+      (draw.getHistoryManager() as any).undoStack.length,
+      'redo=',
+      (draw.getHistoryManager() as any).redoStack.length
+    )
   }
   evt.preventDefault()
 }
