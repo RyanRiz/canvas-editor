@@ -3422,7 +3422,7 @@ export class Draw {
       // preventing mixed-indent rows (e.g. first-line-Tab + wrapped elements)
       // from producing a wider layout than the rendered curRow.offsetX allows.
       const isStartElement = curRow.elementList.length === 1
-      if (isStartElement && !curRow.offsetX && !element.listId) {
+      if (isStartElement && curRow.offsetX === undefined && !element.listId) {
         const firstEl = curRow.elementList[0]
         // MS Word first-line indent: only applies to the *first* row of the
         // paragraph. canvas-editor places the paragraph's ZERO (U+200B)
@@ -3437,7 +3437,11 @@ export class Draw {
           ? firstEl?.firstLineIndent || 0
           : 0
         const totalSteps = indentSteps + firstLineSteps
-        if (totalSteps) {
+        // Always set curRow.offsetX when indent is involved — even when
+        // totalSteps is 0 (hanging indent: indent cancels firstLineIndent).
+        // An explicitly-set 0 must not fall through to the raw
+        // element.indent in the offsetX fallback chain below.
+        if (totalSteps || indentSteps) {
           curRow.offsetX = totalSteps * defaultTabWidth * scale
         }
       }
@@ -3458,9 +3462,10 @@ export class Draw {
         ? element.rightIndent * defaultTabWidth * scale
         : 0
       const offsetX =
-        curRow.offsetX ||
-        (element.listId && listStyleMap.get(element.listId)) ||
-        indentOffsetX
+        curRow.offsetX !== undefined
+          ? curRow.offsetX
+          : (element.listId && listStyleMap.get(element.listId)) ||
+            indentOffsetX
       const rightOffsetX = curRow.rightOffsetX || rightIndentOffsetX
       const rowInnerWidth = curRow.innerWidth || innerWidth
       const availableWidth = rowInnerWidth - offsetX - rightOffsetX
