@@ -565,6 +565,7 @@ export class RangeManager {
       return list[pz] ?? rowIndexElement ?? curElement
     })()
     const rightIndent = paragraphZeroElement.rightIndent ?? 0
+    const firstLineIndent = paragraphZeroElement.firstLineIndent ?? 0
     const spaceBefore = paragraphZeroElement.spaceBefore ?? 0
     const spaceAfter = paragraphZeroElement.spaceAfter ?? 0
     // Paragraph shading lives on the paragraph ZERO (same as spaceBefore /
@@ -596,6 +597,7 @@ export class RangeManager {
       extension,
       indent,
       rightIndent,
+      firstLineIndent,
       spaceBefore,
       spaceAfter
     }
@@ -643,6 +645,7 @@ export class RangeManager {
       extension: null,
       indent: null,
       rightIndent: null,
+      firstLineIndent: null,
       spaceBefore: null,
       spaceAfter: null
     }

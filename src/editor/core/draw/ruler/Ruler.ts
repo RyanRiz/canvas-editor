@@ -123,6 +123,12 @@ export class Ruler {
   /** Document-level click listener that closes the open menu on outside click.
    *  Lazily attached when a menu opens, detached on close. */
   private menuOutsideClick: ((e: MouseEvent) => void) | null = null
+  /** Shared tooltip element that follows the cursor over ruler markers.
+   *  Created once on construction, reused across all frames. */
+  private tooltip: HTMLDivElement | null = null
+  /** Last marker kind the tooltip was shown for; avoids redundant DOM writes
+   *  when the cursor moves within the same marker's hit-box. */
+  private lastTooltipKind: MarkerKind | null = null
   /**
    * Pending rAF id for `_scheduleRender`. We coalesce multiple ruler-affecting
    * events fired in the same frame (`rangeStyleChange`, `pageScaleChange`, …)
@@ -164,6 +170,25 @@ export class Ruler {
     this._applyContainerSpacing()
     document.addEventListener('mousemove', this.boundDocMouseMove)
     document.addEventListener('mouseup', this.boundDocMouseUp)
+
+    // Shared tooltip element — one per ruler, reused across all page frames.
+    // Positioned fixed so it follows the cursor without being clipped by the
+    // editor container overflow. Hidden by default.
+    this.tooltip = document.createElement('div')
+    this.tooltip.classList.add(`${EDITOR_PREFIX}-ruler-tooltip`)
+    this.tooltip.style.position = 'fixed'
+    this.tooltip.style.zIndex = '10001'
+    this.tooltip.style.pointerEvents = 'none'
+    this.tooltip.style.display = 'none'
+    this.tooltip.style.backgroundColor = 'rgba(0,0,0,0.75)'
+    this.tooltip.style.color = '#fff'
+    this.tooltip.style.fontSize = '11px'
+    this.tooltip.style.fontFamily =
+      '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+    this.tooltip.style.padding = '2px 6px'
+    this.tooltip.style.borderRadius = '3px'
+    this.tooltip.style.whiteSpace = 'nowrap'
+    document.body.appendChild(this.tooltip)
 
     // Re-render the ruler on the events that change what it visualises.
     //  - `rangeStyleChange` — every cursor move / selection change, plus the
@@ -288,6 +313,11 @@ export class Ruler {
       this.pendingRenderFrame = null
     }
     this._closeContextMenu()
+    this._hideTooltip()
+    if (this.tooltip) {
+      this.tooltip.remove()
+      this.tooltip = null
+    }
     document.removeEventListener('mousemove', this.boundDocMouseMove)
     document.removeEventListener('mouseup', this.boundDocMouseUp)
     for (const u of this.unsubscribers) u()
@@ -531,6 +561,7 @@ export class Ruler {
     )
     hRuler.addEventListener('mouseleave', () => {
       hRuler.style.cursor = ''
+      this._hideTooltip()
     })
 
     const vRuler = document.createElement('div')
@@ -552,6 +583,7 @@ export class Ruler {
     )
     vRuler.addEventListener('mouseleave', () => {
       vRuler.style.cursor = ''
+      this._hideTooltip()
     })
 
     // Tag the wrapper with its page index so `_frameFor` can resolve back to
@@ -842,7 +874,10 @@ export class Ruler {
     const rightAtSteps = (steps: number) =>
       leftMargin + innerWidth - steps * stepPx
 
-    const xFirstLine = leftAtSteps(ind.indent + ind.firstLineIndent)
+    const xFirstLine = Math.max(
+      leftMargin,
+      leftAtSteps(ind.indent + ind.firstLineIndent)
+    )
     const xHanging = leftAtSteps(ind.indent)
     const xLeftRect = leftAtSteps(ind.indent)
     const xRight = rightAtSteps(ind.rightIndent)
@@ -852,6 +887,17 @@ export class Ruler {
 
     this._drawTriangle(ctx, xFirstLine, 0, size * 0.45, 'down')
     this._drawTriangle(ctx, xHanging, size, size * 0.45, 'up')
+    // Connector hairline between first-line triangle tip and hanging
+    // triangle tip when the two markers are at different positions
+    // (Word draws this to visually group them as one indent set).
+    if (Math.abs(xFirstLine - xHanging) > 0.5) {
+      ctx.strokeStyle = opt.markerBorderColor
+      ctx.lineWidth = 0.5
+      ctx.beginPath()
+      ctx.moveTo(xFirstLine, size * 0.45)
+      ctx.lineTo(xHanging, size - size * 0.45)
+      ctx.stroke()
+    }
     const rectH = size * 0.18
     const rectW = size * 0.55
     ctx.fillRect(xLeftRect - rectW / 2, size - rectH - 1, rectW, rectH)
@@ -1126,10 +1172,21 @@ export class Ruler {
       if (y < size * 0.5) {
         if (Math.abs(m.firstLine - x) <= TOL) return { kind: 'first-line' }
       }
-      if (y >= size * 0.5) {
-        if (Math.abs(m.hanging - x) <= TOL) return { kind: 'hanging' }
-        if (Math.abs(m.leftRect - x) <= TOL + 4 && y >= size * 0.75)
+      // Bottom half — hanging triangle and left-indent rectangle share the same
+      // x position. Zone them vertically: hanging covers the upper part of the
+      // bottom half (0.5–0.75), left-indent rectangle covers the bottom 25%.
+      if (y >= size * 0.75) {
+        // Check left-indent rectangle first in the bottom strip — it is the
+        // wider, more forgiving target (Word: the rectangle is the primary
+        // left-indent handle when the user reaches the very bottom).
+        if (Math.abs(m.leftRect - x) <= TOL + 4)
           return { kind: 'left-indent' }
+        // Fallback: hanging triangle if the cursor is near the hanging position
+        // but wasn't captured by the rectangle's wider hit-box (e.g. narrow
+        // ruler where the rect is tiny).
+        if (Math.abs(m.hanging - x) <= TOL) return { kind: 'hanging' }
+      } else if (y >= size * 0.5) {
+        if (Math.abs(m.hanging - x) <= TOL) return { kind: 'hanging' }
       }
       if (m.right !== undefined && Math.abs(m.right - x) <= TOL) {
         return { kind: 'right-indent' }
@@ -1155,6 +1212,56 @@ export class Ruler {
     return null
   }
 
+  // ─── tooltip helpers ───────────────────────────────────────────────────
+
+  /** Map a marker kind to a human-readable string for the hover tooltip. */
+  private _markerLabel(kind: MarkerKind): string {
+    switch (kind) {
+      case 'first-line':
+        return 'First Line Indent'
+      case 'hanging':
+        return 'Hanging Indent'
+      case 'left-indent':
+        return 'Left Indent'
+      case 'right-indent':
+        return 'Right Indent'
+      case 'left-margin':
+        return 'Left Margin'
+      case 'right-margin':
+        return 'Right Margin'
+      case 'top-margin':
+        return 'Top Margin'
+      case 'bottom-margin':
+        return 'Bottom Margin'
+      case 'col-boundary':
+        return 'Column Boundary'
+      case 'tab-stop':
+        return 'Tab Stop'
+    }
+  }
+
+  /** Show the ruler tooltip at the given client coordinates for the given
+   *  marker kind. No-ops when the kind hasn't changed since the last call
+   *  (avoids redundant DOM style writes when the cursor moves within the
+   *  same marker's hit-box). */
+  private _showTooltip(kind: MarkerKind, clientX: number, clientY: number) {
+    if (!this.tooltip) return
+    if (this.lastTooltipKind === kind) return
+    this.lastTooltipKind = kind
+    this.tooltip.textContent = this._markerLabel(kind)
+    this.tooltip.style.display = 'block'
+    this.tooltip.style.left = `${clientX + 14}px`
+    this.tooltip.style.top = `${clientY + 18}px`
+  }
+
+  /** Hide the ruler tooltip and reset the kind tracker. */
+  private _hideTooltip() {
+    if (!this.tooltip) return
+    this.lastTooltipKind = null
+    this.tooltip.style.display = 'none'
+    this.tooltip.textContent = ''
+  }
+
   /** Drive the hover cursor so users can *find* the interactive zones without
    *  having to discover them by trial-and-error. Word does the same — its
    *  ruler swaps to `ew-resize` / `col-resize` exactly when the pointer enters
@@ -1169,6 +1276,7 @@ export class Ruler {
     const hit = this._hitTestHRuler(f, x, y)
     let cursor = 'default'
     if (hit) {
+      this._showTooltip(hit.kind, e.clientX, e.clientY)
       switch (hit.kind) {
         case 'first-line':
         case 'hanging':
@@ -1184,6 +1292,7 @@ export class Ruler {
           break
       }
     } else {
+      this._hideTooltip()
       // No direct hit — but the content band is still actionable (click to
       // add a tab stop in the active paragraph). Surface that affordance.
       const margins = this.draw.getMargins()
@@ -1206,6 +1315,11 @@ export class Ruler {
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
     const hit = this._hitTestVRuler(f, x, y)
+    if (hit) {
+      this._showTooltip(hit.kind, e.clientX, e.clientY)
+    } else {
+      this._hideTooltip()
+    }
     f.vRuler.style.cursor = hit ? 'row-resize' : 'default'
   }
 
@@ -1249,6 +1363,7 @@ export class Ruler {
     }
     const ind = this._getActiveIndents()
     if (!ind) return
+    this._hideTooltip()
     switch (hit.kind) {
       case 'first-line':
         this.drag = {
@@ -1330,6 +1445,7 @@ export class Ruler {
     const hit = this._hitTestVRuler(f, e.clientX - rect.left, y)
     this.dragStartScreenY = e.clientY
     if (!hit) return
+    this._hideTooltip()
     const m = this.draw.getOriginalMargins()
     if (hit.kind === 'top-margin') {
       this.drag = { kind: 'top-margin', pageNo: f.pageNo, startMargin: m[0] }
@@ -1389,13 +1505,10 @@ export class Ruler {
     switch (drag.kind) {
       case 'first-line': {
         const deltaSteps = dx / stepPx
-        const newFirst = Math.max(
-          -drag.startElIndent,
-          drag.startElFirst + deltaSteps
-        )
-        this._commitParagraphIndents({
-          firstLineIndent: this._snap(newFirst)
-        })
+        const raw = drag.startElFirst + deltaSteps
+        const snapped = this._snap(raw)
+        const newFirst = Math.max(-drag.startElIndent, snapped)
+        this._commitParagraphIndents({ firstLineIndent: newFirst })
         break
       }
       case 'hanging': {
@@ -1416,11 +1529,22 @@ export class Ruler {
         // Rectangle moves BOTH markers together — `indent` shifts, the
         // delta between first-line and hanging is preserved (no
         // compensation, unlike the hanging-marker case).
+        // When indent hits 0 and the user keeps dragging left, absorb
+        // the remaining delta into firstLineIndent toward 0 (Word: both
+        // markers bump into the margin and stop together).
         const deltaSteps = dx / stepPx
-        const newIndent = Math.max(0, drag.startIndent + deltaSteps)
-        this._commitParagraphIndents({
-          indent: this._snap(newIndent)
-        })
+        const rawIndent = drag.startIndent + deltaSteps
+        if (rawIndent <= 0) {
+          const excess = rawIndent
+          const rawFirst = drag.startFirst + excess
+          const newFirst = Math.max(-0, rawFirst)
+          this._commitParagraphIndents({
+            indent: 0,
+            firstLineIndent: this._snap(newFirst)
+          })
+        } else {
+          this._commitParagraphIndents({ indent: this._snap(rawIndent) })
+        }
         break
       }
       case 'right-indent': {
@@ -1681,6 +1805,28 @@ export class Ruler {
     this.draw.render({ isSetCursor: false, isSubmitHistory: false })
   }
 
+  /** Adjust indent for context menu / keyboard shortcut actions.
+   *  `deltaIndent` and `deltaFirst` are added to the current values
+   *  with appropriate clamping (indent >= 0, firstLineIndent >= -indent). */
+  private _adjustIndent(deltaIndent: number, deltaFirst: number) {
+    const ind = this._getActiveIndents()
+    if (!ind) return
+    const payload: { indent?: number; firstLineIndent?: number } = {}
+    if (deltaIndent) {
+      let newIndent = ind.indent + deltaIndent
+      if (newIndent < 0) newIndent = 0
+      payload.indent = this._snap(newIndent)
+    }
+    if (deltaFirst) {
+      let newFirst = ind.firstLineIndent + deltaFirst
+      const minFirst = -(payload.indent ?? ind.indent)
+      if (newFirst < minFirst) newFirst = minFirst
+      payload.firstLineIndent = this._snap(newFirst)
+    }
+    this._commitParagraphIndents(payload)
+    this.render()
+  }
+
   private _clearAllTabStops() {
     const range = this.draw.getRange()
     const info = range.getRangeParagraphInfo()
@@ -1726,6 +1872,10 @@ export class Ruler {
       | { kind: 'separator' }
       | { kind: 'custom' }
       | { kind: 'clear-all' }
+      | { kind: 'increase-indent' }
+      | { kind: 'decrease-indent' }
+      | { kind: 'hanging-indent' }
+      | { kind: 'remove-hanging-indent' }
       | { kind: 'hide-ruler' }
     const items: Action[] = []
     if (onTabStopIndex !== -1) {
@@ -1743,6 +1893,11 @@ export class Ruler {
       { kind: 'separator' },
       { kind: 'custom' },
       { kind: 'clear-all' },
+      { kind: 'separator' },
+      { kind: 'increase-indent' },
+      { kind: 'decrease-indent' },
+      { kind: 'hanging-indent' },
+      { kind: 'remove-hanging-indent' },
       { kind: 'separator' },
       { kind: 'hide-ruler' }
     )
@@ -1803,6 +1958,30 @@ export class Ruler {
             this._clearAllTabStops()
             this.render()
           }
+          break
+        case 'increase-indent':
+          label = 'Increase indent \u2318M'
+          glyph = '\u25B6\u25B6'
+          disabled = !isInContent
+          action = () => this._adjustIndent(1, 0)
+          break
+        case 'decrease-indent':
+          label = 'Decrease indent \u2318\u21E7M'
+          glyph = '\u25C0\u25C0'
+          disabled = !isInContent
+          action = () => this._adjustIndent(-1, 0)
+          break
+        case 'hanging-indent':
+          label = 'Hanging indent \u2318T'
+          glyph = '\u25B6'
+          disabled = !isInContent
+          action = () => this._adjustIndent(1, -1)
+          break
+        case 'remove-hanging-indent':
+          label = 'Remove hanging indent \u2318\u21E7T'
+          glyph = '\u25C0'
+          disabled = !isInContent
+          action = () => this._adjustIndent(-1, 1)
           break
         case 'hide-ruler':
           label = 'Hide ruler'

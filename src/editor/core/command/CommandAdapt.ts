@@ -1921,6 +1921,83 @@ export class CommandAdapt {
     this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
 
+  public specialIndent(kind: 'none' | 'firstLine' | 'hanging') {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const paragraphInfo = this.range.getRangeParagraphInfo()
+    if (!paragraphInfo) return
+    const paragraphEndIndex =
+      paragraphInfo.startIndex + paragraphInfo.elementList.length - 1
+
+    let targetIndent = 0
+    let targetFirst = 0
+    switch (kind) {
+      case 'none':
+        targetIndent = 0
+        targetFirst = 0
+        break
+      case 'firstLine':
+        targetIndent = 0
+        targetFirst = 2
+        break
+      case 'hanging':
+        targetIndent = 2
+        targetFirst = -2
+        break
+    }
+
+    const oldValues = paragraphInfo.elementList.map(el => ({
+      el,
+      indent: el.indent,
+      firstLineIndent: el.firstLineIndent
+    }))
+
+    const allSame =
+      oldValues.every(v => (v.indent || 0) === targetIndent) &&
+      oldValues.every(v => (v.firstLineIndent || 0) === targetFirst)
+    if (allSame) return
+
+    const applyForward = () => {
+      for (const item of oldValues) {
+        if (targetIndent === 0) delete item.el.indent
+        else item.el.indent = targetIndent
+        if (targetFirst === 0) delete item.el.firstLineIndent
+        else item.el.firstLineIndent = targetFirst
+      }
+    }
+    const applyBackward = () => {
+      for (const item of oldValues) {
+        if (item.indent !== undefined) item.el.indent = item.indent
+        else delete item.el.indent
+        if (item.firstLineIndent !== undefined)
+          item.el.firstLineIndent = item.firstLineIndent
+        else delete item.el.firstLineIndent
+      }
+    }
+    applyForward()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+  }
+
   public insertTable(row: number, col: number) {
     const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
     if (isDisabled) return

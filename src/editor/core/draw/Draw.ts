@@ -4336,6 +4336,9 @@ export class Draw {
       const repEl = curRow.elementList.find(
         el => el.value !== ZERO && el.value !== WRAP
       )
+      // Also find the ZERO element to access paragraph-level properties
+      // (firstLineIndent lives on the ZERO like indent).
+      const zeroEl = curRow.elementList.find(el => el.value === ZERO)
       if (repEl?.indent) {
         // Always compute from a fresh base to avoid double-counting when
         // incremental layout convergence reuses old row objects that already
@@ -4345,6 +4348,15 @@ export class Draw {
           ? (listStyleMap.get(curRow.elementList.find(e => e.listId)?.listId ?? '') || 0)
           : 0
         curRow.offsetX = listBase + repEl.indent * defaultTabWidth * scale
+        // Apply firstLineIndent to the first row of each paragraph
+        // (the row containing a ZERO delimiter). For normal indent this
+        // adds; for hanging indent (negative firstLineIndent) it subtracts,
+        // giving the first line a different offset than subsequent lines.
+        const firstLineEl = zeroEl || repEl
+        if (zeroEl && (firstLineEl.firstLineIndent || 0) !== 0) {
+          curRow.offsetX +=
+            (firstLineEl.firstLineIndent || 0) * defaultTabWidth * scale
+        }
       }
       // Right indent: same fresh-base recompute so incremental layout reuse
       // doesn't compound the value across frames. Right offset is independent

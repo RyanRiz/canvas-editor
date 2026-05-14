@@ -39,6 +39,7 @@ export class Command {
   public executeIncreaseIndent: CommandAdapt['increaseIndent']
   public executeDecreaseIndent: CommandAdapt['decreaseIndent']
   public executeSetIndent: CommandAdapt['setIndent']
+  public executeSpecialIndent: CommandAdapt['specialIndent']
   public executeIncreaseRightIndent: CommandAdapt['increaseRightIndent']
   public executeDecreaseRightIndent: CommandAdapt['decreaseRightIndent']
   public executeSetRightIndent: CommandAdapt['setRightIndent']
@@ -228,6 +229,7 @@ export class Command {
     this.executeIncreaseIndent = adapt.increaseIndent.bind(adapt)
     this.executeDecreaseIndent = adapt.decreaseIndent.bind(adapt)
     this.executeSetIndent = adapt.setIndent.bind(adapt)
+    this.executeSpecialIndent = adapt.specialIndent.bind(adapt)
     this.executeIncreaseRightIndent = adapt.increaseRightIndent.bind(adapt)
     this.executeDecreaseRightIndent = adapt.decreaseRightIndent.bind(adapt)
     this.executeSetRightIndent = adapt.setRightIndent.bind(adapt)

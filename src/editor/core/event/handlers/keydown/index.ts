@@ -8,6 +8,7 @@ import { ctrlBackspace } from './ctrlBackspace'
 import { ctrlEnter } from './ctrlEnter'
 import { del } from './delete'
 import { enter } from './enter'
+import { indent } from './indent'
 import { left } from './left'
 import { right } from './right'
 import { tab } from './tab'
@@ -66,6 +67,12 @@ export function keydown(evt: KeyboardEvent, host: CanvasEvent) {
   } else if (isMod(evt) && evt.key.toLocaleLowerCase() === KeyMap.A) {
     host.selectAll()
     evt.preventDefault()
+  } else if (isMod(evt) && evt.key.toLocaleLowerCase() === KeyMap.M) {
+    if (draw.isReadonly()) return
+    indent(evt, host)
+  } else if (isMod(evt) && evt.key.toLocaleLowerCase() === KeyMap.T) {
+    if (draw.isReadonly()) return
+    indent(evt, host)
   } else if (isMod(evt) && evt.key.toLocaleLowerCase() === KeyMap.S) {
     if (draw.isReadonly()) return
     const listener = draw.getListener()

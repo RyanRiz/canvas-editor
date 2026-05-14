@@ -37,6 +37,7 @@ export interface IRangeStyle {
   extension?: unknown | null
   indent?: number | null
   rightIndent?: number | null
+  firstLineIndent?: number | null
   spaceBefore?: number | null
   spaceAfter?: number | null
 }

@@ -377,6 +377,14 @@ ul {
   background-image: url('./assets/images/decrease-indent.svg');
 }
 
+.menu-item__special-indent {
+  position: relative;
+}
+
+.menu-item__special-indent i {
+  background-image: url('./assets/images/special-indent.svg');
+}
+
 .menu-item__row-margin {
   position: relative;
 }

@@ -364,6 +364,24 @@ window.onload = function () {
     instance.command.executeDecreaseIndent()
   }
 
+  const specialIndentDom = document.querySelector<HTMLDivElement>(
+    '.menu-item__special-indent'
+  )!
+  const specialIndentOptionDom =
+    specialIndentDom.querySelector<HTMLDivElement>('.options')!
+  specialIndentDom.querySelector('i')!.onclick = function () {
+    console.log('special-indent')
+    specialIndentOptionDom.classList.toggle('visible')
+  }
+  specialIndentOptionDom.onclick = function (evt) {
+    const li = evt.target as HTMLLIElement
+    const kind = li.dataset.kind as 'none' | 'firstLine' | 'hanging'
+    if (kind) {
+      instance.command.executeSpecialIndent(kind)
+      specialIndentOptionDom.classList.remove('visible')
+    }
+  }
+
   const rowMarginDom = document.querySelector<HTMLDivElement>(
     '.menu-item__row-margin'
   )!
@@ -2338,6 +2356,27 @@ window.onload = function () {
       `[data-rowmargin='${payload.rowMargin}']`
     )!
     curRowMarginDom.classList.add('active')
+
+    // 特殊缩进
+    specialIndentOptionDom
+      .querySelectorAll<HTMLLIElement>('li')
+      .forEach(li => li.classList.remove('active'))
+    const indent = payload.indent ?? 0
+    const firstLineIndent = payload.firstLineIndent ?? 0
+    let activeSpecialKind = ''
+    if (indent === 0 && firstLineIndent === 0) {
+      activeSpecialKind = 'none'
+    } else if (indent === 0 && firstLineIndent > 0) {
+      activeSpecialKind = 'firstLine'
+    } else if (indent > 0 && firstLineIndent <= -indent) {
+      activeSpecialKind = 'hanging'
+    }
+    if (activeSpecialKind) {
+      const activeLi = specialIndentOptionDom.querySelector<HTMLLIElement>(
+        `[data-kind='${activeSpecialKind}']`
+      )
+      if (activeLi) activeLi.classList.add('active')
+    }
 
     // 功能
     payload.undo
