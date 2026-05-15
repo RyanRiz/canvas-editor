@@ -35,6 +35,7 @@ import {
   IInsertElementListOption
 } from '../../interface/Element'
 import { IRow, IRowElement } from '../../interface/Row'
+import { ITextMetrics } from '../../interface/Text'
 import { deepClone, getUUID } from '../../utils'
 import { Cursor } from '../cursor/Cursor'
 import { CanvasEvent } from '../event/CanvasEvent'
@@ -261,6 +262,21 @@ export class Draw {
   // 任何能让前缀行内容失效的事件（setEditorData / 跨字号字距的设置变更）必须
   // 通过 _invalidatePaintCache() 一并清空。
   private _mainRowCheckpoints: ILayoutCheckpoint[]
+  // PERF: per-element fontMetrics memoization for computeRowList. Held in
+  // a WeakMap rather than as fields on the element so element shape stays
+  // unchanged — attaching cache fields directly to elements caused V8
+  // hidden-class transitions that slowed adjacent hot loops (paint and
+  // computePositionList) by 10× and ~50% respectively. See
+  // {@link _measureElementText}.
+  private _fontMetricsCache: WeakMap<
+    IElement,
+    {
+      fontStr: string
+      value: string
+      elementWidth: number | undefined
+      metrics: ITextMetrics
+    }
+  > = new WeakMap()
   // 上一帧主布局的「输入签名」。option.scale / innerWidth / pagingMode 等会改变
   // 任意 row 的几何形状的字段都纳入；不一致时禁用增量布局，回退到全量。
   private _mainLayoutSig: {
@@ -2222,9 +2238,7 @@ export class Draw {
    * array via getOriginalMargins), changing `innerWidth`. Re-uses the
    * chunked pipeline.
    */
-  public async setPaperDirectionAsync(
-    payload: PaperDirection
-  ): Promise<void> {
+  public async setPaperDirectionAsync(payload: PaperDirection): Promise<void> {
     const dpr = this.getPagePixelRatio()
     this.options.paperDirection = payload
     const width = this.getWidth()
@@ -2392,9 +2406,7 @@ export class Draw {
           surroundElementList: chunkSink.state.surroundElementList
         }
       }
-      await new Promise<void>(resolve =>
-        requestAnimationFrame(() => resolve())
-      )
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
     }
     if (this._chunkedOpId !== opId) {
       this._chunkedAsyncInFlight = false
@@ -3067,6 +3079,69 @@ export class Draw {
     }px ${font}`
   }
 
+  /**
+   * Element-level fontMetrics memoization (PERF: L/R margin drag).
+   *
+   * Skips the canvas roundtrip (ctx.font = + ctx.measureText) when the
+   * element's resolved font string, value, and explicit `width` override
+   * are identical to the previous layout pass. On a margin-only reflow
+   * none of those inputs change, so every TEXT/LABEL element hits cache
+   * and the layout loop avoids ~28k canvas API calls on large docs.
+   *
+   * The cache is held in a side-channel `WeakMap` rather than as fields
+   * on the element. Attaching the cache directly to elements polluted
+   * their hidden class and caused observable slowdowns elsewhere
+   * (~10x in paint and ~50% in computePositionList) because adjacent
+   * hot loops then took deoptimized property-access paths. A WeakMap
+   * keyed on the element keeps element shape unchanged and lets cache
+   * entries be GC'd naturally with the element.
+   *
+   * Cache is keyed on the *unscaled* font string (getElementFont with
+   * default scale=1). _scaleLayoutInPlace mutates element.metrics for
+   * scale changes without going through this path, so a uniform scale
+   * change does not invalidate the cache; the unscaled fontMetrics it
+   * returns remains correct as the post-cache `* scale` arithmetic in
+   * the layout loop bakes scale back in.
+   *
+   * Stored metrics are plain {ITextMetrics} objects (not the host
+   * `TextMetrics` class), so any element that flows through
+   * `structuredClone` (e.g. TableParticle.getTrListGroupByCol) is
+   * unaffected — the cache lives in `this`, not on the element.
+   */
+  private _measureElementText(
+    ctx: CanvasRenderingContext2D,
+    element: IElement
+  ): ITextMetrics {
+    const fontStr = this.getElementFont(element)
+    const cached = this._fontMetricsCache.get(element)
+    if (
+      cached &&
+      cached.fontStr === fontStr &&
+      cached.value === element.value &&
+      cached.elementWidth === element.width
+    ) {
+      return cached.metrics
+    }
+    ctx.font = fontStr
+    const fontMetrics = this.textParticle.measureText(ctx, element)
+    const plainMetrics: ITextMetrics = {
+      width: fontMetrics.width,
+      actualBoundingBoxAscent: fontMetrics.actualBoundingBoxAscent,
+      actualBoundingBoxDescent: fontMetrics.actualBoundingBoxDescent,
+      actualBoundingBoxLeft: fontMetrics.actualBoundingBoxLeft,
+      actualBoundingBoxRight: fontMetrics.actualBoundingBoxRight,
+      fontBoundingBoxAscent: fontMetrics.fontBoundingBoxAscent,
+      fontBoundingBoxDescent: fontMetrics.fontBoundingBoxDescent
+    }
+    this._fontMetricsCache.set(element, {
+      fontStr,
+      value: element.value,
+      elementWidth: element.width,
+      metrics: plainMetrics
+    })
+    return plainMetrics
+  }
+
   public getElementSize(el: IElement) {
     return el.actualSize || el.size || this.options.defaultSize
   }
@@ -3313,11 +3388,7 @@ export class Draw {
       // indent + spacing post-process loops below run on the partial
       // rowList — required for the progressive-paint path in
       // setPaperMarginAsync, and idempotent for the next chunk's resume.
-      if (
-        maxElementIndex !== undefined &&
-        chunkSink &&
-        i > maxElementIndex
-      ) {
+      if (maxElementIndex !== undefined && chunkSink && i > maxElementIndex) {
         chunkSink.state = {
           x,
           y,
@@ -3973,8 +4044,7 @@ export class Draw {
           defaultSize,
           label: { defaultPadding }
         } = this.options
-        ctx.font = this.getElementFont(element)
-        const fontMetrics = this.textParticle.measureText(ctx, element)
+        const fontMetrics = this._measureElementText(ctx, element)
         metrics.width =
           (fontMetrics.width + defaultPadding[1] + defaultPadding[3]) * scale
         metrics.height = (element.size || defaultSize) * scale
@@ -3991,8 +4061,7 @@ export class Draw {
           element.actualSize = Math.ceil(size * 0.6)
         }
         metrics.height = (element.actualSize || size) * scale
-        ctx.font = this.getElementFont(element)
-        const fontMetrics = this.textParticle.measureText(ctx, element)
+        const fontMetrics = this._measureElementText(ctx, element)
         metrics.width = fontMetrics.width * scale
         if (element.letterSpacing) {
           metrics.width += element.letterSpacing * scale
@@ -4350,7 +4419,9 @@ export class Draw {
         // had curRow.offsetX set by a previous post-processing pass.
         // List rows use the current list offset as base; plain rows use 0.
         const listBase = curRow.isList
-          ? (listStyleMap.get(curRow.elementList.find(e => e.listId)?.listId ?? '') || 0)
+          ? listStyleMap.get(
+              curRow.elementList.find(e => e.listId)?.listId ?? ''
+            ) || 0
           : 0
         curRow.offsetX = listBase + repEl.indent * defaultTabWidth * scale
         // Apply firstLineIndent to the first row of each paragraph
@@ -4404,14 +4475,12 @@ export class Draw {
       if (!hasTextContent) continue
       const isFirstOfParagraph =
         !prevRow ||
-        elementList[
-          prevRow.startIndex + prevRow.elementList.length
-        ]?.value === ZERO
+        elementList[prevRow.startIndex + prevRow.elementList.length]?.value ===
+          ZERO
       const isLastOfParagraph =
         !nextRow ||
-        elementList[
-          curRow.startIndex + curRow.elementList.length
-        ]?.value === ZERO
+        elementList[curRow.startIndex + curRow.elementList.length]?.value ===
+          ZERO
       if (isFirstOfParagraph) {
         // The first element of the first row is always the paragraph's ZERO delimiter.
         paragraphZero = curRow.elementList.find(el => el.value === ZERO)
@@ -4469,23 +4538,22 @@ export class Draw {
     // PERF-PLAN follow-up：诊断桩——开启 __perfTraceRender 时若收敛全程未命中，
     // 把第一次「首尾元素 ref 匹配但其它字段不等」的差异打到 console，给用户
     // 一条具体的失败原因（heights/widths/ascents/lengths/element refs）。
-    const traceConverge = (this.options as unknown as Record<string, unknown>)
-      .__perfTraceRender === true
-    let diagFirstNearMiss:
-      | {
-          oj: number
-          why: string
-          oldLen?: number
-          newLen?: number
-          oldH?: number
-          newH?: number
-          oldW?: number
-          newW?: number
-          oldA?: number
-          newA?: number
-          kMismatch?: number
-        }
-      | null = null
+    const traceConverge =
+      (this.options as unknown as Record<string, unknown>).__perfTraceRender ===
+      true
+    let diagFirstNearMiss: {
+      oj: number
+      why: string
+      oldLen?: number
+      newLen?: number
+      oldH?: number
+      newH?: number
+      oldW?: number
+      newW?: number
+      oldA?: number
+      newA?: number
+      kMismatch?: number
+    } | null = null
     for (let oj = 0; oj < oldRows.length; oj++) {
       const old = oldRows[oj]
       if (old.elementList.length !== len) {
@@ -4721,7 +4789,10 @@ export class Draw {
               if (!advanceForSectionBreak(sectionBreakType!, row.startIndex)) {
                 return pageRowList
               }
-            } else if (forcePageBreak || (overflow && pageHeight > marginHeight)) {
+            } else if (
+              forcePageBreak ||
+              (overflow && pageHeight > marginHeight)
+            ) {
               if (!nextPage(row.startIndex)) {
                 return pageRowList
               }
@@ -5033,15 +5104,27 @@ export class Draw {
         } else if (element.type === ElementType.SEPARATOR) {
           this.separatorParticle.render(ctx, element, x, y)
         } else if (element.type === ElementType.PAGE_BREAK) {
-          if (this.mode !== EditorMode.CLEAN && !isPrintMode && !this.options.pageBreak.disabled) {
+          if (
+            this.mode !== EditorMode.CLEAN &&
+            !isPrintMode &&
+            !this.options.pageBreak.disabled
+          ) {
             this.pageBreakParticle.render(ctx, element, x, y)
           }
         } else if (element.type === ElementType.COLUMN_BREAK) {
-          if (this.mode !== EditorMode.CLEAN && !isPrintMode && !this.options.pageBreak.disabled) {
+          if (
+            this.mode !== EditorMode.CLEAN &&
+            !isPrintMode &&
+            !this.options.pageBreak.disabled
+          ) {
             this.pageBreakParticle.render(ctx, element, x, y)
           }
         } else if (element.type === ElementType.SECTION_BREAK) {
-          if (this.mode !== EditorMode.CLEAN && !isPrintMode && !this.options.sectionBreak.disabled) {
+          if (
+            this.mode !== EditorMode.CLEAN &&
+            !isPrintMode &&
+            !this.options.sectionBreak.disabled
+          ) {
             this.sectionBreakParticle.render(ctx, element, x, y)
           }
         } else if (
@@ -7005,10 +7088,7 @@ export class Draw {
       }
     }
     const pagePaintPlan =
-      isPagingMode &&
-      isLazy &&
-      !isInit &&
-      !isFirstRender
+      isPagingMode && isLazy && !isInit && !isFirstRender
         ? this._buildPagePaintPlan(preLayoutDirtyPageSpan)
         : null
     this._paintPlanFirstShiftedPage = pagePaintPlan?.firstShiftedPage ?? null
