@@ -605,6 +605,8 @@ export function isSameElementExceptValue(
     const key = sourceKeys[s] as never
     // 值不需要校验
     if (key === 'value') continue
+    // Each character has its own stable id (CRDT identity); it must not block merging of same-styled consecutive text.
+    if (key === 'id') continue
     // groupIds数组需特殊校验数组是否相等
     if (
       key === 'groupIds' &&
