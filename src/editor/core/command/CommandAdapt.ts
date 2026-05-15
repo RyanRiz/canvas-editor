@@ -1274,10 +1274,10 @@ export class CommandAdapt {
     this.draw.render({ curIndex, isSetCursor })
   }
 
-  public list(listType: ListType | null, listStyle?: ListStyle) {
+  public list(listType: ListType | null, listStyle?: ListStyle, checklistStyle?: 'standard' | 'plain') {
     const isReadonly = this.draw.isReadonly()
     if (isReadonly) return
-    this.draw.getListParticle().setList(listType, listStyle)
+    this.draw.getListParticle().setList(listType, listStyle, checklistStyle)
   }
 
   public listIndent() {
@@ -1311,9 +1311,12 @@ export class CommandAdapt {
     styleConfig?: IListStyle
   ) {
     if (this.draw.isReadonly()) return
-    console.log("[HIST-DROPDOWN] CommandAdapt.listWithStyle: listType=%s listStyle=%s styleConfig.id=%s",
-      listType, listStyle, styleConfig?.id);
     this.draw.getListParticle().setListWithStyle(listType, listStyle, styleConfig)
+  }
+
+  public checklistStyle(checklistStyle: 'standard' | 'plain'): boolean {
+    if (this.draw.isReadonly()) return false
+    return this.draw.getListParticle().setChecklistStyle(checklistStyle)
   }
 
   public rowFlex(payload: RowFlex) {

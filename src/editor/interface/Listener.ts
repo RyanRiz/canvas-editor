@@ -33,6 +33,7 @@ export interface IRangeStyle {
   listType: ListType | null
   listStyle: ListStyle | null
   listBulletChar?: string | null
+  checklistStyle?: 'standard' | 'plain' | null
   groupIds: string[] | null
   textDecoration: ITextDecoration | null
   extension?: unknown | null

@@ -94,6 +94,7 @@ export const EDITOR_ELEMENT_ZIP_ATTR: Array<keyof IElement> = [
   'listFormat',
   'listNumberStyle',
   'listBulletChar',
+  'checklistStyle',
   'groupIds',
   'conceptId',
   'imgDisplay',
@@ -145,7 +146,8 @@ export const LIST_CONTEXT_ATTR: Array<keyof IElement> = [
   'listLevel',
   'listFormat',
   'listNumberStyle',
-  'listBulletChar'
+  'listBulletChar',
+  'checklistStyle'
 ]
 
 export const CONTROL_CONTEXT_ATTR: Array<keyof IElement> = [

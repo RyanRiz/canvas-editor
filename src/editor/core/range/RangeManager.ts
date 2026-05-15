@@ -538,6 +538,7 @@ export class RangeManager {
     const listType = curElement.listType || null
     const listStyle = curElement.listStyle || null
     const listBulletChar = curElement.listBulletChar || null
+    const checklistStyle = curElement.checklistStyle || null
     const textDecoration = underline ? curElement.textDecoration || null : null
     // 菜单
     const painter = !!this.draw.getPainterStyle()
@@ -592,6 +593,7 @@ export class RangeManager {
       listType,
       listStyle,
       listBulletChar,
+      checklistStyle,
       groupIds,
       textDecoration,
       extension,
@@ -639,6 +641,8 @@ export class RangeManager {
       level: null,
       listType: null,
       listStyle: null,
+      listBulletChar: null,
+      checklistStyle: null,
       groupIds: null,
       textDecoration: null,
       extension: null,

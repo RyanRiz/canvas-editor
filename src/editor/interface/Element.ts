@@ -88,6 +88,7 @@ export interface IListElement {
   listFormat?: string
   listNumberStyle?: ListNumberStyle
   listBulletChar?: string
+  checklistStyle?: 'standard' | 'plain'
 }
 
 export interface ITableAttr {

@@ -45,7 +45,7 @@ export class ListParticle {
     this.options = draw.getOptions()
   }
 
-  public setList(listType: ListType | null, listStyle?: ListStyle) {
+  public setList(listType: ListType | null, listStyle?: ListStyle, checklistStyle?: 'standard' | 'plain') {
     const isReadonly = this.draw.isReadonly()
     if (isReadonly) return
     const { startIndex, endIndex } = this.range.getRange()
@@ -69,7 +69,8 @@ export class ListParticle {
           : undefined)
     const changeElementList = this.range.getRangeParagraphElementList()
     if (!changeElementList || !changeElementList.length) return
-    const isUnsetList = changeElementList.find(
+    // Skip toggle-off when explicitly changing checklist style variant
+    const isUnsetList = !checklistStyle && changeElementList.find(
       el => el.listType === listType && el.listStyle === effectiveStyle
     )
     if (isUnsetList || !listType) {
@@ -121,6 +122,7 @@ export class ListParticle {
       listType: ListType | undefined
       listStyle: ListStyle | undefined
       listLevel: number | undefined
+      checklistStyle: 'standard' | 'plain' | undefined
       isSelected: boolean
     }
     const unifyRecords: UnifyRecord[] = []
@@ -138,6 +140,7 @@ export class ListParticle {
         listType: el.listType,
         listStyle: el.listStyle,
         listLevel: el.listLevel,
+        checklistStyle: el.checklistStyle,
         isSelected: true
       })
     }
@@ -151,10 +154,12 @@ export class ListParticle {
         listType: el.listType,
         listStyle: el.listStyle,
         listLevel: el.listLevel,
+        checklistStyle: el.checklistStyle,
         isSelected: isCollapsed
       })
     }
     const draw = this.draw
+    const requestedChecklistStyle = checklistStyle
     const applyForward = () => {
       const list = draw.getElementList()
       for (const rec of unifyRecords) {
@@ -165,6 +170,10 @@ export class ListParticle {
           el.listType = listType
           el.listStyle = effectiveStyle
           el.listLevel = 1
+          // Apply checklistStyle when entering checklist mode
+          if (effectiveStyle === ListStyle.CHECKBOX && requestedChecklistStyle !== undefined) {
+            el.checklistStyle = requestedChecklistStyle
+          }
         }
       }
     }
@@ -192,6 +201,11 @@ export class ListParticle {
           delete el.listLevel
         } else {
           el.listLevel = rec.listLevel
+        }
+        if (rec.checklistStyle === undefined) {
+          delete el.checklistStyle
+        } else {
+          el.checklistStyle = rec.checklistStyle
         }
       }
     }
@@ -497,10 +511,6 @@ export class ListParticle {
           if (mainList[i].listId === cursorListId) expanded.push(mainList[i])
         }
         if (expanded.length > changeElementList.length) {
-          console.log(
-            '[HIST-DROPDOWN] expanded changeElementList from cursor-only to full block: %d elements',
-            expanded.length
-          )
           changeElementList = expanded
         }
       }
@@ -563,15 +573,6 @@ export class ListParticle {
       })
     }
 
-    console.log(
-      '[HIST-DROPDOWN] ListParticle.setListWithStyle: isCollapsed=%s changeElementList=%d unifyRecords=%d span=[%d,%d]',
-      isCollapsed,
-      changeElementList.length,
-      unifyRecords.length,
-      spanStart,
-      spanEnd
-    )
-
     // ---- Phase 2: style-config capture (same logic as applyStyle) ----
     const byLevel = styleConfig?.levels?.length
       ? new Map<number, (typeof styleConfig.levels)[number]>()
@@ -591,10 +592,6 @@ export class ListParticle {
       }
       if (expanded.length > changeElementList.length) {
         changeElementList = expanded
-        console.log(
-          '[HIST-DROPDOWN] expanded changeElementList from cursor-only to full block: %d elements',
-          expanded.length
-        )
       }
     }
     const styleOldValues = byLevel
@@ -633,11 +630,6 @@ export class ListParticle {
           if (cfg.numberStyle === 'bullet') {
             if (cfg.bulletChar) {
               el.listBulletChar = cfg.bulletChar
-              console.log(
-                '[HIST-DROPDOWN] applyForwardCombined: idx=%d listBulletChar=%s',
-                item.mainIndex,
-                cfg.bulletChar
-              )
             }
           } else if (cfg.numberStyle) {
             el.listNumberStyle = cfg.numberStyle
@@ -1033,5 +1025,96 @@ export class ListParticle {
     ctx.font = this.getListFontStyle(elementList, scale)
     ctx.fillText(text, x, y)
     ctx.restore()
+  }
+
+  public setChecklistStyle(checklistStyle: 'standard' | 'plain'): boolean {
+    if (this.draw.isReadonly()) return false
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return false
+    let changeElementList = this.range
+      .getRangeParagraphElementList()
+      ?.filter(el => el.listId && el.listStyle === ListStyle.CHECKBOX)
+    if (!changeElementList || !changeElementList.length) return false
+    const isCollapsed = startIndex === endIndex
+    // Expand to entire list block when cursor is collapsed
+    if (isCollapsed && changeElementList[0]?.listId) {
+      const blockListId = changeElementList[0].listId
+      const mainList = this.draw.getElementList()
+      let blockStart = mainList.indexOf(changeElementList[0])
+      while (
+        blockStart > 0 &&
+        mainList[blockStart - 1]?.listId === blockListId
+      ) {
+        blockStart--
+      }
+      let blockEnd = mainList.indexOf(
+        changeElementList[changeElementList.length - 1]
+      )
+      while (
+        blockEnd < mainList.length - 1 &&
+        mainList[blockEnd + 1]?.listId === blockListId
+      ) {
+        blockEnd++
+      }
+      const expanded: IElement[] = []
+      for (let i = blockStart; i <= blockEnd; i++) {
+        if (mainList[i].listId === blockListId) {
+          expanded.push(mainList[i])
+        }
+      }
+      if (expanded.length > changeElementList.length) {
+        changeElementList = expanded
+      }
+    }
+    // Filter to all checklist elements in scope (marker + text), so
+    // RangeManager reads the correct value regardless of cursor position.
+    const checklistElements = changeElementList.filter(
+      el => el.listId && el.listStyle === ListStyle.CHECKBOX
+    )
+    if (!checklistElements.length) return false
+    // Capture old values for undo
+    const mainList = this.draw.getElementList()
+    const oldValues = checklistElements
+      .map(el => ({
+        mainIndex: mainList.indexOf(el),
+        checklistStyle: el.checklistStyle
+      }))
+      .filter(v => v.mainIndex >= 0)
+    const draw = this.draw
+    const applyForward = () => {
+      const list = draw.getElementList()
+      for (const item of oldValues) {
+        const el = list[item.mainIndex]
+        if (!el) continue
+        el.checklistStyle = checklistStyle
+      }
+    }
+    const applyBackward = () => {
+      const list = draw.getElementList()
+      for (const item of oldValues) {
+        const el = list[item.mainIndex]
+        if (!el) continue
+        if (item.checklistStyle === undefined) {
+          delete el.checklistStyle
+        } else {
+          el.checklistStyle = item.checklistStyle
+        }
+      }
+    }
+    applyForward()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+    return true
   }
 }

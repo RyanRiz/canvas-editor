@@ -1,4 +1,6 @@
 import { NBSP, ZERO } from '../../../dataset/constant/Common'
+import { TEXTLIKE_ELEMENT_TYPE } from '../../../dataset/constant/Element'
+import { ListStyle } from '../../../dataset/enum/List'
 import { VerticalAlign } from '../../../dataset/enum/VerticalAlign'
 import { DeepRequired } from '../../../interface/Common'
 import { IEditorOption } from '../../../interface/Editor'
@@ -24,30 +26,67 @@ export class CheckboxParticle {
   }
 
   public setSelect(element: IElement) {
-    // Capture the prior value so the history delta can reverse a toggle.
-    // Without this, click-to-check mutated `checkbox.value` directly without
-    // going through HistoryManager, so Ctrl+Z silently no-op'd the toggle
-    // (Constraint C1: one history entry per user-visible action).
     const prevValue = !!element.checkbox?.value
     const nextValue = !prevValue
     const draw = this.draw
+
+    // Find the paragraph's ZERO element (which holds the checkbox + checklistStyle)
+    const elementList = draw.getElementList()
+    const elIdx = elementList.indexOf(element)
+    let zeroElement = element
+    let zeroIdx = elIdx
+    if (elIdx >= 0) {
+      let p = elIdx
+      while (p > 0 && elementList[p].value !== ZERO) p--
+      if (
+        elementList[p].value === ZERO &&
+        elementList[p].listStyle === ListStyle.CHECKBOX
+      ) {
+        zeroElement = elementList[p]
+        zeroIdx = p
+      }
+    }
+
+    // Collect text-element indices within this paragraph for styling
+    const textIndices: number[] = []
+    if (zeroElement.listStyle === ListStyle.CHECKBOX) {
+      let p = zeroIdx + 1
+      while (p < elementList.length && elementList[p].value !== ZERO) {
+        const t = elementList[p].type
+        if (!t || TEXTLIKE_ELEMENT_TYPE.includes(t)) {
+          textIndices.push(p)
+        }
+        p++
+      }
+    }
+
+    const checklistStyle = zeroElement.checklistStyle || 'standard'
+    const mutedColor = '#5F6368'
+
+    // Capture old text styles for undo
+    const oldTextStyles = textIndices.map(i => ({
+      index: i,
+      strikeout: elementList[i].strikeout,
+      color: elementList[i].color
+    }))
+
     const applyForward = () => {
       if (element.checkbox) {
         element.checkbox.value = nextValue
       } else {
         element.checkbox = { value: nextValue }
       }
-      draw.render({
-        isCompute: false,
-        isSetCursor: false,
-        isSubmitHistory: false
-      })
-    }
-    const applyBackward = () => {
-      if (element.checkbox) {
-        element.checkbox.value = prevValue
-      } else {
-        element.checkbox = { value: prevValue }
+      const list = draw.getElementList()
+      for (const item of oldTextStyles) {
+        const el = list[item.index]
+        if (!el) continue
+        if (nextValue) {
+          el.color = mutedColor
+          if (checklistStyle === 'standard') el.strikeout = true
+        } else {
+          delete el.color
+          delete el.strikeout
+        }
       }
       draw.render({
         isCompute: false,
@@ -55,6 +94,29 @@ export class CheckboxParticle {
         isSubmitHistory: false
       })
     }
+
+    const applyBackward = () => {
+      if (element.checkbox) {
+        element.checkbox.value = prevValue
+      } else {
+        element.checkbox = { value: prevValue }
+      }
+      const list = draw.getElementList()
+      for (const item of oldTextStyles) {
+        const el = list[item.index]
+        if (!el) continue
+        if (item.strikeout !== undefined) el.strikeout = item.strikeout
+        else delete el.strikeout
+        if (item.color !== undefined) el.color = item.color
+        else delete el.color
+      }
+      draw.render({
+        isCompute: false,
+        isSetCursor: false,
+        isSubmitHistory: false
+      })
+    }
+
     applyForward()
     draw.getHistoryManager().executeDelta({
       applyForward,
@@ -91,7 +153,6 @@ export class CheckboxParticle {
         if (nextElement.value !== ZERO && nextElement.value !== NBSP) break
         nextIndex++
       }
-      // 以后一个非空格元素为基准
       if (nextElement) {
         const {
           metrics: { boundingBoxAscent, boundingBoxDescent }
@@ -106,45 +167,69 @@ export class CheckboxParticle {
         }
       }
     }
-    // left top 四舍五入避免1像素问题
+    // Rounded rectangle dimensions
     const left = Math.round(x + gap * scale)
-    const top = Math.round(y - metrics.height + lineWidth)
-    const width = metrics.width - gap * 2 * scale
-    const height = metrics.height
+    const top = Math.round(y - metrics.height)
+    const boxWidth = metrics.width - gap * 2 * scale
+    const boxHeight = metrics.height
+    const cornerRadius = 2 * scale
+
     ctx.save()
-    ctx.beginPath()
-    ctx.translate(0.5, 0.5)
-    // 绘制勾选状态
+    ctx.lineWidth = lineWidth * scale
+
     if (checkbox?.value) {
-      // 选中时填充背景
+      // Checked: filled blue rect with white checkmark
       ctx.fillStyle = checkFillStyle
-      ctx.fillRect(left, top, width, height)
-      // 选中时绘制边框
-      ctx.beginPath()
-      ctx.lineWidth = lineWidth
       ctx.strokeStyle = checkStrokeStyle
-      ctx.rect(left, top, width, height)
+      this.roundRect(ctx, left, top, boxWidth, boxHeight, cornerRadius)
+      ctx.fill()
       ctx.stroke()
-      // 勾选对号
+
+      // White checkmark (two-stroke path matching GDocs proportions)
       ctx.beginPath()
       ctx.strokeStyle = checkMarkColor
-      ctx.lineWidth = lineWidth * 2 * scale
-      ctx.moveTo(left + 2 * scale, top + height / 2)
-      ctx.lineTo(left + width / 2, top + height - 3 * scale)
-      ctx.lineTo(left + width - 2 * scale, top + 3 * scale)
+      ctx.lineWidth = 2 * scale
+      ctx.lineCap = 'round'
+      ctx.lineJoin = 'round'
+      const cx = left + boxWidth * 0.25
+      const cy = top + boxHeight * 0.55
+      const mx = left + boxWidth * 0.45
+      const my = top + boxHeight * 0.75
+      const ex = left + boxWidth * 0.78
+      const ey = top + boxHeight * 0.28
+      ctx.moveTo(cx, cy)
+      ctx.lineTo(mx, my)
+      ctx.lineTo(ex, ey)
       ctx.stroke()
     } else {
-      // 未选中时填充背景
+      // Unchecked: white fill with gray border
       ctx.fillStyle = fillStyle
-      ctx.fillRect(left, top, width, height)
-      // 未选中时绘制边框
-      ctx.beginPath()
-      ctx.lineWidth = lineWidth
       ctx.strokeStyle = strokeStyle
-      ctx.rect(left, top, width, height)
+      this.roundRect(ctx, left, top, boxWidth, boxHeight, cornerRadius)
+      ctx.fill()
       ctx.stroke()
     }
-    ctx.closePath()
     ctx.restore()
+  }
+
+  private roundRect(
+    ctx: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    r: number
+  ) {
+    ctx.beginPath()
+    ctx.moveTo(x + r, y)
+    ctx.lineTo(x + w - r, y)
+    ctx.arcTo(x + w, y, x + w, y + r, r)
+    ctx.lineTo(x + w, y + h - r)
+    ctx.arcTo(x + w, y + h, x + w - r, y + h, r)
+    ctx.lineTo(x + r, y + h)
+    ctx.arcTo(x, y + h, x, y + h - r, r)
+    ctx.lineTo(x, y + r)
+    ctx.arcTo(x, y, x + r, y, r)
+    ctx.closePath()
   }
 }
