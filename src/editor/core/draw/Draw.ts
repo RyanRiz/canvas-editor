@@ -382,7 +382,17 @@ export class Draw {
   // Enter, cursor mutation) and need to land AFTER the trailing fast-lane
   // render. Coalesced via `_mergeRenderPayload` so multiple in-flight
   // requests collapse to a single render once we're back to Ready.
+  // NOTE: typing (`isTextInput: true`) does NOT use this queue — it
+  // preempts the chunked reflow (see render() preempt-on-typing path).
+  // Only non-input renders (cursor mutation, format commands) queue here.
   private _queuedRenderAfterLayout: IDrawOption | null
+  // Optimistic-typing restart machinery. When typing preempts an
+  // in-flight chunked reflow, `_restartChunkedReflowSoon` schedules a
+  // debounced restart so the new pagination eventually catches up to the
+  // latest elementList. `_lastReflowReason` carries the original setter's
+  // reason (margin / direction / size) into the restart.
+  private _lastReflowReason: 'margin' | 'direction' | 'size' | 'custom'
+  private _restartReflowTimer: ReturnType<typeof setTimeout> | null
   private pageNo: number
   private renderCount: number
   private pagePixelRatio: number | null
@@ -516,6 +526,8 @@ export class Draw {
     this._layoutState = LayoutState.Ready
     this._layoutTransaction = null
     this._queuedRenderAfterLayout = null
+    this._lastReflowReason = 'custom'
+    this._restartReflowTimer = null
     this.pageNo = 0
     this.renderCount = 0
     this.pagePixelRatio = null
@@ -2333,6 +2345,12 @@ export class Draw {
    */
   public cancelChunkedReflow(): void {
     this._chunkedOpId++
+    // Kill any pending restart — caller is committing a sync paper setting
+    // and a surprise async restart would clobber it a moment later.
+    if (this._restartReflowTimer !== null) {
+      clearTimeout(this._restartReflowTimer)
+      this._restartReflowTimer = null
+    }
     // Tear down the layout transaction synchronously — the chunked driver
     // is still parked at `await rAF`, so without this its `_endLayoutTransaction`
     // will never fire. We don't carry the queued input forward: the caller
@@ -2341,6 +2359,36 @@ export class Draw {
     // transaction is cleared, and any queued input was just keystrokes
     // dropped during an interactive paper-size scrubble.
     this._forceTearDownLayoutTransaction()
+  }
+
+  /**
+   * Schedule a debounced restart of the chunked reflow. Called by
+   * `render()` when typing preempts an in-flight reflow — the user wins,
+   * we paint the optimistic state immediately, and the freshly-restarted
+   * reflow catches up to the latest elementList ~150ms after the last
+   * keystroke. Continuous typing keeps the timer rolling forward so we
+   * never actually pay for a full reflow until typing pauses, matching
+   * Google Docs / Word behaviour.
+   *
+   * Reflows the SAME flavour as the most recent `_runChunkedFullReflow`
+   * (margin / direction / size / custom) — `_lastReflowReason` carries
+   * that through without callers needing to plumb it.
+   */
+  public restartChunkedFullReflowSoon(): void {
+    this._restartChunkedReflowSoonInternal()
+  }
+
+  private _restartChunkedReflowSoonInternal(): void {
+    if (this._restartReflowTimer !== null) {
+      clearTimeout(this._restartReflowTimer)
+    }
+    const reason = this._lastReflowReason
+    this._restartReflowTimer = setTimeout(() => {
+      this._restartReflowTimer = null
+      // _runChunkedFullReflow internally cancels any concurrent reflow
+      // via opId, so we don't need additional guards here.
+      void this._runChunkedFullReflow(reason)
+    }, 150)
   }
 
   /**
@@ -2393,6 +2441,14 @@ export class Draw {
   private async _runChunkedFullReflow(
     reason: 'margin' | 'direction' | 'size' | 'custom' = 'custom'
   ): Promise<void> {
+    // Remember the reason so any restart triggered by preempting typing
+    // can resume the SAME flavour of reflow without the caller plumbing
+    // through. Also kill any pending restart timer — we're starting NOW.
+    this._lastReflowReason = reason
+    if (this._restartReflowTimer !== null) {
+      clearTimeout(this._restartReflowTimer)
+      this._restartReflowTimer = null
+    }
     const opId = ++this._chunkedOpId
     this._chunkedAsyncInFlight = true
     // Layout-transaction barrier: from this point until the trailing
@@ -6755,21 +6811,80 @@ export class Draw {
   }
 
   public render(payload?: IDrawOption) {
-    // Layout-transaction barrier — see `LayoutState`/`_runChunkedFullReflow`.
-    // When a chunked async reflow is in flight and an EXTERNAL render
-    // arrives (typing / Enter / cursor mutation / option change), DO NOT
-    // cancel the chunked op. Cancelling caused the bug this whole machinery
-    // exists to fix: the first keystroke after `setPaperMarginAsync()` was
-    // forced to be the cleanup-and-recompute trigger, so typing felt as
-    // slow as a sync reflow. Instead, queue the render — the trailing
-    // fast-lane render commits the new layout, `_endLayoutTransaction`
-    // flips to Ready, then flushes the queued render once.
+    // Optimistic-typing barrier — see `_runChunkedFullReflow` and
+    // `restartChunkedFullReflowSoon`. ANY external render (typing,
+    // click-to-place-cursor, selection drag, format command, scroll-
+    // triggered render) preempts the chunked reflow. The user always
+    // wins; the reflow restarts ~150ms later and reconciles its result
+    // against the latest elementList. This matches Google Docs / Word
+    // behaviour: optimistic state first, layout correctness second.
+    //
+    // Queuing non-input renders (the previous approach) blocked clicks
+    // and cursor placement during reflow, which felt frozen even though
+    // the keystroke path itself was responsive — see CanvasRulers / the
+    // "can't click to place cursor" repro. Preempting on everything is
+    // the correct model.
     //
     // `_skipMainRowCompute` distinguishes the chunked driver's OWN
     // fast-lane render (which we MUST allow through) from external
     // renders that landed mid-stream.
     if (this._chunkedAsyncInFlight && !this._skipMainRowCompute) {
-      if (this.queueRenderAfterLayout(payload)) return
+      // Cancel the in-flight reflow synchronously — next chunk iteration
+      // will see the opId mismatch and exit cleanly.
+      this._chunkedOpId++
+      this._chunkedAsyncInFlight = false
+      this._forceTearDownLayoutTransaction()
+      // The chunked driver has been mutating `this.rowList`, `this.pageRowList`,
+      // and `this.position.positionList` incrementally via
+      // `_progressivePaintVisible`. At preempt time those are in a partial,
+      // inconsistent state (rowList covers some elements, pageRowList is
+      // partial, positionList only has entries up to the visible page).
+      // The fall-through render needs to rebuild from scratch — otherwise
+      // the paint pipeline tries to read `positionList[index]` for an
+      // element that never got a position entry and crashes with
+      // "Cannot destructure property 'coordinate' of undefined".
+      //
+      // Invalidate the paint/layout cache so the fall-through render takes
+      // the full-recompute path (no incremental layout reuse, no stale
+      // checkpoints, no stale page-row counts), and re-assert the doc-wide
+      // dirty range so it actually re-runs computeRowList.
+      this._invalidatePaintCache()
+      this.markDirty(0, Math.max(0, this.getOriginalElementList().length - 1))
+      // Reset any lazy-position bookkeeping the progressive paint may have
+      // set — the fall-through render must rebuild positions cleanly.
+      this._lazyPositionStaleFromPageNo = null
+      if (this._lazyPositionRefreshTimer !== null) {
+        clearTimeout(this._lazyPositionRefreshTimer)
+        this._lazyPositionRefreshTimer = null
+      }
+      // IMPORTANT: do NOT schedule a restart-reflow here. The forced
+      // `isCompute: true` below makes the fall-through render rebuild
+      // rowList / pageRowList / positionList from scratch for the new
+      // options — that's the same work the chunked reflow would do, just
+      // synchronously instead of chunked. After this render returns,
+      // layout is fully converged; restarting the chunked reflow would
+      // only invalidate `_mainRowCheckpoints` and `_mainLayoutSig` again,
+      // forcing the NEXT keystroke / click to also do a full recompute.
+      // That created a "fast / slow / fast / slow" cycle on every
+      // typing burst longer than 150ms.
+      //
+      // Also kill any previously-scheduled restart from a prior preempt.
+      if (this._restartReflowTimer !== null) {
+        clearTimeout(this._restartReflowTimer)
+        this._restartReflowTimer = null
+      }
+      // CRITICAL: force `isCompute: true`. Callers that arrive mid-reflow
+      // may have explicitly passed `isCompute: false` (mousedown.ts does
+      // this — cursor placement normally doesn't need a recompute) but
+      // the chunked driver has corrupted layout state, so we MUST
+      // recompute before painting. Without this override the fall-through
+      // render skips computeRowList / computePositionList and tries to
+      // paint partial state → "Cannot destructure property 'coordinate'"
+      // crash at the first off-chunk row.
+      payload = {
+        ...payload,
+        isCompute: true
+      }
     }
     // 同步 render 进入时若仍有 rAF 队列：合并并取消，确保后续调用看到的视图与
     // history 是最新的（避免被即将到来的 rAF 回调覆盖）。

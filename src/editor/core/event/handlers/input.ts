@@ -82,30 +82,15 @@ export function input(data: string, host: CanvasEvent) {
     }
     return newElement
   })
-  // Layout-transaction barrier: during a chunked async reflow
-  // (`setPaperMarginAsync` / `setPaperSizeAsync` / `setPaperDirectionAsync`),
-  // engine state (rowList / pageRowList / positionList) is in flux. A
-  // normal insert + render here would force a stale-state cleanup
-  // recompute and feel as slow as a sync reflow — the exact bug the
-  // transaction machinery exists to fix. Queue the keystroke; Draw
-  // flushes it via `insertElementList` once the trailing fast-lane
-  // render commits the new layout.
-  //
-  // Composition (IME) and controls bypass this fast queue: they need
-  // immediate placeholder/control writes to keep IME state consistent.
+  // Optimistic typing: the keystroke is applied immediately even if a
+  // chunked async reflow (`setPaperMarginAsync` / `setPaperSizeAsync` /
+  // `setPaperDirectionAsync`) is in flight. Draw.render() detects
+  // `isTextInput: true` and preempts the reflow — the user always wins,
+  // the new pagination catches up via `restartChunkedFullReflowSoon`.
+  // Typing is NEVER queued, regardless of layout state.
   const control = draw.getControl()
   const hasActiveControl =
     control.getActiveControl() && control.getIsRangeWithinControl()
-  if (
-    !isComposing &&
-    !hasActiveControl &&
-    draw.handleTextInputDuringLayout(inputData, undefined, {
-      isSubmitHistory: !isComposing,
-      isComposing
-    })
-  ) {
-    return
-  }
 
   let curIndex: number
   if (hasActiveControl) {
