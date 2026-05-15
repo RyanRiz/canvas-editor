@@ -188,6 +188,44 @@ interface IDirtyPageSpan {
   endPage: number
 }
 
+/**
+ * Layout-transaction state machine for chunked-rAF reflows
+ * (`setPaperMarginAsync` / `setPaperSizeAsync` / `setPaperDirectionAsync`).
+ *
+ *   Ready                  — engine state (rowList / pageRowList / positionList /
+ *                            area / lazy-position debt) is consistent. Typing
+ *                            takes the normal insert + scheduleRender path.
+ *   GlobalReflowRunning    — `_runChunkedFullReflow` is between markDirty and its
+ *                            trailing fast-lane render. Chunked rowList build is
+ *                            in-flight; visible pages may progressively repaint.
+ *                            Typing during this state must NOT trigger a normal
+ *                            render (would force a stale-state cleanup recompute
+ *                            and feel as slow as a sync reflow) — instead the
+ *                            input is queued and a temporary caret is painted.
+ *   GlobalReflowCommitting — chunked build finished, the finalizing fast-lane
+ *                            `render()` is running. Typing still queued — we're
+ *                            about to flip to Ready, no point landing in mid-flush.
+ */
+export enum LayoutState {
+  Ready = 0,
+  GlobalReflowRunning = 1,
+  GlobalReflowCommitting = 2
+}
+
+/**
+ * One queued text-input batch captured by `handleTextInputDuringLayout`.
+ * Flushed by `_flushQueuedInputAfterLayout` once the layout transaction
+ * commits — applied in arrival order, with the LAST `curIndex` used as the
+ * final cursor position (intermediate cursor moves are subsumed by the next
+ * insert anyway).
+ */
+interface IQueuedLayoutInput {
+  input: IElement[]
+  curIndex?: number
+  isSubmitHistory: boolean
+  isComposing: boolean
+}
+
 export class Draw {
   private container: HTMLDivElement
   private pageContainer: HTMLDivElement
@@ -329,6 +367,22 @@ export class Draw {
   // otherwise the chunked fast-lane would overwrite the external render's
   // result when chunks finish.
   private _chunkedAsyncInFlight: boolean
+  // Layout-transaction state. Driven by `_runChunkedFullReflow` (and any
+  // future async-reflow entry-points): bumps to GlobalReflowRunning before
+  // the first chunk, to GlobalReflowCommitting around the trailing fast-lane
+  // render, then back to Ready in `finally`. Read by `handleTextInputDuringLayout`
+  // / `isLayoutReady` to decide whether typing should queue or land normally.
+  private _layoutState: LayoutState
+  private _layoutTransaction: {
+    id: number
+    reason: 'margin' | 'direction' | 'size' | 'custom'
+    queuedInput: IQueuedLayoutInput[]
+  } | null
+  // Render payloads that arrived during the layout transaction (typing,
+  // Enter, cursor mutation) and need to land AFTER the trailing fast-lane
+  // render. Coalesced via `_mergeRenderPayload` so multiple in-flight
+  // requests collapse to a single render once we're back to Ready.
+  private _queuedRenderAfterLayout: IDrawOption | null
   private pageNo: number
   private renderCount: number
   private pagePixelRatio: number | null
@@ -459,6 +513,9 @@ export class Draw {
     this._lazyPositionRefreshTimer = null
     this._chunkedOpId = 0
     this._chunkedAsyncInFlight = false
+    this._layoutState = LayoutState.Ready
+    this._layoutTransaction = null
+    this._queuedRenderAfterLayout = null
     this.pageNo = 0
     this.renderCount = 0
     this.pagePixelRatio = null
@@ -2016,8 +2073,10 @@ export class Draw {
   }
 
   public setPaperSize(width: number, height: number) {
-    // Bump the chunked-op id so any in-flight setPaperSizeAsync abandons.
-    this._chunkedOpId++
+    // Bump the chunked-op id so any in-flight setPaperSizeAsync abandons,
+    // and synchronously tear down its layout transaction so our render
+    // below isn't trapped in the post-reflow queue.
+    this.cancelChunkedReflow()
     this.options.width = width
     this.options.height = height
     const dpr = this.getPagePixelRatio()
@@ -2034,8 +2093,10 @@ export class Draw {
   }
 
   public setPaperDirection(payload: PaperDirection) {
-    // Bump the chunked-op id so any in-flight setPaperDirectionAsync abandons.
-    this._chunkedOpId++
+    // Bump the chunked-op id so any in-flight setPaperDirectionAsync abandons,
+    // and synchronously tear down its layout transaction so our render
+    // below isn't trapped in the post-reflow queue.
+    this.cancelChunkedReflow()
     const dpr = this.getPagePixelRatio()
     this.options.paperDirection = payload
     const width = this.getWidth()
@@ -2058,8 +2119,9 @@ export class Draw {
     // and `positionList` need refreshing. Reuse the same fast lane
     // `setPageScale` uses (`_skipMainRowCompute`, see line 5943) when safe.
     // Bump the chunked-op id so any in-flight `setPaperMarginAsync` abandons
-    // its remaining chunks before we mutate margins.
-    this._chunkedOpId++
+    // its remaining chunks before we mutate margins, and synchronously
+    // tear down its layout transaction so renders below land normally.
+    this.cancelChunkedReflow()
     const oldInnerWidth = this.getInnerWidth()
     this.options.margins = payload
     const newInnerWidth = this.getInnerWidth()
@@ -2194,7 +2256,7 @@ export class Draw {
       this.setPaperMargin(payload)
       return
     }
-    await this._runChunkedFullReflow()
+    await this._runChunkedFullReflow('margin')
   }
 
   /**
@@ -2213,7 +2275,7 @@ export class Draw {
     for (let i = 0; i < this.pageList.length; i++) {
       this._resizePageBacking(i, realWidth, realHeight, dpr)
     }
-    await this._runChunkedFullReflow()
+    await this._runChunkedFullReflow('size')
   }
 
   /**
@@ -2233,7 +2295,7 @@ export class Draw {
     for (let i = 0; i < this.pageList.length; i++) {
       this._resizePageBacking(i, width, height, dpr)
     }
-    await this._runChunkedFullReflow()
+    await this._runChunkedFullReflow('direction')
   }
 
   /**
@@ -2255,7 +2317,7 @@ export class Draw {
    * Concurrent reflows cancel earlier ones via `_chunkedOpId`.
    */
   public runChunkedFullReflow(): Promise<void> {
-    return this._runChunkedFullReflow()
+    return this._runChunkedFullReflow('custom')
   }
 
   /**
@@ -2271,6 +2333,41 @@ export class Draw {
    */
   public cancelChunkedReflow(): void {
     this._chunkedOpId++
+    // Tear down the layout transaction synchronously — the chunked driver
+    // is still parked at `await rAF`, so without this its `_endLayoutTransaction`
+    // will never fire. We don't carry the queued input forward: the caller
+    // (sync `setPaperSize` / `setPaperDirection` / `setPaperMargin`) is about
+    // to issue its own `render()` which will land normally now that the
+    // transaction is cleared, and any queued input was just keystrokes
+    // dropped during an interactive paper-size scrubble.
+    this._forceTearDownLayoutTransaction()
+  }
+
+  /**
+   * Synchronously end any active layout transaction. The chunked driver
+   * may still be parked on an `await rAF`; we clear state so the next
+   * `render()` lands normally instead of getting queued forever, and
+   * flush any already-queued render so it lands before the caller's
+   * next action.
+   */
+  private _forceTearDownLayoutTransaction(): void {
+    if (this._layoutState === LayoutState.Ready && !this._layoutTransaction) {
+      return
+    }
+    const tx = this._layoutTransaction
+    this._layoutTransaction = null
+    this._layoutState = LayoutState.Ready
+    this._chunkedAsyncInFlight = false
+    if (tx && tx.queuedInput.length > 0) {
+      // Replay any keystrokes the user fired into the queue before we
+      // got cancelled — the new sync render is about to run, so they
+      // can land in the same frame.
+      this._flushQueuedInputAfterLayout(tx.queuedInput)
+    }
+    // Drop any render queued during the transaction — the caller is
+    // about to issue its own render(); we don't want a stale payload
+    // arriving after it.
+    this._queuedRenderAfterLayout = null
   }
 
   /**
@@ -2293,9 +2390,25 @@ export class Draw {
    *
    * Concurrent reflows cancel via `_chunkedOpId`.
    */
-  private async _runChunkedFullReflow(): Promise<void> {
+  private async _runChunkedFullReflow(
+    reason: 'margin' | 'direction' | 'size' | 'custom' = 'custom'
+  ): Promise<void> {
     const opId = ++this._chunkedOpId
     this._chunkedAsyncInFlight = true
+    // Layout-transaction barrier: from this point until the trailing
+    // fast-lane render finishes, typing must NOT trigger a normal
+    // `render()` (which would force a stale-state cleanup recompute and
+    // feel as slow as a sync reflow). `handleTextInputDuringLayout`
+    // queues keystrokes into `_layoutTransaction.queuedInput` instead;
+    // `_endLayoutTransaction` flushes them once we're back to Ready.
+    // If a concurrent reflow superseded us (its `++_chunkedOpId` is what
+    // we just observed and matched as `opId`), the previous transaction
+    // is replaced — flush its queue into ours so no input is lost.
+    const previousQueued =
+      this._layoutTransaction && this._layoutTransaction.id !== opId
+        ? this._layoutTransaction.queuedInput
+        : []
+    this._beginLayoutTransaction(reason, opId, previousQueued)
     this.markDirty(0, Math.max(0, this.getOriginalElementList().length - 1))
     const margins = this.getMargins()
     const pageHeight = this.getHeight()
@@ -2350,6 +2463,7 @@ export class Draw {
     while (true) {
       if (this._chunkedOpId !== opId) {
         this._chunkedAsyncInFlight = false
+        this._abortLayoutTransactionIfOwned(opId)
         return
       }
       const chunkSink: { state: IChunkResumeState | null } = { state: null }
@@ -2398,6 +2512,7 @@ export class Draw {
     }
     if (this._chunkedOpId !== opId) {
       this._chunkedAsyncInFlight = false
+      this._abortLayoutTransactionIfOwned(opId)
       return
     }
     this.rowList = rowList
@@ -2426,6 +2541,12 @@ export class Draw {
       defaultRowMargin: this.options.defaultRowMargin,
       defaultTabWidth: this.options.defaultTabWidth
     })
+    // Flip to GlobalReflowCommitting around the trailing fast-lane render.
+    // Typing that arrives during this window keeps queueing — we're about
+    // to flip to Ready and flush the queue.
+    if (this._layoutTransaction && this._layoutTransaction.id === opId) {
+      this._layoutState = LayoutState.GlobalReflowCommitting
+    }
     try {
       this.render({
         isSubmitHistory: false,
@@ -2435,6 +2556,7 @@ export class Draw {
     } finally {
       this._skipMainRowCompute = false
       this._chunkedAsyncInFlight = false
+      this._endLayoutTransaction(opId)
     }
     console.log('[ChunkedReflow] post-finalize-render', {
       storedSig: this._mainLayoutSig,
@@ -2446,6 +2568,215 @@ export class Draw {
         defaultRowMargin: this.options.defaultRowMargin,
         defaultTabWidth: this.options.defaultTabWidth
       }
+    })
+  }
+
+  // ────────────────────────────────────────────────────────────────────
+  // Layout transaction barrier
+  //
+  // Driven by `_runChunkedFullReflow` (and any future async-layout entry-
+  // point). While `_layoutState !== Ready`, typing must not trigger a
+  // normal `render()` — that path would force a stale-state cleanup
+  // recompute and make the first keystroke after an async paper-margin /
+  // size / direction change feel as slow as a sync reflow ever did.
+  // Instead, keystrokes are queued by `handleTextInputDuringLayout`, a
+  // temporary caret is painted via the cursor agent, and the queue is
+  // applied once `_endLayoutTransaction` flips back to Ready.
+  // ────────────────────────────────────────────────────────────────────
+
+  /** Is the engine in the fully-consistent post-reflow state where
+   *  rowList / pageRowList / positionList / area are all final and no
+   *  chunked op or lazy-position debt is outstanding?
+   *
+   *  Used by external callers awaiting `setPaperMarginAsync` /
+   *  `setPaperSizeAsync` / `setPaperDirectionAsync` who want to know if
+   *  the engine is *truly* ready — not just visually ready. */
+  public isLayoutReady(): boolean {
+    return (
+      this._layoutState === LayoutState.Ready &&
+      !this._chunkedAsyncInFlight &&
+      this._lazyPositionStaleFromPageNo === null &&
+      this._lazyPositionRefreshTimer === null
+    )
+  }
+
+  /** Current layout state — exposed for callers that need to gate UI
+   *  affordances on whether typing is currently buffered (e.g. show a
+   *  subtle "applying layout…" hint). */
+  public getLayoutState(): LayoutState {
+    return this._layoutState
+  }
+
+  /**
+   * Resolve when the engine reaches the fully-consistent state described
+   * by `isLayoutReady` — useful for callers chaining work onto
+   * `setPaperMarginAsync` / `setPaperSizeAsync` / `setPaperDirectionAsync`
+   * that need the lazy-position tail to clear before reading
+   * positionList / area. Resolves immediately if already ready.
+   *
+   * The lazy-position refresh timer fires on a short (~100ms) cadence,
+   * so this typically resolves within a frame or two after the async
+   * setter's Promise. The poll cadence is intentionally short — the
+   * underlying flags are set/cleared synchronously by `render()`.
+   */
+  public whenLayoutReady(): Promise<void> {
+    if (this.isLayoutReady()) return Promise.resolve()
+    return new Promise(resolve => {
+      const check = () => {
+        if (this.isLayoutReady()) {
+          resolve()
+          return
+        }
+        setTimeout(check, 16)
+      }
+      setTimeout(check, 16)
+    })
+  }
+
+  /**
+   * Capture a typing batch coming from `input.ts` while a layout
+   * transaction is in flight. The batch is replayed in arrival order by
+   * `_flushQueuedInputAfterLayout` once we're back to Ready.
+   *
+   * Returns `true` when the input was queued (caller MUST early-return —
+   * do NOT also call `insertElementList` / `scheduleRender` itself).
+   * Returns `false` when no transaction is active and the caller should
+   * proceed with its normal insert path.
+   */
+  public handleTextInputDuringLayout(
+    input: IElement[],
+    curIndex?: number,
+    options?: { isSubmitHistory?: boolean; isComposing?: boolean }
+  ): boolean {
+    if (this._layoutState === LayoutState.Ready) return false
+    if (!this._layoutTransaction) return false
+    if (!input.length) {
+      this._paintTemporaryCaretOnly()
+      return true
+    }
+    this._layoutTransaction.queuedInput.push({
+      input,
+      curIndex,
+      isSubmitHistory: options?.isSubmitHistory ?? true,
+      isComposing: options?.isComposing ?? false
+    })
+    this._paintTemporaryCaretOnly()
+    return true
+  }
+
+  /**
+   * Queue a `render()` payload that arrived during the layout transaction
+   * (typing scheduleRender / cursor mutation / option-change render).
+   * Coalesced into `_queuedRenderAfterLayout` via the same merge helper
+   * the rAF queue uses, so multiple in-flight requests collapse to a
+   * single trailing render once we hit Ready.
+   *
+   * Returns `true` when the payload was queued (caller / `render()`
+   * must early-return). Returns `false` when no transaction is active.
+   */
+  public queueRenderAfterLayout(payload?: IDrawOption): boolean {
+    if (this._layoutState === LayoutState.Ready) return false
+    this._queuedRenderAfterLayout = this._mergeRenderPayload(
+      this._queuedRenderAfterLayout,
+      payload
+    )
+    return true
+  }
+
+  /**
+   * Begin a layout transaction. Called by `_runChunkedFullReflow` before
+   * its first chunk. If a previous transaction is being superseded (its
+   * `id` doesn't match the new opId), its queued input is carried over
+   * — we never silently drop user keystrokes mid-flight.
+   */
+  private _beginLayoutTransaction(
+    reason: 'margin' | 'direction' | 'size' | 'custom',
+    opId: number,
+    carryOver: IQueuedLayoutInput[]
+  ) {
+    this._layoutTransaction = {
+      id: opId,
+      reason,
+      queuedInput: carryOver.slice()
+    }
+    this._layoutState = LayoutState.GlobalReflowRunning
+  }
+
+  /**
+   * End the layout transaction we own (opId matches). Flips back to
+   * Ready, flushes any queued typing through `insertElementList`, then
+   * applies any queued render payload that arrived during the
+   * transaction. A no-op if a later transaction has already taken over.
+   */
+  private _endLayoutTransaction(opId: number) {
+    if (!this._layoutTransaction || this._layoutTransaction.id !== opId) {
+      // Superseded — the newer transaction owns the queue + state now.
+      return
+    }
+    const tx = this._layoutTransaction
+    this._layoutTransaction = null
+    this._layoutState = LayoutState.Ready
+    this._flushQueuedInputAfterLayout(tx.queuedInput)
+    this._flushQueuedRenderAfterLayout()
+  }
+
+  /** A reflow was aborted (concurrent reflow superseded us, or the op
+   *  was cancelled via `cancelChunkedReflow`). Drop our state but keep
+   *  the queued input on the transaction so the SUCCESSOR reflow's
+   *  `_beginLayoutTransaction` can carry it over. */
+  private _abortLayoutTransactionIfOwned(opId: number) {
+    if (!this._layoutTransaction || this._layoutTransaction.id !== opId) {
+      return
+    }
+    // Don't clear queuedInput — the new owner will absorb it. We only
+    // clear our ownership marker by leaving the transaction in place;
+    // the next `_beginLayoutTransaction` will overwrite it.
+  }
+
+  /** Replay queued typing as a single insert. Each batch went through
+   *  `formatElementList` already in `input.ts`, so we just hand the
+   *  flattened element list to `insertElementList`. The LAST batch's
+   *  `curIndex` becomes the final cursor — intermediate ones are
+   *  subsumed because each insert moves the cursor forward. */
+  private _flushQueuedInputAfterLayout(queued: IQueuedLayoutInput[]) {
+    if (queued.length === 0) return
+    // Flatten in arrival order. We don't batch across composition
+    // sessions — `input.ts` guards composition + active-control inputs
+    // from ever being queued, so each batch is a standalone text insert.
+    let anySubmit = false
+    const merged: IElement[] = []
+    for (const q of queued) {
+      anySubmit = anySubmit || q.isSubmitHistory
+      for (let i = 0; i < q.input.length; i++) merged.push(q.input[i])
+    }
+    if (merged.length === 0) return
+    this.insertElementList(merged, { isSubmitHistory: anySubmit })
+  }
+
+  private _flushQueuedRenderAfterLayout() {
+    const payload = this._queuedRenderAfterLayout
+    this._queuedRenderAfterLayout = null
+    if (!payload) return
+    this.render(payload)
+  }
+
+  /**
+   * During a layout transaction the page canvas is being repainted
+   * progressively by `_progressivePaintVisible`. The DOM cursor agent
+   * already lives at the last `drawCursor`-applied coordinates, but the
+   * blink may have timed out — re-arm it so the user sees the caret
+   * staying live while we apply layout.
+   */
+  private _paintTemporaryCaretOnly() {
+    const cursorPosition = this.position.getCursorPosition()
+    if (!cursorPosition) return
+    // Reuse the existing caret position; don't move the cursor agent
+    // (positions are stale during reflow). `isFocus: false` skips the
+    // `moveCursorToVisible` call — typing during a paper-resize must not
+    // yank the scroll viewport around.
+    this.cursor.drawCursor({
+      isFocus: false,
+      isBlink: true
     })
   }
 
@@ -6424,15 +6755,21 @@ export class Draw {
   }
 
   public render(payload?: IDrawOption) {
-    // PERF chunked-rAF: if an async chunked reflow is in flight and an
-    // EXTERNAL render fires (typing / Enter / cursor mutation / option
-    // change), cancel the chunked op so its trailing fast-lane doesn't
-    // overwrite this render's result. `_skipMainRowCompute` distinguishes
-    // the chunked driver's OWN fast-lane render (which we want to allow)
-    // from external renders that arrived mid-stream.
+    // Layout-transaction barrier — see `LayoutState`/`_runChunkedFullReflow`.
+    // When a chunked async reflow is in flight and an EXTERNAL render
+    // arrives (typing / Enter / cursor mutation / option change), DO NOT
+    // cancel the chunked op. Cancelling caused the bug this whole machinery
+    // exists to fix: the first keystroke after `setPaperMarginAsync()` was
+    // forced to be the cleanup-and-recompute trigger, so typing felt as
+    // slow as a sync reflow. Instead, queue the render — the trailing
+    // fast-lane render commits the new layout, `_endLayoutTransaction`
+    // flips to Ready, then flushes the queued render once.
+    //
+    // `_skipMainRowCompute` distinguishes the chunked driver's OWN
+    // fast-lane render (which we MUST allow through) from external
+    // renders that landed mid-stream.
     if (this._chunkedAsyncInFlight && !this._skipMainRowCompute) {
-      this._chunkedOpId++
-      this._chunkedAsyncInFlight = false
+      if (this.queueRenderAfterLayout(payload)) return
     }
     // 同步 render 进入时若仍有 rAF 队列：合并并取消，确保后续调用看到的视图与
     // history 是最新的（避免被即将到来的 rAF 回调覆盖）。

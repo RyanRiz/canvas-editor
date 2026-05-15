@@ -82,10 +82,33 @@ export function input(data: string, host: CanvasEvent) {
     }
     return newElement
   })
-  // 控件-移除placeholder
+  // Layout-transaction barrier: during a chunked async reflow
+  // (`setPaperMarginAsync` / `setPaperSizeAsync` / `setPaperDirectionAsync`),
+  // engine state (rowList / pageRowList / positionList) is in flux. A
+  // normal insert + render here would force a stale-state cleanup
+  // recompute and feel as slow as a sync reflow — the exact bug the
+  // transaction machinery exists to fix. Queue the keystroke; Draw
+  // flushes it via `insertElementList` once the trailing fast-lane
+  // render commits the new layout.
+  //
+  // Composition (IME) and controls bypass this fast queue: they need
+  // immediate placeholder/control writes to keep IME state consistent.
   const control = draw.getControl()
+  const hasActiveControl =
+    control.getActiveControl() && control.getIsRangeWithinControl()
+  if (
+    !isComposing &&
+    !hasActiveControl &&
+    draw.handleTextInputDuringLayout(inputData, undefined, {
+      isSubmitHistory: !isComposing,
+      isComposing
+    })
+  ) {
+    return
+  }
+
   let curIndex: number
-  if (control.getActiveControl() && control.getIsRangeWithinControl()) {
+  if (hasActiveControl) {
     curIndex = control.setValue(inputData)
     if (!isComposing) {
       control.emitControlContentChange()

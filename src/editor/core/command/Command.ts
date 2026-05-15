@@ -108,6 +108,8 @@ export class Command {
   public executeRunChunkedFullReflow: CommandAdapt['runChunkedFullReflow']
   public executeSetPaperMargin: CommandAdapt['setPaperMargin']
   public executeSetPaperMarginAsync: CommandAdapt['setPaperMarginAsync']
+  public executeIsLayoutReady: CommandAdapt['isLayoutReady']
+  public executeWhenLayoutReady: CommandAdapt['whenLayoutReady']
   public executeSetMainBadge: CommandAdapt['setMainBadge']
   public executeSetAreaBadge: CommandAdapt['setAreaBadge']
   public executeInsertElementList: CommandAdapt['insertElementList']
@@ -305,6 +307,8 @@ export class Command {
     this.executeRunChunkedFullReflow = adapt.runChunkedFullReflow.bind(adapt)
     this.executeSetPaperMargin = adapt.setPaperMargin.bind(adapt)
     this.executeSetPaperMarginAsync = adapt.setPaperMarginAsync.bind(adapt)
+    this.executeIsLayoutReady = adapt.isLayoutReady.bind(adapt)
+    this.executeWhenLayoutReady = adapt.whenLayoutReady.bind(adapt)
     // 签章
     this.executeSetMainBadge = adapt.setMainBadge.bind(adapt)
     this.executeSetAreaBadge = adapt.setAreaBadge.bind(adapt)

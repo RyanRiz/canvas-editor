@@ -3089,6 +3089,16 @@ export class CommandAdapt {
     return this.draw.setPaperMarginAsync(payload)
   }
 
+  /** Strict layout-readiness check — see `Draw.isLayoutReady`. */
+  public isLayoutReady(): boolean {
+    return this.draw.isLayoutReady()
+  }
+
+  /** Resolve when the engine is fully consistent — see `Draw.whenLayoutReady`. */
+  public whenLayoutReady(): Promise<void> {
+    return this.draw.whenLayoutReady()
+  }
+
   public setMainBadge(payload: IBadge | null) {
     this.draw.getBadge().setMainBadge(payload)
     this.draw.render({
