@@ -24,17 +24,41 @@ export class CheckboxParticle {
   }
 
   public setSelect(element: IElement) {
-    const { checkbox } = element
-    if (checkbox) {
-      checkbox.value = !checkbox.value
-    } else {
-      element.checkbox = {
-        value: true
+    // Capture the prior value so the history delta can reverse a toggle.
+    // Without this, click-to-check mutated `checkbox.value` directly without
+    // going through HistoryManager, so Ctrl+Z silently no-op'd the toggle
+    // (Constraint C1: one history entry per user-visible action).
+    const prevValue = !!element.checkbox?.value
+    const nextValue = !prevValue
+    const draw = this.draw
+    const applyForward = () => {
+      if (element.checkbox) {
+        element.checkbox.value = nextValue
+      } else {
+        element.checkbox = { value: nextValue }
       }
+      draw.render({
+        isCompute: false,
+        isSetCursor: false,
+        isSubmitHistory: false
+      })
     }
-    this.draw.render({
-      isCompute: false,
-      isSetCursor: false
+    const applyBackward = () => {
+      if (element.checkbox) {
+        element.checkbox.value = prevValue
+      } else {
+        element.checkbox = { value: prevValue }
+      }
+      draw.render({
+        isCompute: false,
+        isSetCursor: false,
+        isSubmitHistory: false
+      })
+    }
+    applyForward()
+    draw.getHistoryManager().executeDelta({
+      applyForward,
+      applyBackward
     })
   }
 
