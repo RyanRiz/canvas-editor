@@ -4800,7 +4800,18 @@ export class Draw {
     // break whose element carries a `paperDirection` override — that's how
     // the trailing landscape section gets its own taller page height etc.
     // without affecting earlier portrait pages.
+    //
+    // The override is HELD across the entire function body (restored in a
+    // finally at the bottom). This is required so any subsequent direction-
+    // sensitive call inside the loop — notably `getColumnStartX(0, …)` and
+    // `getColumnInnerWidth(…)` that set `row.pageStartX` / `row.innerWidth`
+    // — returns the trailing section's margins, not the document's base
+    // margins. Without the held override those calls would re-read the
+    // global `options.paperDirection` and stamp portrait coords onto
+    // landscape rows.
+    const prevPaintDirectionOverride = this._paintDirectionOverride
     let activeDirection = this.options.paperDirection
+    this._paintDirectionOverride = activeDirection
     let height = this.getHeight()
     let margins = this.getMargins()
     let headerExtraHeight = this.header.getExtraHeight()
@@ -4809,312 +4820,316 @@ export class Draw {
     let trailingOuterHeight = marginHeight - contentStartY
     let contentBottomY = height - trailingOuterHeight
     const recomputeMetrics = () => {
-      const prev = this._paintDirectionOverride
       this._paintDirectionOverride = activeDirection
-      try {
-        height = this.getHeight()
-        margins = this.getMargins()
-        headerExtraHeight = this.header.getExtraHeight()
-        marginHeight = this.getMainOuterHeight()
-        contentStartY = margins[0] + headerExtraHeight
-        trailingOuterHeight = marginHeight - contentStartY
-        contentBottomY = height - trailingOuterHeight
-      } finally {
-        this._paintDirectionOverride = prev
-      }
+      height = this.getHeight()
+      margins = this.getMargins()
+      headerExtraHeight = this.header.getExtraHeight()
+      marginHeight = this.getMainOuterHeight()
+      contentStartY = margins[0] + headerExtraHeight
+      trailingOuterHeight = marginHeight - contentStartY
+      contentBottomY = height - trailingOuterHeight
     }
-    let pageNo = 0
-    let pageHeight = marginHeight
-    const pushRow = (row: IRow) => {
-      if (!pageRowList[pageNo]) {
-        pageRowList[pageNo] = []
-      }
-      pageRowList[pageNo].push(row)
-    }
-    const nextPage = (cutIndex: number): boolean => {
-      if (Number.isInteger(maxPageNo) && pageNo >= maxPageNo!) {
-        this.elementList = this.elementList.slice(0, cutIndex)
-        return false
-      }
-      pageNo++
-      pageHeight = marginHeight
-      if (!pageRowList[pageNo]) {
-        pageRowList[pageNo] = []
-      }
-      return true
-    }
-    // Extract the SectionBreakType (if any) carried by the section-break
-    // sentinel row preceding `row`. Section-break rows hold exactly one
-    // element of type SECTION_BREAK whose `sectionBreakType` is the flavour.
-    const getSectionBreakType = (row?: IRow): SectionBreakType | null => {
-      if (!row?.isSectionBreak) return null
-      const sentinel = row.elementList.find(
-        el => el.type === ElementType.SECTION_BREAK
-      )
-      return sentinel?.sectionBreakType ?? SectionBreakType.NEXT_PAGE
-    }
-    // Page parity helpers — pageNo is 0-indexed internally (pageNo 0 == page 1 == odd).
-    // EVEN_PAGE: next content lands on an even-numbered page (pageNo 1, 3, 5…).
-    // ODD_PAGE:  next content lands on an odd-numbered  page (pageNo 0, 2, 4…).
-    // When the natural next page already satisfies the parity rule, only one
-    // page advance is needed. Otherwise an extra blank page is inserted, just
-    // like Word does for duplex/book layouts.
-    const advanceForSectionBreak = (
-      type: SectionBreakType,
-      cutIndex: number
-    ): boolean => {
-      // CONTINUOUS does not advance pages here — it is handled below by
-      // simply not triggering nextPage at all.
-      // For NEXT_PAGE / EVEN_PAGE / ODD_PAGE, advance at least once.
-      // Per-section orientation: the page we're about to advance to belongs
-      // to the section starting at `cutIndex`. Look up the direction there
-      // and re-derive page metrics BEFORE `nextPage` so it resets
-      // `pageHeight` from the new section's `marginHeight`.
-      const newDirection = this.getPaperDirectionAtIndex(cutIndex)
-      if (newDirection !== activeDirection) {
-        activeDirection = newDirection
-        recomputeMetrics()
-      }
-      if (!nextPage(cutIndex)) return false
-      if (type === SectionBreakType.EVEN_PAGE) {
-        // Even pages are pageNo 1, 3, 5… i.e. pageNo % 2 === 1.
-        if (pageNo % 2 === 0) {
-          if (!nextPage(cutIndex)) return false
+    try {
+      let pageNo = 0
+      let pageHeight = marginHeight
+      const pushRow = (row: IRow) => {
+        if (!pageRowList[pageNo]) {
+          pageRowList[pageNo] = []
         }
-      } else if (type === SectionBreakType.ODD_PAGE) {
-        // Odd pages are pageNo 0, 2, 4… i.e. pageNo % 2 === 0.
-        if (pageNo % 2 === 1) {
-          if (!nextPage(cutIndex)) return false
+        pageRowList[pageNo].push(row)
+      }
+      const nextPage = (cutIndex: number): boolean => {
+        if (Number.isInteger(maxPageNo) && pageNo >= maxPageNo!) {
+          this.elementList = this.elementList.slice(0, cutIndex)
+          return false
         }
+        pageNo++
+        pageHeight = marginHeight
+        if (!pageRowList[pageNo]) {
+          pageRowList[pageNo] = []
+        }
+        return true
       }
-      return true
-    }
-    if (pageMode === PageMode.CONTINUITY) {
-      // 连续模式下保持单列行为：所有行注入第一列，列索引归零
-      pageRowList[0] = this.rowList
-      let continuityContentY = contentStartY
-      for (let i = 0; i < this.rowList.length; i++) {
-        const row = this.rowList[i]
-        row.columnIndex = 0
-        row.innerWidth = this.getInnerWidth()
-        row.pageStartX = margins[3]
-        row.pageStartY = continuityContentY
-        continuityContentY += row.height + (row.offsetY || 0)
+      // Extract the SectionBreakType (if any) carried by the section-break
+      // sentinel row preceding `row`. Section-break rows hold exactly one
+      // element of type SECTION_BREAK whose `sectionBreakType` is the flavour.
+      const getSectionBreakType = (row?: IRow): SectionBreakType | null => {
+        if (!row?.isSectionBreak) return null
+        const sentinel = row.elementList.find(
+          el => el.type === ElementType.SECTION_BREAK
+        )
+        return sentinel?.sectionBreakType ?? SectionBreakType.NEXT_PAGE
       }
-      pageHeight = continuityContentY + trailingOuterHeight
-      const dpr = this.getPagePixelRatio()
-      const pageDom = this.pageList[0]
-      const pageDomHeight = Number(pageDom.style.height.replace('px', ''))
-      const targetHeight =
-        pageHeight > pageDomHeight
-          ? pageHeight
-          : pageHeight < height
-            ? height
-            : pageHeight
-      // PERF-PLAN — Strategy B：连续模式动态高度调整也必须同步 wrapper /
-      // decoration——否则 decoration canvas 会保持创建时的初始高度，下方
-      // 内容画到 base 上 decoration 会被裁掉。
-      this._resizePageBacking(0, this.getWidth(), targetHeight, dpr)
-    } else {
-      let rowIndex = 0
-      while (rowIndex < this.rowList.length) {
-        const sectionRows: IRow[] = []
-        const pageColumns =
-          this.rowList[rowIndex].pageColumns || this.getPageColumns()
-        while (
-          rowIndex < this.rowList.length &&
-          this.isSamePageColumns(
-            this.rowList[rowIndex].pageColumns,
-            pageColumns
+      // Page parity helpers — pageNo is 0-indexed internally (pageNo 0 == page 1 == odd).
+      // EVEN_PAGE: next content lands on an even-numbered page (pageNo 1, 3, 5…).
+      // ODD_PAGE:  next content lands on an odd-numbered  page (pageNo 0, 2, 4…).
+      // When the natural next page already satisfies the parity rule, only one
+      // page advance is needed. Otherwise an extra blank page is inserted, just
+      // like Word does for duplex/book layouts.
+      const advanceForSectionBreak = (
+        type: SectionBreakType,
+        cutIndex: number
+      ): boolean => {
+        // CONTINUOUS does not advance pages here — it is handled below by
+        // simply not triggering nextPage at all.
+        // For NEXT_PAGE / EVEN_PAGE / ODD_PAGE, advance at least once.
+        // Per-section orientation: the page we're about to advance to belongs
+        // to the section starting at `cutIndex`. Look up the direction there
+        // and re-derive page metrics BEFORE `nextPage` so it resets
+        // `pageHeight` from the new section's `marginHeight`.
+        const newDirection = this.getPaperDirectionAtIndex(cutIndex)
+        if (newDirection !== activeDirection) {
+          activeDirection = newDirection
+          recomputeMetrics()
+        }
+        if (!nextPage(cutIndex)) return false
+        if (type === SectionBreakType.EVEN_PAGE) {
+          // Even pages are pageNo 1, 3, 5… i.e. pageNo % 2 === 1.
+          if (pageNo % 2 === 0) {
+            if (!nextPage(cutIndex)) return false
+          }
+        } else if (type === SectionBreakType.ODD_PAGE) {
+          // Odd pages are pageNo 0, 2, 4… i.e. pageNo % 2 === 0.
+          if (pageNo % 2 === 1) {
+            if (!nextPage(cutIndex)) return false
+          }
+        }
+        return true
+      }
+      if (pageMode === PageMode.CONTINUITY) {
+        // 连续模式下保持单列行为：所有行注入第一列，列索引归零
+        pageRowList[0] = this.rowList
+        let continuityContentY = contentStartY
+        for (let i = 0; i < this.rowList.length; i++) {
+          const row = this.rowList[i]
+          row.columnIndex = 0
+          row.innerWidth = this.getInnerWidth()
+          row.pageStartX = margins[3]
+          row.pageStartY = continuityContentY
+          continuityContentY += row.height + (row.offsetY || 0)
+        }
+        pageHeight = continuityContentY + trailingOuterHeight
+        const dpr = this.getPagePixelRatio()
+        const pageDom = this.pageList[0]
+        const pageDomHeight = Number(pageDom.style.height.replace('px', ''))
+        const targetHeight =
+          pageHeight > pageDomHeight
+            ? pageHeight
+            : pageHeight < height
+              ? height
+              : pageHeight
+        // PERF-PLAN — Strategy B：连续模式动态高度调整也必须同步 wrapper /
+        // decoration——否则 decoration canvas 会保持创建时的初始高度，下方
+        // 内容画到 base 上 decoration 会被裁掉。
+        this._resizePageBacking(0, this.getWidth(), targetHeight, dpr)
+      } else {
+        let rowIndex = 0
+        while (rowIndex < this.rowList.length) {
+          const sectionRows: IRow[] = []
+          const pageColumns =
+            this.rowList[rowIndex].pageColumns || this.getPageColumns()
+          while (
+            rowIndex < this.rowList.length &&
+            this.isSamePageColumns(
+              this.rowList[rowIndex].pageColumns,
+              pageColumns
+            )
+          ) {
+            sectionRows.push(this.rowList[rowIndex])
+            rowIndex++
+          }
+          const columnCount = this.getColumnCount(pageColumns)
+          const columnInnerWidth = this.getColumnInnerWidth(pageColumns)
+          if (columnCount <= 1) {
+            for (let i = 0; i < sectionRows.length; i++) {
+              const row = sectionRows[i]
+              const rowOffsetY = row.offsetY || 0
+              const prev = this.rowList[row.rowIndex - 1]
+              const forcePageBreak = !!prev?.isPageBreak
+              // Section break: NEXT_PAGE / EVEN_PAGE / ODD_PAGE all force a new
+              // page (with parity adjustment); CONTINUOUS keeps current page.
+              const sectionBreakType = getSectionBreakType(prev)
+              const forceSectionBreak =
+                sectionBreakType !== null &&
+                sectionBreakType !== SectionBreakType.CONTINUOUS
+              const overflow = row.height + rowOffsetY + pageHeight > height
+              if (forceSectionBreak) {
+                if (
+                  !advanceForSectionBreak(sectionBreakType!, row.startIndex)
+                ) {
+                  return pageRowList
+                }
+              } else if (
+                forcePageBreak ||
+                (overflow && pageHeight > marginHeight)
+              ) {
+                if (!nextPage(row.startIndex)) {
+                  return pageRowList
+                }
+              }
+              row.columnIndex = 0
+              row.innerWidth = columnInnerWidth
+              row.pageStartX = this.getColumnStartX(0, pageColumns)
+              row.pageStartY = pageHeight - trailingOuterHeight
+              pushRow(row)
+              pageHeight += row.height + rowOffsetY
+            }
+            continue
+          }
+          let sectionTop = pageHeight - trailingOuterHeight
+          let columnIndex = 0
+          let columnHeightList = new Array(columnCount).fill(sectionTop)
+          let columnHasContentList = new Array(columnCount).fill(false)
+          // 列平衡（Google Docs 风格）：当本节内容能在当前页放下时，
+          // 将每列填充到 ceil(剩余高度 / 列数)，让两列高度接近、并排显示，
+          // 而不是先把第 0 列填满整页才溢出到第 1 列。
+          let remainingSectionHeight = 0
+          for (let i = 0; i < sectionRows.length; i++) {
+            remainingSectionHeight +=
+              sectionRows[i].height + (sectionRows[i].offsetY || 0)
+          }
+          const computeBalanceThreshold = (top: number, remaining: number) => {
+            if (remaining <= 0) return contentBottomY
+            const available = contentBottomY - top
+            if (available <= 0) return contentBottomY
+            // 内容超过当前页所有列容量时，回退为贪婪填充
+            if (remaining > available * columnCount) return contentBottomY
+            return Math.min(
+              contentBottomY,
+              top + Math.ceil(remaining / columnCount)
+            )
+          }
+          let balanceThreshold = computeBalanceThreshold(
+            sectionTop,
+            remainingSectionHeight
           )
-        ) {
-          sectionRows.push(this.rowList[rowIndex])
-          rowIndex++
-        }
-        const columnCount = this.getColumnCount(pageColumns)
-        const columnInnerWidth = this.getColumnInnerWidth(pageColumns)
-        if (columnCount <= 1) {
           for (let i = 0; i < sectionRows.length; i++) {
             const row = sectionRows[i]
             const rowOffsetY = row.offsetY || 0
             const prev = this.rowList[row.rowIndex - 1]
             const forcePageBreak = !!prev?.isPageBreak
-            // Section break: NEXT_PAGE / EVEN_PAGE / ODD_PAGE all force a new
-            // page (with parity adjustment); CONTINUOUS keeps current page.
+            const forceColumnBreak = !!prev?.isColumnBreak
             const sectionBreakType = getSectionBreakType(prev)
-            const forceSectionBreak =
+            const forceSectionPageBreak =
               sectionBreakType !== null &&
               sectionBreakType !== SectionBreakType.CONTINUOUS
-            const overflow = row.height + rowOffsetY + pageHeight > height
-            if (forceSectionBreak) {
+            if (forceSectionPageBreak) {
               if (!advanceForSectionBreak(sectionBreakType!, row.startIndex)) {
                 return pageRowList
               }
+              sectionTop = pageHeight - trailingOuterHeight
+              columnIndex = 0
+              columnHeightList = new Array(columnCount).fill(sectionTop)
+              columnHasContentList = new Array(columnCount).fill(false)
+              balanceThreshold = computeBalanceThreshold(
+                sectionTop,
+                remainingSectionHeight
+              )
+            } else if (forcePageBreak) {
+              if (!nextPage(row.startIndex)) {
+                return pageRowList
+              }
+              sectionTop = pageHeight - trailingOuterHeight
+              columnIndex = 0
+              columnHeightList = new Array(columnCount).fill(sectionTop)
+              columnHasContentList = new Array(columnCount).fill(false)
+              balanceThreshold = computeBalanceThreshold(
+                sectionTop,
+                remainingSectionHeight
+              )
+            } else if (forceColumnBreak && columnHasContentList[columnIndex]) {
+              if (columnIndex === columnCount - 1) {
+                if (!nextPage(row.startIndex)) {
+                  return pageRowList
+                }
+                sectionTop = pageHeight - trailingOuterHeight
+                columnIndex = 0
+                columnHeightList = new Array(columnCount).fill(sectionTop)
+                columnHasContentList = new Array(columnCount).fill(false)
+                balanceThreshold = computeBalanceThreshold(
+                  sectionTop,
+                  remainingSectionHeight
+                )
+              } else {
+                columnIndex++
+                // 用户主动分列：之后不再做平衡
+                balanceThreshold = contentBottomY
+              }
+            }
+            const projectedHeight =
+              columnHeightList[columnIndex] + rowOffsetY + row.height
+            const overflowHard = projectedHeight > contentBottomY
+            // 软溢出：以行的中点作判断（"四舍五入"式平衡），
+            // 让 col 0 略高于 col 1，与 Google Docs 行为一致；
+            // 否则因 Math.ceil + 行高离散，col 0 总是少一行。
+            const overflowBalance =
+              balanceThreshold < contentBottomY &&
+              columnHeightList[columnIndex] + rowOffsetY + row.height / 2 >
+                balanceThreshold
+            if (overflowHard && columnHasContentList[columnIndex]) {
+              if (columnIndex === columnCount - 1) {
+                if (!nextPage(row.startIndex)) {
+                  return pageRowList
+                }
+                sectionTop = pageHeight - trailingOuterHeight
+                columnIndex = 0
+                columnHeightList = new Array(columnCount).fill(sectionTop)
+                columnHasContentList = new Array(columnCount).fill(false)
+                balanceThreshold = computeBalanceThreshold(
+                  sectionTop,
+                  remainingSectionHeight
+                )
+              } else {
+                columnIndex++
+              }
             } else if (
-              forcePageBreak ||
-              (overflow && pageHeight > marginHeight)
+              overflowBalance &&
+              columnHasContentList[columnIndex] &&
+              columnIndex < columnCount - 1
             ) {
-              if (!nextPage(row.startIndex)) {
-                return pageRowList
-              }
+              // 软溢出：仅切换到下一列以平衡列高，不强制换页
+              columnIndex++
             }
-            row.columnIndex = 0
+            row.columnIndex = columnIndex
             row.innerWidth = columnInnerWidth
-            row.pageStartX = this.getColumnStartX(0, pageColumns)
-            row.pageStartY = pageHeight - trailingOuterHeight
+            row.pageStartX = this.getColumnStartX(columnIndex, pageColumns)
+            row.pageStartY = columnHeightList[columnIndex]
             pushRow(row)
-            pageHeight += row.height + rowOffsetY
+            columnHeightList[columnIndex] += row.height + rowOffsetY
+            columnHasContentList[columnIndex] = true
+            remainingSectionHeight -= row.height + rowOffsetY
           }
-          continue
+          pageHeight = Math.max(...columnHeightList) + trailingOuterHeight
         }
-        let sectionTop = pageHeight - trailingOuterHeight
-        let columnIndex = 0
-        let columnHeightList = new Array(columnCount).fill(sectionTop)
-        let columnHasContentList = new Array(columnCount).fill(false)
-        // 列平衡（Google Docs 风格）：当本节内容能在当前页放下时，
-        // 将每列填充到 ceil(剩余高度 / 列数)，让两列高度接近、并排显示，
-        // 而不是先把第 0 列填满整页才溢出到第 1 列。
-        let remainingSectionHeight = 0
-        for (let i = 0; i < sectionRows.length; i++) {
-          remainingSectionHeight +=
-            sectionRows[i].height + (sectionRows[i].offsetY || 0)
-        }
-        const computeBalanceThreshold = (top: number, remaining: number) => {
-          if (remaining <= 0) return contentBottomY
-          const available = contentBottomY - top
-          if (available <= 0) return contentBottomY
-          // 内容超过当前页所有列容量时，回退为贪婪填充
-          if (remaining > available * columnCount) return contentBottomY
-          return Math.min(
-            contentBottomY,
-            top + Math.ceil(remaining / columnCount)
-          )
-        }
-        let balanceThreshold = computeBalanceThreshold(
-          sectionTop,
-          remainingSectionHeight
-        )
-        for (let i = 0; i < sectionRows.length; i++) {
-          const row = sectionRows[i]
-          const rowOffsetY = row.offsetY || 0
-          const prev = this.rowList[row.rowIndex - 1]
-          const forcePageBreak = !!prev?.isPageBreak
-          const forceColumnBreak = !!prev?.isColumnBreak
-          const sectionBreakType = getSectionBreakType(prev)
-          const forceSectionPageBreak =
-            sectionBreakType !== null &&
-            sectionBreakType !== SectionBreakType.CONTINUOUS
-          if (forceSectionPageBreak) {
-            if (!advanceForSectionBreak(sectionBreakType!, row.startIndex)) {
-              return pageRowList
-            }
-            sectionTop = pageHeight - trailingOuterHeight
-            columnIndex = 0
-            columnHeightList = new Array(columnCount).fill(sectionTop)
-            columnHasContentList = new Array(columnCount).fill(false)
-            balanceThreshold = computeBalanceThreshold(
-              sectionTop,
-              remainingSectionHeight
-            )
-          } else if (forcePageBreak) {
-            if (!nextPage(row.startIndex)) {
-              return pageRowList
-            }
-            sectionTop = pageHeight - trailingOuterHeight
-            columnIndex = 0
-            columnHeightList = new Array(columnCount).fill(sectionTop)
-            columnHasContentList = new Array(columnCount).fill(false)
-            balanceThreshold = computeBalanceThreshold(
-              sectionTop,
-              remainingSectionHeight
-            )
-          } else if (forceColumnBreak && columnHasContentList[columnIndex]) {
-            if (columnIndex === columnCount - 1) {
-              if (!nextPage(row.startIndex)) {
-                return pageRowList
-              }
-              sectionTop = pageHeight - trailingOuterHeight
-              columnIndex = 0
-              columnHeightList = new Array(columnCount).fill(sectionTop)
-              columnHasContentList = new Array(columnCount).fill(false)
-              balanceThreshold = computeBalanceThreshold(
-                sectionTop,
-                remainingSectionHeight
-              )
-            } else {
-              columnIndex++
-              // 用户主动分列：之后不再做平衡
-              balanceThreshold = contentBottomY
-            }
-          }
-          const projectedHeight =
-            columnHeightList[columnIndex] + rowOffsetY + row.height
-          const overflowHard = projectedHeight > contentBottomY
-          // 软溢出：以行的中点作判断（"四舍五入"式平衡），
-          // 让 col 0 略高于 col 1，与 Google Docs 行为一致；
-          // 否则因 Math.ceil + 行高离散，col 0 总是少一行。
-          const overflowBalance =
-            balanceThreshold < contentBottomY &&
-            columnHeightList[columnIndex] + rowOffsetY + row.height / 2 >
-              balanceThreshold
-          if (overflowHard && columnHasContentList[columnIndex]) {
-            if (columnIndex === columnCount - 1) {
-              if (!nextPage(row.startIndex)) {
-                return pageRowList
-              }
-              sectionTop = pageHeight - trailingOuterHeight
-              columnIndex = 0
-              columnHeightList = new Array(columnCount).fill(sectionTop)
-              columnHasContentList = new Array(columnCount).fill(false)
-              balanceThreshold = computeBalanceThreshold(
-                sectionTop,
-                remainingSectionHeight
-              )
-            } else {
-              columnIndex++
-            }
-          } else if (
-            overflowBalance &&
-            columnHasContentList[columnIndex] &&
-            columnIndex < columnCount - 1
-          ) {
-            // 软溢出：仅切换到下一列以平衡列高，不强制换页
-            columnIndex++
-          }
-          row.columnIndex = columnIndex
-          row.innerWidth = columnInnerWidth
-          row.pageStartX = this.getColumnStartX(columnIndex, pageColumns)
-          row.pageStartY = columnHeightList[columnIndex]
-          pushRow(row)
-          columnHeightList[columnIndex] += row.height + rowOffsetY
-          columnHasContentList[columnIndex] = true
-          remainingSectionHeight -= row.height + rowOffsetY
-        }
-        pageHeight = Math.max(...columnHeightList) + trailingOuterHeight
       }
-    }
-    // Stamp per-page direction so paint/sizing passes can size each page
-    // independently. The first row of each page determines the section it
-    // belongs to (and therefore the direction). Empty pages (rare — only
-    // happens with EVEN/ODD parity-insert when no content follows yet)
-    // inherit the previous page's direction; on the first page we fall back
-    // to the document-wide `options.paperDirection`.
-    this.pageDirectionList = []
-    let lastDirection = this.options.paperDirection
-    for (let pn = 0; pn < pageRowList.length; pn++) {
-      const firstRow = pageRowList[pn]?.[0]
-      if (firstRow) {
-        lastDirection = this.getPaperDirectionAtIndex(firstRow.startIndex)
+      // Stamp per-page direction so paint/sizing passes can size each page
+      // independently. The first row of each page determines the section it
+      // belongs to (and therefore the direction). Empty pages (rare — only
+      // happens with EVEN/ODD parity-insert when no content follows yet)
+      // inherit the previous page's direction; on the first page we fall back
+      // to the document-wide `options.paperDirection`.
+      this.pageDirectionList = []
+      let lastDirection = this.options.paperDirection
+      for (let pn = 0; pn < pageRowList.length; pn++) {
+        const firstRow = pageRowList[pn]?.[0]
+        if (firstRow) {
+          lastDirection = this.getPaperDirectionAtIndex(firstRow.startIndex)
+        }
+        this.pageDirectionList[pn] = lastDirection
       }
-      this.pageDirectionList[pn] = lastDirection
+      // Re-sync canvas backings if any page's actual size now differs from
+      // what its direction dictates. This handles the case where pages were
+      // initially created (or last resized) at the global direction but a
+      // section break override flips the trailing pages — they need to be
+      // sized as landscape (or vice-versa) before the paint pass renders.
+      this._syncPageCanvasesToDirections()
+      return pageRowList
+    } finally {
+      // Restore whatever override the caller had set before we entered this
+      // pagination pass. Any of the early `return pageRowList` exits above
+      // also flow through this finally so the override never leaks.
+      this._paintDirectionOverride = prevPaintDirectionOverride
     }
-    // Re-sync canvas backings if any page's actual size now differs from
-    // what its direction dictates. This handles the case where pages were
-    // initially created (or last resized) at the global direction but a
-    // section break override flips the trailing pages — they need to be
-    // sized as landscape (or vice-versa) before the paint pass renders.
-    this._syncPageCanvasesToDirections()
-    return pageRowList
   }
 
   /**

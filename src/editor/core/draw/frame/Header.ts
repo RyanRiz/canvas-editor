@@ -8,10 +8,7 @@ import {
   formatElementList,
   pickSurroundElementList
 } from '../../../utils/element'
-import {
-  convertNumberToChinese,
-  convertNumberToRoman
-} from '../../../utils'
+import { convertNumberToChinese, convertNumberToRoman } from '../../../utils'
 import { Position } from '../../position/Position'
 import { Zone } from '../../zone/Zone'
 import { Draw } from '../Draw'
@@ -141,8 +138,25 @@ export class Header {
 
   public compute() {
     this.recovery()
-    this._computeRowList()
-    this._computePositionList()
+    // Per-section orientation MVP: compute the cached rowList /
+    // positionList under the ACTIVE page's direction. The cached
+    // positionList is what `Position.getOriginalPositionList()` returns
+    // when the header zone is active, and the cursor logic reads X/Y from
+    // it — so a cursor on a landscape page needs landscape margins/inner
+    // width, not the document's base direction. `Header.render` still
+    // recomputes a per-paint positionList for non-active pages (so a
+    // portrait page in the same doc paints its header at portrait coords);
+    // this cached one is dedicated to whatever the cursor is on.
+    const prevOverride = this.draw.getPaintDirectionOverride()
+    this.draw.setPaintDirectionOverride(
+      this.draw.getPageDirection(this.draw.getPageNo())
+    )
+    try {
+      this._computeRowList()
+      this._computePositionList()
+    } finally {
+      this.draw.setPaintDirectionOverride(prevOverride)
+    }
   }
 
   public recovery() {
@@ -257,15 +271,23 @@ export class Header {
     const isActive = variant === this.activeVariant
     const elementList = isActive
       ? this.elementList
-      : this.variantStorage[variant] ?? []
+      : (this.variantStorage[variant] ?? [])
     if (!elementList.length) return
     const sourceRowList = isActive
       ? this.rowList
       : this._ensureVariantLayout(variant).rowList
-    const positionList = isActive
-      ? this.positionList
-      : this._ensureVariantLayout(variant).positionList
     if (!sourceRowList.length) return
+
+    // Per-section orientation MVP: same treatment as Footer.render. The
+    // header's X start and the rendered margins/innerWidth all flow from
+    // direction-sensitive Draw getters. Override to the rendered page's
+    // direction and recompute a per-page positionList so a landscape page
+    // gets a landscape-margined header (and a portrait page gets a
+    // portrait-margined one) regardless of which direction the cached
+    // layout was originally computed at.
+    const prevDirectionOverride = this.draw.getPaintDirectionOverride()
+    const pageDirection = this.draw.getPageDirection(pageNo)
+    this.draw.setPaintDirectionOverride(pageDirection)
 
     ctx.save()
     ctx.globalAlpha = this.zone.isHeaderActive()
@@ -284,6 +306,9 @@ export class Header {
       rowList.push(row)
       curRowHeight += row.height
     }
+    // Recompute the positionList for the rendered page's direction.
+    const positionList: IElementPosition[] = []
+    this._computePositionListFor(sourceRowList, positionList)
     // Substitute live page-number tokens just for this draw pass; restore
     // afterwards so the canonical value (kept in storage / serialized output)
     // stays the user-typed placeholder.
@@ -301,6 +326,7 @@ export class Header {
     } finally {
       restore()
       ctx.restore()
+      this.draw.setPaintDirectionOverride(prevDirectionOverride)
     }
   }
 }

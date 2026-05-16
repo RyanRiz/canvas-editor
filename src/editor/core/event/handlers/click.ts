@@ -108,9 +108,27 @@ export function getWordRangeByCursor(host: CanvasEvent): IRange | null {
 function dblclick(host: CanvasEvent, evt: MouseEvent) {
   const draw = host.getDraw()
   const position = draw.getPosition()
+  // Per-section orientation MVP: mirror what mousedown does — read the
+  // clicked page's `data-index` from the event target and pin draw.pageNo
+  // before computing the position. Without this, getPositionByXY falls
+  // back to the previously active page, and the footer hit-test on a
+  // landscape page would be computed using the portrait page's height —
+  // pushing footerTopY off the visible area so the dblclick can't land
+  // on it.
+  const target = evt.target as HTMLElement | null
+  const pageIndexAttr = target?.dataset?.index
+  let clickedPageNo: number | undefined
+  if (pageIndexAttr !== undefined && pageIndexAttr !== '') {
+    const parsed = Number(pageIndexAttr)
+    if (Number.isFinite(parsed)) {
+      clickedPageNo = parsed
+      draw.setPageNo(parsed)
+    }
+  }
   const positionContext = position.getPositionByXY({
     x: evt.offsetX,
-    y: evt.offsetY
+    y: evt.offsetY,
+    pageNo: clickedPageNo
   })
   if (positionContext.isImage && positionContext.isDirectHit) {
     // 双击图片事件
