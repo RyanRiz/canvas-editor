@@ -1388,7 +1388,12 @@ export class ListParticle {
     } = position
     const levelIndent = this.getLevelIndent(row.listLevel)
     const x = startX - offsetX! + tabWidth + levelIndent
-    const y = startY + ascent
+    // Align marker baseline to the same y the text uses. Position.ts derives
+    // each element's offsetY as `curRow.ascent - rowMargin * 1.2`, so drawing
+    // at `startY + row.ascent` puts the marker rowMargin*1.2 below the text
+    // baseline. Use `position.ascent` (the ZERO element's per-element offsetY)
+    // so number-period bottoms and checkbox bottoms sit on the text baseline.
+    const y = startY + (position.ascent ?? ascent)
     if (startElement.listStyle === ListStyle.CHECKBOX) {
       const { width, height, gap } = this.options.checkbox
       const checkboxRowElement: IRowElement = {
