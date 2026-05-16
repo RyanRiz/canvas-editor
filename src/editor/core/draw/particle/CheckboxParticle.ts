@@ -169,11 +169,14 @@ export class CheckboxParticle {
         }
       }
     }
-    // Rounded rectangle dimensions
-    const left = Math.round(x + gap * scale)
-    const top = Math.round(y - metrics.height)
-    const boxWidth = metrics.width - gap * 2 * scale
-    const boxHeight = metrics.height
+    // Rounded rectangle dimensions. Snap top/left to half-pixel grid so a
+    // 1.5px stroke centers on a hard pixel boundary at scale=1 — without
+    // this, the stroke straddles two device rows and reads as soft/hairline.
+    // Integer-rounded width/height keep the box shape crisp.
+    const left = Math.round(x + gap * scale) + 0.5
+    const top = Math.round(y - metrics.height) + 0.5
+    const boxWidth = Math.round(metrics.width - gap * 2 * scale)
+    const boxHeight = Math.round(metrics.height)
     const cornerRadius = 2 * scale
 
     ctx.save()
