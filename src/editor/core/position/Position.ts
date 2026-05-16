@@ -598,7 +598,7 @@ export class Position {
     const curPageNo = payload.pageNo ?? this.draw.getPageNo()
     const isMainActive = zoneManager.isMainActive()
     const positionNo = isMainActive ? curPageNo : 0
-    const shouldScopeRowsByColumn = !isTable
+    const shouldScopeRowsByColumn = !isTable && isMainActive
     const pageRowList = this.draw.getPageRowList()
     const currentPageRows = shouldScopeRowsByColumn
       ? pageRowList[positionNo] || []
