@@ -258,6 +258,7 @@ export function mergeOption(
     pagePaintStrategy: 'visible-sync-lazy',
     pagePaintOverscan: 1,
     ...options,
+    plainTextPasteStyle: options.plainTextPasteStyle || (() => undefined),
     table: tableOptions,
     header: headerOptions,
     footer: footerOptions,

@@ -36,7 +36,7 @@ import {
 } from '../../interface/Element'
 import { IRow, IRowElement } from '../../interface/Row'
 import { ITextMetrics } from '../../interface/Text'
-import { deepClone, getUUID } from '../../utils'
+import { deepClone, deepCloneOmitKeys, getUUID } from '../../utils'
 import { Cursor } from '../cursor/Cursor'
 import { CanvasEvent } from '../event/CanvasEvent'
 import { GlobalEvent } from '../event/GlobalEvent'
@@ -2509,7 +2509,9 @@ export class Draw {
     return {
       version,
       data,
-      options: deepClone(this.options)
+      options: deepCloneOmitKeys<IEditorOption, IEditorOption>(this.options, [
+        'plainTextPasteStyle'
+      ])
     }
   }
 

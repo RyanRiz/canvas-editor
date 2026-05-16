@@ -21,11 +21,30 @@ export function right(evt: KeyboardEvent, host: CanvasEvent) {
   const { index } = cursorPosition
   const positionList = position.getPositionList()
   const positionContext = position.getPositionContext()
-  if (index > positionList.length - 1 && !positionContext.isTable) return
   const rangeManager = draw.getRange()
   const { startIndex, endIndex } = rangeManager.getRange()
   const isCollapsed = rangeManager.getIsCollapsed()
   let elementList = draw.getElementList()
+  // 存在选区且未按 shift：折叠选区到终点（匹配 Word / Google Docs 行为）。
+  // 处理 Ctrl+A 后按 → 应回到选区末位；放在 index>length-1 早返回之前，因为
+  // selectAll 不更新 cursorPosition，旧 index 可能在末位之外而仍需折叠。
+  if (!isCollapsed && !evt.shiftKey) {
+    const targetIndex = getNonHideElementIndex(
+      elementList,
+      endIndex,
+      LocationPosition.AFTER
+    )
+    rangeManager.setRange(targetIndex, targetIndex)
+    draw.render({
+      curIndex: targetIndex,
+      isSetCursor: true,
+      isSubmitHistory: false,
+      isCompute: false
+    })
+    evt.preventDefault()
+    return
+  }
+  if (index > positionList.length - 1 && !positionContext.isTable) return
   // 表单模式下控件移动
   const control = draw.getControl()
   if (
