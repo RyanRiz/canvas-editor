@@ -7,6 +7,7 @@ titleTemplate: rich text editor by canvas/svg
 hero:
   name: canvas-editor
   text: canvas/svg based rich text editor
+  tagline: Prefer `npm run type:check:fast` for local development type checks
   actions:
     - theme: brand
       text: Get Started

@@ -7,6 +7,7 @@ titleTemplate: rich text editor by canvas/svg
 hero:
   name: canvas-editor
   text: 基于canvas/svg的富文本编辑器
+  tagline: 仓库开发时优先使用 `npm run type:check:fast`
   actions:
     - theme: brand
       text: 开始

@@ -95,3 +95,21 @@ new Editor(
 ## Step. 4: 配置编辑器
 
 详见下一节
+
+## 开发提示
+
+仓库开发时，优先使用以下命令进行快速类型检查：
+
+```sh
+npm run type:check:fast
+```
+
+该命令使用 `tsgo`（`@typescript/native-preview`）进行原生 TypeScript 检查，通常比 `tsc` 更快。
+
+如需与当前构建、提交钩子保持一致，请使用：
+
+```sh
+npm run type:check
+```
+
+当前仓库仍以 `tsc` 作为兼容性基线。

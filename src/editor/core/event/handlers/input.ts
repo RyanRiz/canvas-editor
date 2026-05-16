@@ -68,13 +68,22 @@ export function input(data: string, host: CanvasEvent) {
       // 仅复制样式：存在默认样式设置 || 无法匹配文本类元素时（TAB）
       if (defaultStyle || copyElement.type === TAB) {
         EDITOR_ELEMENT_STYLE_ATTR.forEach(attr => {
-          const value =
-            defaultStyle?.[attr as keyof IRangeElementStyle] ||
-            copyElement[attr]
+          const value = Object.prototype.hasOwnProperty.call(
+            defaultStyle || {},
+            attr
+          )
+            ? defaultStyle?.[attr as keyof IRangeElementStyle]
+            : copyElement[attr]
           if (value !== undefined) {
             newElement[attr] = value as never
           }
         })
+        if (
+          defaultStyle &&
+          Object.prototype.hasOwnProperty.call(defaultStyle, 'extension')
+        ) {
+          newElement.extension = defaultStyle.extension
+        }
       }
       if (isComposing) {
         newElement.underline = true

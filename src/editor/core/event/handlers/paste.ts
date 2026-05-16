@@ -14,24 +14,62 @@ import {
 } from '../../../utils/element'
 import { CanvasEvent } from '../CanvasEvent'
 import { IOverrideResult } from '../../override/Override'
-import { normalizeLineBreak } from '../../../utils'
+import { normalizeLineBreak, splitText } from '../../../utils'
 
-// Plain-text paste should not inherit color / bold / italic / underline /
-// strikeout from the element under the cursor — mirrors the Ctrl+Shift+V
-// behavior in keydown/index.ts.
-function inputPlainText(host: CanvasEvent, text: string) {
-  const rangeManager = host.getDraw().getRange()
-  const prevDefaultStyle = rangeManager.getDefaultStyle()
-  rangeManager.setDefaultStyle(null)
-  rangeManager.setDefaultStyle({
+function getPlainTextPasteStyle(host: CanvasEvent): Partial<IElement> {
+  const draw = host.getDraw()
+  const options = draw.getOptions()
+  const configured = options.plainTextPasteStyle?.()
+
+  return {
+    font: options.defaultFont,
+    size: options.defaultSize,
     bold: false,
-    color: '#000000',
+    color: options.defaultColor || '#000000',
     italic: false,
     underline: false,
-    strikeout: false
-  })
+    strikeout: false,
+    ...(configured || {})
+  }
+}
+
+export function inputPlainText(host: CanvasEvent, text: string) {
+  const draw = host.getDraw()
+  const rangeManager = draw.getRange()
+  const { startIndex } = rangeManager.getRange()
+  const normalizedText = text.replaceAll(`\n`, ZERO)
+  const inputLength = splitText(normalizedText).length
+  const pasteStyle = getPlainTextPasteStyle(host)
+  const prevDefaultStyle = rangeManager.getDefaultStyle()
+  rangeManager.setDefaultStyle(null)
+  rangeManager.setDefaultStyle(pasteStyle)
   host.input(text)
   rangeManager.setDefaultStyle(prevDefaultStyle)
+
+  const elementList = draw.getElementList()
+  const insertedStart = startIndex + 1
+  const insertedEnd = insertedStart + inputLength
+  for (let i = insertedStart; i < insertedEnd; i++) {
+    const el = elementList[i]
+    if (!el) continue
+    if (pasteStyle.rowMargin !== undefined) el.rowMargin = pasteStyle.rowMargin
+    if (pasteStyle.indent !== undefined) el.indent = pasteStyle.indent
+    if (pasteStyle.rightIndent !== undefined) {
+      el.rightIndent = pasteStyle.rightIndent
+    }
+    if (pasteStyle.firstLineIndent !== undefined) {
+      el.firstLineIndent = pasteStyle.firstLineIndent
+    }
+    if (pasteStyle.spaceBefore !== undefined) {
+      el.spaceBefore = pasteStyle.spaceBefore
+    }
+    if (pasteStyle.spaceAfter !== undefined) {
+      el.spaceAfter = pasteStyle.spaceAfter
+    }
+    if (pasteStyle.extension !== undefined) {
+      el.extension = pasteStyle.extension
+    }
+  }
 }
 
 export function pasteElement(host: CanvasEvent, elementList: IElement[]) {

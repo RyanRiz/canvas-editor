@@ -7,7 +7,7 @@ import ValueWorker from './works/value?worker&inline'
 import { ICatalog } from '../../interface/Catalog'
 import { IEditorResult } from '../../interface/Editor'
 import { IGetValueOption } from '../../interface/Draw'
-import { deepClone } from '../../utils'
+import { deepCloneOmitKeys } from '../../utils'
 
 export class WorkerManager {
   private draw: Draw
@@ -79,7 +79,9 @@ export class WorkerManager {
         resolve({
           version,
           data: evt.data,
-          options: deepClone(this.draw.getOptions())
+          options: deepCloneOmitKeys(this.draw.getOptions(), [
+            'plainTextPasteStyle'
+          ])
         })
       }
 

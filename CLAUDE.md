@@ -8,6 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run lib` - Build library (runs lint, type check, and builds library)
 - `npm run build` - Build app (runs lint, type check, and builds app)
 - `npm run lint` - Run ESLint
+- `npm run type:check:fast` - Run fast native TypeScript checking with `tsgo`
 - `npm run type:check` - Run TypeScript type checking without emitting
 - `npm run cypress:open` - Open Cypress test runner GUI
 - `npm run cypress:run` - Run Cypress tests headlessly
@@ -16,6 +17,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `npm run release` - Run release script
 
 To run a single Cypress test file: `npx cypress run --spec cypress/e2e/<test-file>.cy.ts`
+
+## Type Checking Preference
+
+- Prefer `npm run type:check:fast` during local iteration and agent workflows because it uses `tsgo` from `@typescript/native-preview` and is typically much faster on this codebase.
+- Keep `npm run type:check` as the compatibility baseline because the main build, lint, hooks, and CI-oriented flows still rely on standard `tsc`.
+- If `tsgo` and `tsc` ever disagree, treat `tsc` as the source of truth until the repo intentionally migrates more of the toolchain.
 
 ## Git Hooks
 

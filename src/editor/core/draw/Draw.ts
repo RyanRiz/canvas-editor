@@ -36,7 +36,7 @@ import {
 } from '../../interface/Element'
 import { IRow, IRowElement } from '../../interface/Row'
 import { ITextMetrics } from '../../interface/Text'
-import { deepClone, getUUID } from '../../utils'
+import { deepClone, deepCloneOmitKeys, getUUID } from '../../utils'
 import { Cursor } from '../cursor/Cursor'
 import { CanvasEvent } from '../event/CanvasEvent'
 import { GlobalEvent } from '../event/GlobalEvent'
@@ -298,6 +298,10 @@ export class Draw {
   // 当 0 时 area.compute 可直接跳过 O(N) 扫描。绝大多数文档（不使用 area）每
   // 帧因此省下 ~30k 次属性访问。
   private _mainAreaCount: number | null
+  // PERF-PLAN follow-up：主元素列表中带 listId 的元素计数缓存——同 SURROUND/AREA，
+  // 当 0 时 listParticle.computeListLayout 可跳过 O(N) glyph/gutter 扫描。
+  // 800 行文档每帧因此省下 ~11k 次 listId 属性访问。
+  private _mainListCount: number | null
   // PERF-PLAN §1.2 / Phase 1.2：自上次 submitHistory 以来积累的「主元素列表」突变事件。
   // submitHistory 据此决定是否走 delta 分支：所有事件 scope=main 且没有破坏 delta
   // 不变量的旁路改动时，可避免 9× full deepClone。事件由 spliceElementList 自动
@@ -472,6 +476,7 @@ export class Draw {
     this._historyDisabled = false
     this._mainSurroundCount = null
     this._mainAreaCount = null
+    this._mainListCount = null
     this._skipMainRowCompute = false
     // PERF: lazy-position state. See IRenderConfig.isLazyPosition (Draw.ts
     // interface) and the lazy branch in render() / paintPageOnDom guards.
@@ -1454,6 +1459,22 @@ export class Draw {
         }
       }
       this._mainAreaCount = Math.max(0, this._mainAreaCount + delta)
+    }
+    // 同样维护 list 计数缓存——computeListLayout 据此跳过整次扫描。
+    if (scope === 'main' && this._mainListCount !== null) {
+      let delta = 0
+      if (deleteCount > 0) {
+        for (let i = 0; i < deleteCount; i++) {
+          const el = elementList[start + i]
+          if (el?.listId) delta--
+        }
+      }
+      if (items?.length) {
+        for (let i = 0; i < items.length; i++) {
+          if (items[i].listId) delta++
+        }
+      }
+      this._mainListCount = Math.max(0, this._mainListCount + delta)
     }
     // 事件订阅前先快照「将被删除」切片（splice 后无法访问）。
     // 内部的 delta-history 记录器同样需要这份快照，因此从此版本起即便没有
@@ -2526,7 +2547,9 @@ export class Draw {
     return {
       version,
       data,
-      options: deepClone(this.options)
+      options: deepCloneOmitKeys<IEditorOption, IEditorOption>(this.options, [
+        'plainTextPasteStyle'
+      ])
     }
   }
 
@@ -2605,9 +2628,10 @@ export class Draw {
     this._pendingHistoryMutations = []
     this._deltaHistoryUnsafe = true
     this._preMutationMeta = null
-    // surround / area 计数缓存需要重建：新文档可能含/不含这些特殊元素。
+    // surround / area / list 计数缓存需要重建：新文档可能含/不含这些特殊元素。
     this._mainSurroundCount = null
     this._mainAreaCount = null
+    this._mainListCount = null
   }
 
   /**
@@ -3307,7 +3331,20 @@ export class Draw {
     const defaultBasicRowMarginHeight = this.getDefaultBasicRowMarginHeight()
     const ctx = this._getMeasureCtx()
     // 计算列表偏移宽度
-    const listLayout = this.listParticle.computeListLayout(ctx, elementList)
+    // PERF-PLAN follow-up：主列表无 list 元素时跳过 O(N) glyph 扫描。
+    // _mainListCount 由 spliceElementList 维护增量；首次或失效后这里重建。
+    const isMainList = elementList === this.elementList
+    if (isMainList && this._mainListCount === null) {
+      let count = 0
+      for (let e = 0; e < elementList.length; e++) {
+        if (elementList[e].listId) count++
+      }
+      this._mainListCount = count
+    }
+    const skipListLayout = isMainList && this._mainListCount === 0
+    const listLayout = skipListLayout
+      ? { glyphMap: new Map(), gutterByListId: new Map<string, number>() }
+      : this.listParticle.computeListLayout(ctx, elementList)
     const listStyleMap = listLayout.gutterByListId
     let rowList: IRow[]
     let currentPageColumns: Required<IPageColumns>
@@ -4443,7 +4480,8 @@ export class Draw {
       // Also find the ZERO element to access paragraph-level properties
       // (firstLineIndent lives on the ZERO like indent).
       const zeroEl = curRow.elementList.find(el => el.value === ZERO)
-      if (repEl?.indent) {
+      const paragraphEl = repEl || zeroEl
+      if (paragraphEl?.indent) {
         // Always compute from a fresh base to avoid double-counting when
         // incremental layout convergence reuses old row objects that already
         // had curRow.offsetX set by a previous post-processing pass.
@@ -4453,12 +4491,12 @@ export class Draw {
               curRow.elementList.find(e => e.listId)?.listId ?? ''
             ) || 0
           : 0
-        curRow.offsetX = listBase + repEl.indent * defaultTabWidth * scale
+        curRow.offsetX = listBase + paragraphEl.indent * defaultTabWidth * scale
         // Apply firstLineIndent to the first row of each paragraph
         // (the row containing a ZERO delimiter). For normal indent this
         // adds; for hanging indent (negative firstLineIndent) it subtracts,
         // giving the first line a different offset than subsequent lines.
-        const firstLineEl = zeroEl || repEl
+        const firstLineEl = zeroEl || paragraphEl
         if (zeroEl && (firstLineEl.firstLineIndent || 0) !== 0) {
           curRow.offsetX +=
             (firstLineEl.firstLineIndent || 0) * defaultTabWidth * scale
@@ -4467,8 +4505,8 @@ export class Draw {
       // Right indent: same fresh-base recompute so incremental layout reuse
       // doesn't compound the value across frames. Right offset is independent
       // of the list bullet base (lists don't take right-side gutter space).
-      curRow.rightOffsetX = repEl?.rightIndent
-        ? repEl.rightIndent * defaultTabWidth * scale
+      curRow.rightOffsetX = paragraphEl?.rightIndent
+        ? paragraphEl.rightIndent * defaultTabWidth * scale
         : 0
     }
     // 段前段后间距
@@ -4515,12 +4553,15 @@ export class Draw {
       const hasTextContent = curRow.elementList.some(
         el => el.value !== ZERO && el.value !== WRAP
       )
-      if (!hasTextContent) continue
+      const isEmptyParagraphRow =
+        !hasTextContent && curRow.elementList.some(el => el.value === ZERO)
       const isFirstOfParagraph =
+        isEmptyParagraphRow ||
         !prevRow ||
         elementList[prevRow.startIndex + prevRow.elementList.length]?.value ===
           ZERO
       const isLastOfParagraph =
+        isEmptyParagraphRow ||
         !nextRow ||
         elementList[curRow.startIndex + curRow.elementList.length]?.value ===
           ZERO

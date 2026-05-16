@@ -99,6 +99,18 @@ new Editor(document.querySelector('.canvas-editor'), {
 
 `npm run dev`
 
+## Type Check
+
+Fast local type checking:
+
+`npm run type:check:fast`
+
+Compatibility baseline:
+
+`npm run type:check`
+
+`type:check:fast` uses `tsgo` from `@typescript/native-preview` and is recommended for local iteration when you want faster feedback. The regular `type:check` command still uses standard `tsc`, which remains the baseline for build and hook compatibility.
+
 ## Build
 
 #### app

@@ -144,7 +144,7 @@ import {
   ISetAreaValueOption
 } from '../../interface/Area'
 import { IAreaBadge, IBadge } from '../../interface/Badge'
-import { IRichtextOption } from '../../interface/Command'
+import { IRichtextOption, IWordStylePayload } from '../../interface/Command'
 import { WatermarkType } from '../../dataset/enum/Watermark'
 
 export class CommandAdapt {
@@ -1276,6 +1276,353 @@ export class CommandAdapt {
     const curIndex = isSetCursor ? endIndex : startIndex
     this.draw.markDirty(startIndex, endIndex)
     this.draw.render({ curIndex, isSetCursor })
+  }
+
+  public wordStyle(payload: IWordStylePayload) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    this.draw.flushTypingBatch()
+
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+
+    const elementList = this.draw.getElementList()
+    if (!elementList.length) return
+
+    const clampIndex = (idx: number) =>
+      Math.max(0, Math.min(idx, elementList.length - 1))
+    const selectedStart =
+      startIndex === endIndex
+        ? clampIndex(endIndex)
+        : clampIndex(elementList[startIndex]?.value === ZERO ? startIndex : startIndex + 1)
+    const selectedEnd = clampIndex(endIndex)
+
+    let paragraphStart = selectedStart
+    while (paragraphStart > 0 && elementList[paragraphStart]?.value !== ZERO) {
+      paragraphStart--
+    }
+
+    const isCollapsedEmptyParagraph =
+      startIndex === endIndex &&
+      elementList[endIndex]?.value === ZERO &&
+      (endIndex === 0 || elementList[endIndex - 1]?.value === ZERO)
+
+    let paragraphEnd = Math.max(selectedEnd, paragraphStart)
+    if (isCollapsedEmptyParagraph) {
+      paragraphEnd = paragraphStart
+    } else {
+      while (
+        paragraphEnd + 1 < elementList.length &&
+        elementList[paragraphEnd + 1]?.value !== ZERO
+      ) {
+        paragraphEnd++
+      }
+    }
+
+    const affected = elementList.slice(paragraphStart, paragraphEnd + 1)
+    if (!affected.length) return
+
+    const titleId = payload.heading ? getUUID() : null
+    const zeroElements = affected.filter(el => el.value === ZERO)
+    const oldValues = affected.map(el => ({
+      el,
+      level: el.level,
+      titleId: el.titleId,
+      title: el.title,
+      font: el.font,
+      size: el.size,
+      bold: el.bold,
+      italic: el.italic,
+      color: el.color,
+      extension: el.extension,
+      rowMargin: el.rowMargin,
+      indent: el.indent,
+      spaceBefore: el.spaceBefore,
+      spaceAfter: el.spaceAfter
+    }))
+
+    const setOrDelete = <K extends keyof IElement>(
+      el: IElement,
+      key: K,
+      value: IElement[K] | null | undefined | false
+    ) => {
+      if (value === null || value === undefined || value === false) {
+        delete el[key]
+      } else {
+        el[key] = value
+      }
+    }
+
+    const applyForward = () => {
+      for (const el of affected) {
+        if (el.value === ZERO) {
+          delete el.level
+          delete el.titleId
+          delete el.title
+        } else if (payload.heading) {
+          el.level = payload.heading
+          el.titleId = titleId!
+        } else {
+          delete el.level
+          delete el.titleId
+          delete el.title
+        }
+
+        if (el.value !== undefined) {
+          el.font = payload.font
+          el.size = payload.size
+          setOrDelete(el, 'bold', payload.bold)
+          setOrDelete(el, 'italic', payload.italic)
+          setOrDelete(el, 'color', payload.color)
+        }
+
+        if (payload.wordStyle) {
+          const ext = el.extension as Record<string, unknown> | undefined
+          if (!ext || typeof ext !== 'object') {
+            el.extension = { wordStyle: payload.wordStyle }
+          } else if (ext.jatsType !== 'xref') {
+            el.extension = { ...ext, wordStyle: payload.wordStyle }
+          }
+        }
+
+        if (payload.lineSpacing !== undefined && payload.lineSpacing !== null) {
+          el.rowMargin = payload.lineSpacing
+        }
+
+        if (payload.leftIndent !== undefined && payload.leftIndent !== null) {
+          if (payload.leftIndent <= 0) delete el.indent
+          else el.indent = payload.leftIndent
+        }
+      }
+
+      for (const el of zeroElements) {
+        if (payload.spaceBefore > 0) el.spaceBefore = payload.spaceBefore
+        else delete el.spaceBefore
+        if (payload.spaceAfter > 0) el.spaceAfter = payload.spaceAfter
+        else delete el.spaceAfter
+      }
+    }
+
+    const applyBackward = () => {
+      for (const item of oldValues) {
+        const { el } = item
+        if (item.level !== undefined) el.level = item.level
+        else delete el.level
+        if (item.titleId !== undefined) el.titleId = item.titleId
+        else delete el.titleId
+        if (item.title !== undefined) el.title = item.title
+        else delete el.title
+        if (item.font !== undefined) el.font = item.font
+        else delete el.font
+        if (item.size !== undefined) el.size = item.size
+        else delete el.size
+        if (item.bold !== undefined) el.bold = item.bold
+        else delete el.bold
+        if (item.italic !== undefined) el.italic = item.italic
+        else delete el.italic
+        if (item.color !== undefined) el.color = item.color
+        else delete el.color
+        if (item.extension !== undefined) el.extension = item.extension
+        else delete el.extension
+        if (item.rowMargin !== undefined) el.rowMargin = item.rowMargin
+        else delete el.rowMargin
+        if (item.indent !== undefined) el.indent = item.indent
+        else delete el.indent
+        if (item.spaceBefore !== undefined) el.spaceBefore = item.spaceBefore
+        else delete el.spaceBefore
+        if (item.spaceAfter !== undefined) el.spaceAfter = item.spaceAfter
+        else delete el.spaceAfter
+      }
+    }
+
+    applyForward()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.markDirty(paragraphStart, paragraphEnd)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
+        this.draw.markDirty(paragraphStart, paragraphEnd)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(paragraphStart, paragraphEnd)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+  }
+
+  public updateWordStyle(styleId: string, payload: IWordStylePayload) {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    this.draw.flushTypingBatch()
+
+    const elementList = this.draw.getElementList()
+    if (!elementList.length) return
+
+    const paragraphStarts = new Set<number>()
+    for (let i = 0; i < elementList.length; i++) {
+      const ext = elementList[i].extension as { wordStyle?: unknown } | undefined
+      if (!ext || typeof ext !== 'object' || ext.wordStyle !== styleId) {
+        continue
+      }
+      let start = i
+      while (start > 0 && elementList[start]?.value !== ZERO) start--
+      paragraphStarts.add(start)
+    }
+    if (!paragraphStarts.size) return
+
+    const indexes = new Set<number>()
+    for (const start of paragraphStarts) {
+      indexes.add(start)
+      if (
+        elementList[start]?.value === ZERO &&
+        (start + 1 >= elementList.length || elementList[start + 1]?.value === ZERO)
+      ) {
+        continue
+      }
+      let end = start
+      while (end + 1 < elementList.length && elementList[end + 1]?.value !== ZERO) {
+        end++
+      }
+      for (let i = start; i <= end; i++) indexes.add(i)
+    }
+
+    const affected = [...indexes]
+      .sort((a, b) => a - b)
+      .map(index => elementList[index])
+      .filter(Boolean)
+    if (!affected.length) return
+
+    const firstIndex = Math.min(...indexes)
+    const lastIndex = Math.max(...indexes)
+    const titleId = payload.heading ? getUUID() : null
+    const zeroElements = affected.filter(el => el.value === ZERO)
+    const oldValues = affected.map(el => ({
+      el,
+      level: el.level,
+      titleId: el.titleId,
+      title: el.title,
+      font: el.font,
+      size: el.size,
+      bold: el.bold,
+      italic: el.italic,
+      color: el.color,
+      rowMargin: el.rowMargin,
+      indent: el.indent,
+      spaceBefore: el.spaceBefore,
+      spaceAfter: el.spaceAfter
+    }))
+
+    const setOrDelete = <K extends keyof IElement>(
+      el: IElement,
+      key: K,
+      value: IElement[K] | null | undefined | false
+    ) => {
+      if (value === null || value === undefined || value === false) {
+        delete el[key]
+      } else {
+        el[key] = value
+      }
+    }
+
+    const applyForward = () => {
+      for (const el of affected) {
+        if (el.value === ZERO) {
+          delete el.level
+          delete el.titleId
+          delete el.title
+        } else if (payload.heading) {
+          el.level = payload.heading
+          el.titleId = titleId!
+        } else {
+          delete el.level
+          delete el.titleId
+          delete el.title
+        }
+
+        if (el.value !== undefined) {
+          el.font = payload.font
+          el.size = payload.size
+          setOrDelete(el, 'bold', payload.bold)
+          setOrDelete(el, 'italic', payload.italic)
+          setOrDelete(el, 'color', payload.color)
+        }
+
+        if (payload.lineSpacing !== undefined && payload.lineSpacing !== null) {
+          el.rowMargin = payload.lineSpacing
+        }
+
+        if (payload.leftIndent !== undefined && payload.leftIndent !== null) {
+          if (payload.leftIndent <= 0) delete el.indent
+          else el.indent = payload.leftIndent
+        }
+      }
+
+      for (const el of zeroElements) {
+        if (payload.spaceBefore > 0) el.spaceBefore = payload.spaceBefore
+        else delete el.spaceBefore
+        if (payload.spaceAfter > 0) el.spaceAfter = payload.spaceAfter
+        else delete el.spaceAfter
+      }
+    }
+
+    const applyBackward = () => {
+      for (const item of oldValues) {
+        const { el } = item
+        if (item.level !== undefined) el.level = item.level
+        else delete el.level
+        if (item.titleId !== undefined) el.titleId = item.titleId
+        else delete el.titleId
+        if (item.title !== undefined) el.title = item.title
+        else delete el.title
+        if (item.font !== undefined) el.font = item.font
+        else delete el.font
+        if (item.size !== undefined) el.size = item.size
+        else delete el.size
+        if (item.bold !== undefined) el.bold = item.bold
+        else delete el.bold
+        if (item.italic !== undefined) el.italic = item.italic
+        else delete el.italic
+        if (item.color !== undefined) el.color = item.color
+        else delete el.color
+        if (item.rowMargin !== undefined) el.rowMargin = item.rowMargin
+        else delete el.rowMargin
+        if (item.indent !== undefined) el.indent = item.indent
+        else delete el.indent
+        if (item.spaceBefore !== undefined) el.spaceBefore = item.spaceBefore
+        else delete el.spaceBefore
+        if (item.spaceAfter !== undefined) el.spaceAfter = item.spaceAfter
+        else delete el.spaceAfter
+      }
+    }
+
+    const { startIndex, endIndex } = this.range.getRange()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    applyForward()
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.markDirty(firstIndex, lastIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
+        this.draw.markDirty(firstIndex, lastIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(firstIndex, lastIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
 
   public list(listType: ListType | null, listStyle?: ListStyle, checklistStyle?: 'standard' | 'plain') {

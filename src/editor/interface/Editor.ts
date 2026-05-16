@@ -53,6 +53,7 @@ export interface IEditorData {
 export interface IEditorOption {
   mode?: EditorMode
   locale?: string
+  plainTextPasteStyle?: (() => Partial<IElement> | null | undefined) | undefined
   defaultType?: string
   defaultColor?: string
   defaultFont?: string
