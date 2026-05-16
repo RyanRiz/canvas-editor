@@ -81,8 +81,10 @@ export class CheckboxParticle {
         const el = list[item.index]
         if (!el) continue
         if (nextValue) {
-          el.color = mutedColor
-          if (checklistStyle === 'standard') el.strikeout = true
+          if (checklistStyle === 'standard') {
+            el.color = mutedColor
+            el.strikeout = true
+          }
         } else {
           delete el.color
           delete el.strikeout

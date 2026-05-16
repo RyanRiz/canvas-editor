@@ -78,6 +78,8 @@ export function enter(evt: KeyboardEvent, host: CanvasEvent) {
       // directly instead of _restoreUndoStackTop snapshot replay.
       const isSetCursor = true
       const curIndex = endIndex
+      const dirtyStart = endIndex
+      const dirtyEnd = endIndex + (belowIndices.length > 0 ? belowIndices[belowIndices.length - 1] : 0)
       draw.getHistoryManager().executeDelta({
         applyForward: () => {
           const list = draw.getElementList()
@@ -93,6 +95,8 @@ export function enter(evt: KeyboardEvent, host: CanvasEvent) {
             const b = list[idx]
             if (b) b.listId = newListId
           }
+          draw.markDirty(dirtyStart, dirtyEnd)
+          draw.invalidatePaintCache()
           draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
         },
         applyBackward: () => {
@@ -114,9 +118,13 @@ export function enter(evt: KeyboardEvent, host: CanvasEvent) {
             const b = list[idx]
             if (b) b.listId = exitedListId
           }
+          draw.markDirty(dirtyStart, dirtyEnd)
+          draw.invalidatePaintCache()
           draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
         }
       })
+      draw.markDirty(dirtyStart, dirtyEnd)
+      draw.invalidatePaintCache()
       draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
       console.log(
         '[HIST-ENTER] Branch A exit-list DELTA pushed, stack=',

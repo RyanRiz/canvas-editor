@@ -312,18 +312,24 @@ export class ListParticle {
     applyForward()
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
+    const dirtySpanSetList = { start: spanStart, end: spanEnd }
     this.draw.getHistoryManager().executeDelta({
       applyForward: () => {
         applyForward()
+        this.draw.markDirty(dirtySpanSetList.start, dirtySpanSetList.end)
+        this.draw.invalidatePaintCache()
         this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
       },
       applyBackward: () => {
         applyBackward()
+        this.draw.markDirty(dirtySpanSetList.start, dirtySpanSetList.end)
+        this.draw.invalidatePaintCache()
         this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
       }
     })
     this.draw.markDirty(spanStart, spanEnd)
     this.draw.cancelScheduledRender()
+    this.draw.invalidateListLayoutCache()
     this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
 
@@ -473,6 +479,18 @@ export class ListParticle {
     }
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
+    // Compute dirty range — expand to full block when we broadened scope
+    let dirtyStart = startIndex
+    let dirtyEnd = endIndex
+    if (didExpandBlock && changeElementList.length) {
+      dirtyStart = elementList.indexOf(changeElementList[0])
+      dirtyEnd = elementList.indexOf(
+        changeElementList[changeElementList.length - 1]
+      )
+      if (dirtyStart < 0) dirtyStart = startIndex
+      if (dirtyEnd < 0) dirtyEnd = endIndex
+    }
+    const usDirtySpan = { start: dirtyStart, end: dirtyEnd }
     const draw = this.draw
     this.draw.getHistoryManager().executeDelta({
       applyForward: () => {
@@ -505,6 +523,8 @@ export class ListParticle {
         if (needZeroInsert) {
           list.splice(zeroInsertIndex, 0, { value: ZERO })
         }
+        draw.markDirty(usDirtySpan.start, usDirtySpan.end)
+        draw.invalidatePaintCache()
         draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
       },
       applyBackward: () => {
@@ -537,22 +557,14 @@ export class ListParticle {
             }
           }
         }
+        draw.markDirty(usDirtySpan.start, usDirtySpan.end)
+        draw.invalidatePaintCache()
         draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
       }
     })
-    // Compute dirty range — expand to full block when we broadened scope
-    let dirtyStart = startIndex
-    let dirtyEnd = endIndex
-    if (didExpandBlock && changeElementList.length) {
-      dirtyStart = elementList.indexOf(changeElementList[0])
-      dirtyEnd = elementList.indexOf(
-        changeElementList[changeElementList.length - 1]
-      )
-      if (dirtyStart < 0) dirtyStart = startIndex
-      if (dirtyEnd < 0) dirtyEnd = endIndex
-    }
-    this.draw.markDirty(dirtyStart, dirtyEnd)
+    this.draw.markDirty(usDirtySpan.start, usDirtySpan.end)
     this.draw.cancelScheduledRender()
+    this.draw.invalidateListLayoutCache()
     this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
 
@@ -564,6 +576,14 @@ export class ListParticle {
       .getRangeParagraphElementList()
       ?.filter(el => el.listId)
     if (!changeElementList || !changeElementList.length) return false
+    // Capture old levels for undo
+    const mainList = this.draw.getElementList()
+    const oldLevels = changeElementList
+      .map(el => ({
+        mainIndex: mainList.indexOf(el),
+        listLevel: el.listLevel
+      }))
+      .filter(v => v.mainIndex >= 0)
     let mutated = false
     changeElementList.forEach(el => {
       const cur = el.listLevel ?? 1
@@ -576,7 +596,40 @@ export class ListParticle {
     if (!mutated) return false
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
-    this.draw.render({ curIndex, isSetCursor })
+    const spanStart = oldLevels[0]?.mainIndex ?? startIndex
+    const spanEnd = oldLevels[oldLevels.length - 1]?.mainIndex ?? endIndex
+    const draw = this.draw
+    draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldLevels) {
+          const el = draw.getElementList()[item.mainIndex]
+          if (!el) continue
+          el.listLevel = Math.min((el.listLevel ?? 1) + 1, LIST_MAX_LEVEL)
+        }
+        draw.markDirty(spanStart, spanEnd)
+        draw.invalidatePaintCache()
+        draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+        draw.ruler?.invalidateActiveFramePaintKey()
+        draw.ruler?.render()
+      },
+      applyBackward: () => {
+        for (const item of oldLevels) {
+          const el = draw.getElementList()[item.mainIndex]
+          if (!el) continue
+          if (item.listLevel === undefined) delete el.listLevel
+          else el.listLevel = item.listLevel
+        }
+        draw.markDirty(spanStart, spanEnd)
+        draw.invalidatePaintCache()
+        draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+        draw.ruler?.invalidateActiveFramePaintKey()
+        draw.ruler?.render()
+      }
+    })
+    draw.markDirty(spanStart, spanEnd)
+    draw.invalidatePaintCache()
+    draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+    draw.ruler?.render()
     return true
   }
 
@@ -609,6 +662,14 @@ export class ListParticle {
       .getRangeParagraphElementList()
       ?.filter(el => el.listId)
     if (!changeElementList || !changeElementList.length) return false
+    // Capture old levels BEFORE mutation
+    const mainList = this.draw.getElementList()
+    const oldLevels = changeElementList
+      .map(el => ({
+        mainIndex: mainList.indexOf(el),
+        listLevel: el.listLevel
+      }))
+      .filter(v => v.mainIndex >= 0)
     let mutated = false
     let needsExit = false
     changeElementList.forEach(el => {
@@ -625,9 +686,44 @@ export class ListParticle {
       return true
     }
     if (!mutated) return false
+    // oldLevels was captured above, before mutation
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
-    this.draw.render({ curIndex, isSetCursor })
+    const spanStart = oldLevels[0]?.mainIndex ?? startIndex
+    const spanEnd = oldLevels[oldLevels.length - 1]?.mainIndex ?? endIndex
+    const draw = this.draw
+    draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        for (const item of oldLevels) {
+          const el = draw.getElementList()[item.mainIndex]
+          if (!el) continue
+          const cur = el.listLevel ?? 1
+          if (cur > 1) el.listLevel = cur - 1
+        }
+        draw.markDirty(spanStart, spanEnd)
+        draw.invalidatePaintCache()
+        draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+        draw.ruler?.invalidateActiveFramePaintKey()
+        draw.ruler?.render()
+      },
+      applyBackward: () => {
+        for (const item of oldLevels) {
+          const el = draw.getElementList()[item.mainIndex]
+          if (!el) continue
+          if (item.listLevel === undefined) delete el.listLevel
+          else el.listLevel = item.listLevel
+        }
+        draw.markDirty(spanStart, spanEnd)
+        draw.invalidatePaintCache()
+        draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+        draw.ruler?.invalidateActiveFramePaintKey()
+        draw.ruler?.render()
+      }
+    })
+    draw.markDirty(spanStart, spanEnd)
+    draw.invalidatePaintCache()
+    draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+    draw.ruler?.render()
     return true
   }
 
@@ -970,18 +1066,24 @@ export class ListParticle {
     applyForwardCombined()
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
+    const dirtySpanSLWS = { start: spanStart, end: spanEnd }
     this.draw.getHistoryManager().executeDelta({
       applyForward: () => {
         applyForwardCombined()
+        this.draw.markDirty(dirtySpanSLWS.start, dirtySpanSLWS.end)
+        this.draw.invalidatePaintCache()
         this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
       },
       applyBackward: () => {
         applyBackwardCombined()
+        this.draw.markDirty(dirtySpanSLWS.start, dirtySpanSLWS.end)
+        this.draw.invalidatePaintCache()
         this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
       }
     })
     this.draw.markDirty(spanStart, spanEnd)
     this.draw.cancelScheduledRender()
+    this.draw.invalidateListLayoutCache()
     this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
 

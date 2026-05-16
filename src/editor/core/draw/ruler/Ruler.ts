@@ -39,6 +39,7 @@ import {
 import { EventBus } from '../../event/eventbus/EventBus'
 import { EventBusMap } from '../../../interface/EventBus'
 import { Draw } from '../Draw'
+import { LIST_INDENT_STEP } from '../../../dataset/constant/listLevel'
 
 /** 1 inch = 96 CSS pixels at scale=1 (matches canvas-editor's px-as-units). */
 const DPI = 96
@@ -329,6 +330,15 @@ export class Ruler {
     this._restoreContainerSpacing()
   }
 
+  public invalidateActiveFramePaintKey() {
+    const activeFrame = this.frames.find(
+      f => f.pageNo === this.draw.getPageNo()
+    )
+    if (activeFrame) {
+      this.framePaintKey.delete(activeFrame.wrapper)
+    }
+  }
+
   /**
    * Build a paint-input signature for one page frame. The signature must
    * include every value the paint path reads — change anything and the
@@ -361,6 +371,7 @@ export class Ruler {
           ind?.indent ?? 0,
           ind?.firstLineIndent ?? 0,
           ind?.rightIndent ?? 0,
+          ind?.listLevel ?? 0,
           tabHash,
           isTable ? 1 : 0,
           colHash
@@ -870,7 +881,13 @@ export class Ruler {
     const pageWidth = this.draw.getWidth()
     const innerWidth = pageWidth - leftMargin - rightMargin
     const stepPx = defaultTabWidth * scale
-    const leftAtSteps = (steps: number) => leftMargin + steps * stepPx
+    // Multi-level list indent: listLevel translates to horizontal offset at
+    // paint time (LIST_INDENT_STEP per level). Include it in the ruler marker
+    // positions so they match the visual indent the user sees.
+    const listLevelStepPx =
+      ind.listLevel > 0 ? (ind.listLevel - 1) * LIST_INDENT_STEP * scale : 0
+    const listLevelSteps = listLevelStepPx / stepPx
+    const leftAtSteps = (steps: number) => leftMargin + (steps + listLevelSteps) * stepPx
     const rightAtSteps = (steps: number) =>
       leftMargin + innerWidth - steps * stepPx
 
@@ -1621,6 +1638,7 @@ export class Ruler {
     indent: number
     firstLineIndent: number
     rightIndent: number
+    listLevel: number
   } | null {
     const range = this.draw.getRange()
     const info = range.getRangeParagraphInfo()
@@ -1629,7 +1647,8 @@ export class Ruler {
     return {
       indent: first.indent || 0,
       firstLineIndent: first.firstLineIndent || 0,
-      rightIndent: first.rightIndent || 0
+      rightIndent: first.rightIndent || 0,
+      listLevel: first.listId ? (first.listLevel ?? 1) : 0
     }
   }
 

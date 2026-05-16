@@ -59,8 +59,7 @@ export class HistoryManager {
   public undo() {
     // 输入合批未落盘时，先落盘再 undo（PERF-PLAN §1.2）
     this.draw.flushTypingBatch()
-    console.log('[HIST-ENTER] undo ENTER — stack before=', this.undoStack.length, 'redo=', this.redoStack.length)
-    if (this.undoStack.length > 1) {
+    if (this.undoStack.length > 0) {
       const pop = this.undoStack.pop()!
       this.redoStack.push(pop)
       this._debugLog('undo:popped', {
@@ -79,12 +78,10 @@ export class HistoryManager {
       }
     }
     this._debugLog('undo:end')
-    console.log('[HIST-ENTER] undo EXIT — stack after=', this.undoStack.length, 'redo=', this.redoStack.length)
   }
 
   public redo() {
     this.draw.flushTypingBatch()
-    console.log('[HIST-ENTER] redo ENTER — stack=', this.undoStack.length, 'redo=', this.redoStack.length)
     if (this.redoStack.length) {
       const pop = this.redoStack.pop()!
       this.undoStack.push(pop)
@@ -98,11 +95,9 @@ export class HistoryManager {
       }
     }
     this._debugLog('redo:end')
-    console.log('[HIST-ENTER] redo EXIT — stack=', this.undoStack.length, 'redo=', this.redoStack.length)
   }
 
   public execute(fn: Function) {
-    console.log('[HIST-ENTER] execute(SNAPSHOT push), stack before:', this.undoStack.length, 'redo=', this.redoStack.length)
     this.undoStack.push(fn)
     if (this.redoStack.length) {
       this.redoStack = []
@@ -124,7 +119,6 @@ export class HistoryManager {
     applyForward: () => void
     applyBackward: () => void
   }) {
-    console.log('[HIST-ENTER] executeDelta, disabled:', this.draw.isHistoryDisabled(), 'stack before:', this.undoStack.length)
     if (this.draw.isHistoryDisabled()) return
     this.undoStack.push({
       kind: 'delta',

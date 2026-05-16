@@ -1275,6 +1275,10 @@ export class Draw {
     })
   }
 
+  public invalidateListLayoutCache() {
+    this._mainListCount = null
+  }
+
   /**
    * 标记主元素列表的 dirty 区间（PERF-PLAN §2.1）。
    * - 多次标记会取并集（最小 start、最大 end）
