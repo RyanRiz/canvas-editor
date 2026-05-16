@@ -1,5 +1,7 @@
 import { maxHeightRadioMapping } from '../../../dataset/constant/Common'
 import { EditorZone } from '../../../dataset/enum/Editor'
+import { ElementType } from '../../../dataset/enum/Element'
+import { SectionBreakType } from '../../../dataset/enum/SectionBreak'
 import { DeepRequired } from '../../../interface/Common'
 import { IEditorOption } from '../../../interface/Editor'
 import { IElement, IElementPosition } from '../../../interface/Element'
@@ -363,6 +365,16 @@ export function applyPageNumberTokens(
     !!opts.header?.firstPageEnabled || !!opts.footer?.firstPageEnabled
   const effectiveFrom = Math.max(explicitFrom, skipFirstCover ? 1 : 0)
   const totalPages = draw.getPageCount()
+  // MS Word-style per-section numbering: every NEXT_PAGE / EVEN_PAGE /
+  // ODD_PAGE section break resets the section's page number to 1 by
+  // default (CONTINUOUS doesn't paginate, so it can't restart numbering).
+  // Resolve the section that contains `pageNo` and its starting value.
+  const { sectionFirstPage, sectionStartValue } = resolveSectionStart(
+    draw,
+    pageNo,
+    startPageNo,
+    effectiveFrom
+  )
   const restoreList: [IElement, string][] = []
   for (let i = 0; i < elementList.length; i++) {
     const el = elementList[i]
@@ -376,7 +388,10 @@ export function applyPageNumberTokens(
       // visible appears for the page-number element on page 1.
       value = ''
     } else {
-      value = formatPageNumber(pageNo + startPageNo - effectiveFrom, fmt)
+      value = formatPageNumber(
+        pageNo - sectionFirstPage + sectionStartValue,
+        fmt
+      )
     }
     restoreList.push([el, el.value])
     el.value = value
@@ -385,6 +400,62 @@ export function applyPageNumberTokens(
     for (const [el, original] of restoreList) {
       el.value = original
     }
+  }
+}
+
+/**
+ * MS Word-style per-section page numbering. Walks the element list back from
+ * the element that anchors `pageNo`'s first row to find the most recent
+ * NEXT_PAGE / EVEN_PAGE / ODD_PAGE section break. If one is found, the page
+ * containing the first element AFTER that break is the section's first
+ * page, and the section restarts numbering at 1. If no break precedes
+ * `pageNo`, the page is in the leading section — apply the document's
+ * `startPageNo` / `effectiveFrom` offsets as before.
+ *
+ * Returns `{ sectionFirstPage, sectionStartValue }` so the caller can
+ * compute `displayValue = pageNo - sectionFirstPage + sectionStartValue`.
+ */
+function resolveSectionStart(
+  draw: Draw,
+  pageNo: number,
+  defaultStartPageNo: number,
+  effectiveFrom: number
+): { sectionFirstPage: number; sectionStartValue: number } {
+  const pageRowList = draw.getPageRowList()
+  if (!pageRowList[pageNo]?.length) {
+    return {
+      sectionFirstPage: effectiveFrom,
+      sectionStartValue: defaultStartPageNo
+    }
+  }
+  const elementList = draw.getElementList()
+  const firstElementIndex = pageRowList[pageNo][0].startIndex
+  // Walk back to find the most recent paginating section break before this
+  // page's first element. The section starts on the page right after it.
+  const lastIndex = Math.min(firstElementIndex - 1, elementList.length - 1)
+  for (let i = lastIndex; i >= 0; i--) {
+    const el = elementList[i]
+    if (
+      el?.type !== ElementType.SECTION_BREAK ||
+      el.sectionBreakType === SectionBreakType.CONTINUOUS
+    ) {
+      continue
+    }
+    // Find the first page whose starting element index sits strictly after
+    // this break — that's the first page of the section the cursor's
+    // pageNo belongs to.
+    for (let p = 0; p < pageRowList.length; p++) {
+      const pStartIdx = pageRowList[p]?.[0]?.startIndex ?? -1
+      if (pStartIdx > i) {
+        return { sectionFirstPage: p, sectionStartValue: 1 }
+      }
+    }
+    return { sectionFirstPage: pageNo, sectionStartValue: 1 }
+  }
+  // Leading section — keep the document-wide offsets.
+  return {
+    sectionFirstPage: effectiveFrom,
+    sectionStartValue: defaultStartPageNo
   }
 }
 

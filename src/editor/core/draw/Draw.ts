@@ -5720,6 +5720,31 @@ export class Draw {
       height,
       scale
     } = this.options
+    // Per-section page numbering: the displayed page number depends on
+    // which section the page belongs to. If a section break is added /
+    // removed / moved upstream of this page, the section's first page
+    // index changes and the rendered page-number token must update too.
+    // Without including this in the cache key, the chrome cache happily
+    // re-blits a stale page-number string until something else
+    // invalidates the key (e.g. toggling formatting marks bumps a header
+    // version). Stamp the page's starting element index PLUS the index of
+    // the most recent paginating section break — both shift the moment a
+    // section break is inserted nearby, so the cache invalidates exactly
+    // when the rendered number would change.
+    const firstElementIndex = this.pageRowList[pageNo]?.[0]?.startIndex ?? -1
+    let mostRecentSectionBreakIdx = -1
+    const elementList = this.elementList
+    const upTo = Math.min(firstElementIndex - 1, elementList.length - 1)
+    for (let i = upTo; i >= 0; i--) {
+      const el = elementList[i]
+      if (
+        el?.type === ElementType.SECTION_BREAK &&
+        el.sectionBreakType !== SectionBreakType.CONTINUOUS
+      ) {
+        mostRecentSectionBreakIdx = i
+        break
+      }
+    }
     return JSON.stringify({
       pageNo,
       pageCount: this.pageRowList.length,
@@ -5753,7 +5778,9 @@ export class Draw {
       pageBorderPadding: pageBorder.padding,
       margins,
       headerVersion: this._headerChromeVersion,
-      footerVersion: this._footerChromeVersion
+      footerVersion: this._footerChromeVersion,
+      firstElementIndex,
+      mostRecentSectionBreakIdx
     })
   }
 
