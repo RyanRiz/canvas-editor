@@ -63,21 +63,23 @@ export class Zone {
     // Per-section orientation MVP: when switching INTO header/footer on a
     // page whose direction differs from the document base, the cached
     // header/footer positionList may have been computed at the wrong
-    // direction (the prior render ran with `isCompute: false` to avoid
-    // unnecessary main-body recompute). Force a one-shot recompute of the
-    // entering zone so the cursor's first landing X/Y come from a
-    // positionList sized to the active page's direction. `Header.compute`
-    // / `Footer.compute` pin `setPaintDirectionOverride(getPageDirection(
-    // getPageNo()))` internally.
-    if (payload === EditorZone.HEADER) {
-      this.draw.getHeader().compute()
-    } else if (payload === EditorZone.FOOTER) {
-      this.draw.getFooter().compute()
-    }
+    // direction (the previous render here used `isCompute: false`, which
+    // skipped the recompute). Use `isCompute: true` for header/footer
+    // entry so the render path's existing logic — gated by
+    // `activeZone === HEADER` / `activeZone === FOOTER` — runs
+    // `header.compute()` / `footer.compute()` for us. Those compute paths
+    // pin the active page's direction internally so the cursor's first
+    // landing X/Y come from a correctly-sized positionList. Doing this
+    // through the standard render path (rather than calling compute()
+    // directly here) keeps `_pendingHistoryMutations` / `_preMutationMeta`
+    // / typing-batch state untouched, so undo continues to work normally
+    // after a zone switch.
+    const isHeaderFooterEntry =
+      payload === EditorZone.HEADER || payload === EditorZone.FOOTER
     this.draw.render({
       isSubmitHistory: false,
       isSetCursor: false,
-      isCompute: false
+      isCompute: isHeaderFooterEntry
     })
     // 指示器
     this.drawZoneIndicator()

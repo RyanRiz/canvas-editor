@@ -1370,6 +1370,19 @@ export class Draw {
   }
 
   /**
+   * Mark the in-flight delta history accumulation as unsafe. Used when the
+   * header/footer elementList reference is replaced (Header.setElementList
+   * / Header.setActiveVariant / Footer.setElementList /
+   * Footer.setActiveVariant) — any pending mutations recorded against the
+   * old reference can't be safely replayed onto the new one, so the next
+   * submitHistory falls back to snapshot. The flag resets after each
+   * submit, so future delta accumulation is unaffected.
+   */
+  public markDeltaHistoryUnsafe(): void {
+    this._deltaHistoryUnsafe = true
+  }
+
+  /**
    * PERF-PLAN §2.6：用 computeRowList 预先存储在 TABLE 元素上的
    * _mainElementIndex 将其在主列表中的位置标脏。TableTool 的列/行拖拽、
    * TableOperate 的插入/删除行/列/合并/拆分等操作均直接更改元素属性后调用
@@ -1494,10 +1507,13 @@ export class Draw {
         }
       }
     }
-    // PERF-PLAN §1.2 / Phase 1.2：header/footer 无法走 delta 分支——
-    // setElementList 会替换整个 elementList，retroactive splice 不可靠。
-    // 表格编辑若捕获了 tdPath 则可走 delta；否则 fallback 到 snapshot。
-    if (scope !== 'main' && (scope !== 'table' || !tableTdPath)) {
+    // PERF-PLAN §1.2 / Phase 1.2：表格编辑若捕获了 tdPath 则可走 delta；否则
+    // fallback 到 snapshot。header/footer 现在也支持 delta —— 只要 typing
+    // 会话内 elementList 引用没换过（即没有 setElementList / setActiveVariant
+    // 调用）。Header.setElementList / Header.setActiveVariant /
+    // Footer.setElementList / Footer.setActiveVariant 在引用切换时调用
+    // `draw.markDeltaHistoryUnsafe()`，让本轮 submitHistory 回到 snapshot。
+    if (scope === 'table' && !tableTdPath) {
       this._deltaHistoryUnsafe = true
     }
     // PERF-PLAN follow-up：维护 main 列表中 SURROUND 元素的计数缓存——
@@ -1649,9 +1665,15 @@ export class Draw {
         ...(tableTdPath ? { tdPath: tableTdPath } : {})
       }
       // 第一笔 mutation 入队前先锁住 BEFORE 状态——delta 入栈时携带，作为
-      // applyBackward 的「目的地」元数据。允许 table scope（若 tdPath 可用）。
+      // applyBackward 的「目的地」元数据。允许 main / header / footer / table
+      // (若 tdPath 可用) 作为 delta 范畴。
+      const isDeltaScope =
+        scope === 'main' ||
+        scope === 'header' ||
+        scope === 'footer' ||
+        (scope === 'table' && !!tableTdPath)
       if (
-        (scope === 'main' || (scope === 'table' && tableTdPath)) &&
+        isDeltaScope &&
         !this._deltaHistoryUnsafe &&
         this._pendingHistoryMutations.length === 0 &&
         this._preMutationMeta === null
@@ -7591,7 +7613,11 @@ export class Draw {
       this._preMutationMeta !== null &&
       !this.historyManager.isStackEmpty() &&
       this._pendingHistoryMutations.every(
-        m => m.scope === 'main' || (m.scope === 'table' && !!m.tdPath)
+        m =>
+          m.scope === 'main' ||
+          m.scope === 'header' ||
+          m.scope === 'footer' ||
+          (m.scope === 'table' && !!m.tdPath)
       )
     if (this.options.debugHistory) {
       console.log('[canvas-editor submitHistory]', {
@@ -7643,6 +7669,37 @@ export class Draw {
       const tr = el.trList[tdPath.trIdx]
       return tr?.tdList?.[tdPath.tdIdx] ?? null
     }
+    // Resolve which elementList a given mutation should splice on. Mutations
+    // captured under scope='header' / 'footer' replay onto the current
+    // active variant's elementList — variant switches mark the in-flight
+    // delta unsafe, so by the time a delta is replayed the active variant
+    // matches the one that produced it.
+    const _resolveListForMutation = (m: IMutationEvent): IElement[] | null => {
+      if (m.scope === 'main') return this.elementList
+      if (m.scope === 'header') return this.header.getElementList()
+      if (m.scope === 'footer') return this.footer.getElementList()
+      if (m.scope === 'table' && m.tdPath) {
+        const td = _resolveTableTd(m.tdPath)
+        return td ? td.value : null
+      }
+      return null
+    }
+    const _markScopeDirty = (m: IMutationEvent) => {
+      if (m.scope === 'main') {
+        const insertedLen = m.inserted.length
+        const removedLen = m.removed.length
+        this.markDirty(m.start, m.start + Math.max(removedLen, insertedLen))
+      } else if (m.scope === 'header') {
+        this._headerDirty = true
+        this._headerChromeVersion++
+      } else if (m.scope === 'footer') {
+        this._footerDirty = true
+        this._footerChromeVersion++
+      } else if (m.scope === 'table' && m.tdPath) {
+        const td = _resolveTableTd(m.tdPath)
+        if (td) td._dirty = true
+      }
+    }
     const applyForward = () => {
       this._isReplayingHistory = true
       try {
@@ -7650,23 +7707,14 @@ export class Draw {
         // removed.length, ...inserted)——等价于「把改动重新做一遍」。
         for (let i = 0; i < mutations.length; i++) {
           const m = mutations[i]
-          if (m.scope === 'table' && m.tdPath) {
-            const td = _resolveTableTd(m.tdPath)
-            if (td) {
-              td.value.splice(
-                m.start,
-                m.removed.length,
-                ...getSlimCloneElementList(m.inserted)
-              )
-              td._dirty = true
-            }
-          } else {
-            this.elementList.splice(
-              m.start,
-              m.removed.length,
-              ...getSlimCloneElementList(m.inserted)
-            )
-          }
+          const list = _resolveListForMutation(m)
+          if (!list) continue
+          list.splice(
+            m.start,
+            m.removed.length,
+            ...getSlimCloneElementList(m.inserted)
+          )
+          _markScopeDirty(m)
         }
       } finally {
         this._isReplayingHistory = false
@@ -7694,23 +7742,14 @@ export class Draw {
         // 前一条已经应用之后的坐标系。
         for (let i = mutations.length - 1; i >= 0; i--) {
           const m = mutations[i]
-          if (m.scope === 'table' && m.tdPath) {
-            const td = _resolveTableTd(m.tdPath)
-            if (td) {
-              td.value.splice(
-                m.start,
-                m.inserted.length,
-                ...getSlimCloneElementList(m.removed)
-              )
-              td._dirty = true
-            }
-          } else {
-            this.elementList.splice(
-              m.start,
-              m.inserted.length,
-              ...getSlimCloneElementList(m.removed)
-            )
-          }
+          const list = _resolveListForMutation(m)
+          if (!list) continue
+          list.splice(
+            m.start,
+            m.inserted.length,
+            ...getSlimCloneElementList(m.removed)
+          )
+          _markScopeDirty(m)
         }
       } finally {
         this._isReplayingHistory = false
@@ -7741,6 +7780,12 @@ export class Draw {
     let lo = Number.POSITIVE_INFINITY
     let hi = -1
     for (const m of mutations) {
+      // header/footer mutations don't dirty the main elementList — their
+      // own _headerDirty / _footerDirty flags drive the per-frame
+      // recompute. Inflating the main dirty range here would force a
+      // full main computeRowList on every header/footer delta replay
+      // (the very cost we're trying to eliminate).
+      if (m.scope === 'header' || m.scope === 'footer') continue
       // table-scope mutations: dirty the TABLE element's index
       if (m.scope === 'table' && m.tdPath) {
         const elIdx = m.tdPath.elementIdx
@@ -7776,6 +7821,19 @@ export class Draw {
     const pageNo = this.pageNo
     const oldPositionContext = deepClone(positionContext)
     const zone = this.zone.getZone()
+    // PERF: detect whether the snapshot we're saving represents a main-body
+    // change at all. Header/footer-only edits (typing in the header zone,
+    // toggling header variant) push their mutations with scope='header' /
+    // scope='footer', leaving `_pendingHistoryMutations` empty of `main`
+    // entries. In that case the main `elementList` deep-clone restores to
+    // an identical document, and the historical `markDirty(0, len)` below
+    // would force a full computeRowList (≈700ms on a 36-page doc) for no
+    // visible benefit. When NO main mutation is in the pending set, skip
+    // the markDirty — header/footer recompute is handled by the zone-gated
+    // path in `render()` (`activeZone === HEADER` triggers `header.compute()`).
+    const mainChanged = this._pendingHistoryMutations.some(
+      m => m.scope === 'main'
+    )
     this.historyManager.execute(() => {
       this._isReplayingHistory = true
       try {
@@ -7786,10 +7844,20 @@ export class Draw {
         this.footer.setElementList(deepClone(oldFooterElementList))
         this.elementList = deepClone(oldElementList)
         this.range.replaceRange(deepClone(oldRange))
-        // 整个文档被快照全量替换——标脏全文以启用增量布局。
-        // _tryBuildResumeFrom 在 dirtyRowIndex===0 时构造空前缀 + 初始
-        // checkpoint 并从元素 0 恢复重排（PERF-PLAN §2.8）。
-        this.markDirty(0, this.elementList.length)
+        if (mainChanged) {
+          // 整个文档被快照全量替换——标脏全文以启用增量布局。
+          // _tryBuildResumeFrom 在 dirtyRowIndex===0 时构造空前缀 + 初始
+          // checkpoint 并从元素 0 恢复重排（PERF-PLAN §2.8）。
+          this.markDirty(0, this.elementList.length)
+        } else {
+          // Header/footer-only restore: invalidate the appropriate frame's
+          // layout cache so render() recomputes it, but leave the main row
+          // checkpoints intact so the next render keeps the incremental
+          // path. activeZone === HEADER / FOOTER in render() then triggers
+          // header.compute() / footer.compute() to rebuild the right frame.
+          this._headerDirty = true
+          this._footerDirty = true
+        }
       } finally {
         this._isReplayingHistory = false
       }

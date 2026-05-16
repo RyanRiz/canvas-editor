@@ -61,6 +61,10 @@ export class Footer {
     this.elementList = elementList
     this.variantStorage[this.activeVariant] = elementList
     this.cachedVariantLayouts.delete(this.activeVariant)
+    // Replacing the elementList reference invalidates any in-flight delta
+    // history mutations captured against the OLD reference. Force the next
+    // submitHistory to snapshot so the change is recorded correctly.
+    this.draw.markDeltaHistoryUnsafe()
   }
 
   public getElementList(): IElement[] {
@@ -86,10 +90,15 @@ export class Footer {
       this.elementList = list
     }
     this.cachedVariantLayouts.delete(variant)
+    this.draw.markDeltaHistoryUnsafe()
   }
 
   public setActiveVariant(variant: ChromeVariant) {
     if (variant === this.activeVariant) return
+    // Variant switch swaps `this.elementList` to a different array — any
+    // pending delta mutations captured against the previous variant's
+    // reference are no longer valid. Force snapshot for this submit.
+    this.draw.markDeltaHistoryUnsafe()
     this.variantStorage[this.activeVariant] = this.elementList
     this.activeVariant = variant
     const next = this.variantStorage[variant]
