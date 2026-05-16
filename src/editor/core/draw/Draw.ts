@@ -5473,6 +5473,7 @@ export class Draw {
       height,
       scale,
       pageMode,
+      activeZone: this.zone.getZone(),
       alpha: !this.zone.isMainActive() ? inactiveAlpha : 1,
       isPrintMode: this.mode === EditorMode.PRINT,
       printBackgroundDisabled:
@@ -5612,6 +5613,32 @@ export class Draw {
       }
     }
     this._blitPageChrome(ctx, pageNo)
+    if (
+      !isPrintMode &&
+      this.getIsPagingMode() &&
+      !this.zone.isMainActive()
+    ) {
+      const prevCtxAlpha = ctx.globalAlpha
+      const prevDecoAlpha = decoCtx?.globalAlpha
+      ctx.globalAlpha = 1
+      if (decoCtx && decoCtx !== ctx) {
+        decoCtx.globalAlpha = 1
+      }
+      if (this.zone.isHeaderActive() && !this.options.header.disabled) {
+        this.header.render(ctx, pageNo)
+      }
+      if (this.zone.isFooterActive() && !this.options.footer.disabled) {
+        this.footer.render(ctx, pageNo)
+      }
+      ctx.globalAlpha = prevCtxAlpha
+      if (
+        decoCtx &&
+        decoCtx !== ctx &&
+        typeof prevDecoAlpha === 'number'
+      ) {
+        decoCtx.globalAlpha = prevDecoAlpha
+      }
+    }
     // 绘制区域
     if (!isPrintMode) {
       this.area.render(ctx, pageNo)
