@@ -6621,6 +6621,28 @@ export class Draw {
       // area.compute() —— 这些都依赖主元素，主元素未改时它们的结果是稳定的。
       const activeZone = this.zone.getZone()
       const isMainZone = activeZone === EditorZone.MAIN
+      // Auto-dirty from positionContext / curIndex BEFORE the mainNeedsCompute
+      // gate. Image / block resizes mutate element.width|height in place and
+      // call render({curIndex}); the dimensions alone do not affect the layout
+      // signature, so without marking the element dirty here mainNeedsCompute
+      // is false and the row layout never recomputes — leaving the surrounding
+      // text frozen at the old box height. (Originally this block lived inside
+      // the `else if (mainNeedsCompute)` branch below where it was a no-op for
+      // exactly the case it was meant to help.)
+      if (!this._dirtyRange && isMainZone && !isTextInput) {
+        const ctx = this.position.getPositionContext()
+        if (ctx.isTable && ctx.index !== undefined) {
+          this.markDirty(ctx.index, ctx.index)
+        } else if (curIndex !== undefined) {
+          const el = this.elementList[curIndex]
+          if (
+            el &&
+            (el.type === ElementType.IMAGE || el.type === ElementType.BLOCK)
+          ) {
+            this.markDirty(curIndex, curIndex)
+          }
+        }
+      }
       // _skipMainRowCompute 由 setPageScale 在已就地缩放 rowList 后设置——此时
       // 即便用户在 HEADER/FOOTER 区也必须刷新主体的 pageRowList / positionList，
       // 否则光标位置会停留在旧 scale 下、与已缩放的 rowList 出现 ½× 错位。
@@ -6715,24 +6737,9 @@ export class Draw {
           this._mainSurroundCount === 0
             ? []
             : pickSurroundElementList(this.elementList)
-        // PERF-PLAN §2.6：表格操作/图像缩放/块缩放直接更改元素属性后调用
-        // render()，不经过 spliceElementList 故 _dirtyRange 保持为 null。
-        // 利用位置上下文或 curIndex 自动标脏，使 _tryBuildResumeFrom 能够
-        // 启用增量布局，避免回退到 full computeRowList。
-        if (!this._dirtyRange && isMainZone && !isTextInput) {
-          const ctx = this.position.getPositionContext()
-          if (ctx.isTable && ctx.index !== undefined) {
-            this.markDirty(ctx.index, ctx.index)
-          } else if (curIndex !== undefined) {
-            const el = this.elementList[curIndex]
-            if (
-              el &&
-              (el.type === ElementType.IMAGE || el.type === ElementType.BLOCK)
-            ) {
-              this.markDirty(curIndex, curIndex)
-            }
-          }
-        }
+        // Auto-dirty for in-place element mutations (table ops / image resize /
+        // block resize) is hoisted above the mainNeedsCompute gate now — see
+        // the corresponding block earlier in this method.
         // PERF-PLAN §2.2 / Phase 2B：在「上一帧 row checkpoint 仍然有效 + 已有 dirty
         // 区间提示 + 布局签名未变」时尝试启用增量布局。
         // dirty 在首行时 prefix 为空，但仍可通过 convergence 复用尾部旧行。
