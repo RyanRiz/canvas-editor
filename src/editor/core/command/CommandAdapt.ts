@@ -1293,7 +1293,11 @@ export class CommandAdapt {
     const selectedStart =
       startIndex === endIndex
         ? clampIndex(endIndex)
-        : clampIndex(elementList[startIndex]?.value === ZERO ? startIndex : startIndex + 1)
+        : clampIndex(
+            elementList[startIndex]?.value === ZERO
+              ? startIndex
+              : startIndex + 1
+          )
     const selectedEnd = clampIndex(endIndex)
 
     let paragraphStart = selectedStart
@@ -1466,7 +1470,9 @@ export class CommandAdapt {
 
     const paragraphStarts = new Set<number>()
     for (let i = 0; i < elementList.length; i++) {
-      const ext = elementList[i].extension as { wordStyle?: unknown } | undefined
+      const ext = elementList[i].extension as
+        | { wordStyle?: unknown }
+        | undefined
       if (!ext || typeof ext !== 'object' || ext.wordStyle !== styleId) {
         continue
       }
@@ -1481,12 +1487,16 @@ export class CommandAdapt {
       indexes.add(start)
       if (
         elementList[start]?.value === ZERO &&
-        (start + 1 >= elementList.length || elementList[start + 1]?.value === ZERO)
+        (start + 1 >= elementList.length ||
+          elementList[start + 1]?.value === ZERO)
       ) {
         continue
       }
       let end = start
-      while (end + 1 < elementList.length && elementList[end + 1]?.value !== ZERO) {
+      while (
+        end + 1 < elementList.length &&
+        elementList[end + 1]?.value !== ZERO
+      ) {
         end++
       }
       for (let i = start; i <= end; i++) indexes.add(i)
@@ -1794,7 +1804,8 @@ export class CommandAdapt {
     }
     const applyBackward = () => {
       for (const item of oldValues) {
-        if (item.rightIndent !== undefined) item.el.rightIndent = item.rightIndent
+        if (item.rightIndent !== undefined)
+          item.el.rightIndent = item.rightIndent
         else delete item.el.rightIndent
       }
     }
@@ -2690,13 +2701,28 @@ export class CommandAdapt {
     const activeControl = this.control.getActiveControl()
     if (activeControl) return
     const type = payload?.type ?? SectionBreakType.NEXT_PAGE
-    this.insertElementList([
+    // MS Word behavior: inserting a NEXT_PAGE / EVEN_PAGE / ODD_PAGE break
+    // lands the cursor on the new section's first paragraph. The break is
+    // a single WRAP element, so `insertElementList` would otherwise put
+    // the cursor at the existing element AFTER the break — typically the
+    // ZERO terminator of the same paragraph the user was in, which the
+    // pagination keeps on the OLD page (its rowList is bracketed by the
+    // break sentinel above and the next content below). Append our own
+    // ZERO terminator so the trailing section starts with a fresh empty
+    // paragraph, and `insertElementList` positions the caret there — on
+    // the new page. CONTINUOUS breaks stay on the same page so they don't
+    // need the extra paragraph.
+    const elements: IElement[] = [
       {
         type: ElementType.SECTION_BREAK,
         value: WRAP,
         sectionBreakType: type
       }
-    ])
+    ]
+    if (type !== SectionBreakType.CONTINUOUS) {
+      elements.push({ value: ZERO })
+    }
+    this.insertElementList(elements)
   }
 
   public columnLayout(payload: { columnCount?: number; columnGap?: number }) {
