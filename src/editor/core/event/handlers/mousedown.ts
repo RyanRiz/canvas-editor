@@ -12,7 +12,6 @@ import { RadioControl } from '../../draw/control/radio/RadioControl'
 import { CanvasEvent } from '../CanvasEvent'
 import { IElement } from '../../../interface/Element'
 import { Draw } from '../../draw/Draw'
-import { activateZoneByDblClick } from './click'
 
 export function setRangeCache(host: CanvasEvent) {
   const draw = host.getDraw()
@@ -101,23 +100,7 @@ export function mousedown(evt: MouseEvent, host: CanvasEvent) {
     x: evt.offsetX,
     y: evt.offsetY
   })
-  if (!positionResult) {
-    // Blank header/footer/main zone hits return index = -1, so the original
-    // flow waited for the browser's later `dblclick` event to switch zones.
-    // Some host integrations can interfere with that event sequence. Treat
-    // the second mousedown as a fallback trigger so double-click-to-edit
-    // header/footer remains reliable.
-    if (evt.detail >= 2) {
-      const zonePosition = position.getPositionByXY({
-        x: evt.offsetX,
-        y: evt.offsetY
-      })
-      if (activateZoneByDblClick(host, zonePosition)) {
-        return
-      }
-    }
-    return
-  }
+  if (!positionResult) return
   const {
     index,
     isDirectHit,

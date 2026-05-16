@@ -4,7 +4,6 @@ import { NUMBER_LIKE_REG } from '../../../dataset/constant/Regular'
 import { EditorZone } from '../../../dataset/enum/Editor'
 import { ElementType } from '../../../dataset/enum/Element'
 import { IRange } from '../../../interface/Range'
-import { ICurrentPosition } from '../../../interface/Position'
 import { CanvasEvent } from '../CanvasEvent'
 
 // 通过分词器获取单词所在选区
@@ -106,53 +105,6 @@ export function getWordRangeByCursor(host: CanvasEvent): IRange | null {
   }
 }
 
-export function activateZoneByDblClick(
-  host: CanvasEvent,
-  positionContext: ICurrentPosition
-): boolean {
-  const draw = host.getDraw()
-  if (!draw.getIsPagingMode()) return false
-  if (~positionContext.index || !positionContext.zone) return false
-
-  // Sync active header/footer variant to the clicked page so the user edits
-  // the variant that's actually displayed there (first/even/default).
-  const pageNo = draw.getPageNo()
-  let variantSwitched = false
-  if (positionContext.zone === EditorZone.HEADER) {
-    const header = draw.getHeader()
-    const variant = header.resolveVariantForPage(pageNo)
-    if (variant !== header.getActiveVariant()) {
-      header.setActiveVariant(variant)
-      variantSwitched = true
-    }
-  } else if (positionContext.zone === EditorZone.FOOTER) {
-    const footer = draw.getFooter()
-    const variant = footer.resolveVariantForPage(pageNo)
-    if (variant !== footer.getActiveVariant()) {
-      footer.setActiveVariant(variant)
-      variantSwitched = true
-    }
-  }
-  draw.getZone().setZone(positionContext.zone)
-  draw.clearSideEffect()
-  draw.getPosition().setPositionContext({
-    isTable: false
-  })
-  // After variant swap the previous range is invalid for the swapped
-  // elementList; reset to a valid index so typing works without an extra
-  // click. Compute must run so the swapped variant's positionList is
-  // populated before setCursor reads from it.
-  if (variantSwitched) {
-    const range = draw.getRange()
-    range.setRange(0, 0)
-    draw.render({
-      curIndex: 0,
-      isSubmitHistory: false
-    })
-  }
-  return true
-}
-
 function dblclick(host: CanvasEvent, evt: MouseEvent) {
   const draw = host.getDraw()
   const position = draw.getPosition()
@@ -177,8 +129,46 @@ function dblclick(host: CanvasEvent, evt: MouseEvent) {
     return
   }
   // 切换区域
-  if (activateZoneByDblClick(host, positionContext)) {
-    return
+  if (draw.getIsPagingMode()) {
+    if (!~positionContext.index && positionContext.zone) {
+      // Sync active header/footer variant to the clicked page so the user
+      // edits the variant that's actually displayed there (first/even/default).
+      const pageNo = draw.getPageNo()
+      let variantSwitched = false
+      if (positionContext.zone === EditorZone.HEADER) {
+        const header = draw.getHeader()
+        const variant = header.resolveVariantForPage(pageNo)
+        if (variant !== header.getActiveVariant()) {
+          header.setActiveVariant(variant)
+          variantSwitched = true
+        }
+      } else if (positionContext.zone === EditorZone.FOOTER) {
+        const footer = draw.getFooter()
+        const variant = footer.resolveVariantForPage(pageNo)
+        if (variant !== footer.getActiveVariant()) {
+          footer.setActiveVariant(variant)
+          variantSwitched = true
+        }
+      }
+      draw.getZone().setZone(positionContext.zone)
+      draw.clearSideEffect()
+      position.setPositionContext({
+        isTable: false
+      })
+      // After variant swap the previous range is invalid for the swapped
+      // elementList; reset to a valid index so typing works without an extra
+      // click. Compute must run so the swapped variant's positionList is
+      // populated before setCursor reads from it.
+      if (variantSwitched) {
+        const range = draw.getRange()
+        range.setRange(0, 0)
+        draw.render({
+          curIndex: 0,
+          isSubmitHistory: false
+        })
+      }
+      return
+    }
   }
   // 复选/单选框双击时是切换选择状态，禁用扩选
   if (
