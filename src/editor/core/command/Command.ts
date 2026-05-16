@@ -33,6 +33,8 @@ export class Command {
   public executeHighlight: CommandAdapt['highlight']
   public executeSetElementExtension: CommandAdapt['setElementExtension']
   public executeTitle: CommandAdapt['title']
+  public executeWordStyle: CommandAdapt['wordStyle']
+  public executeUpdateWordStyle: CommandAdapt['updateWordStyle']
   public executeList: CommandAdapt['list']
   public executeRowFlex: CommandAdapt['rowFlex']
   public executeRowMargin: CommandAdapt['rowMargin']
@@ -223,6 +225,8 @@ export class Command {
     this.executeSetElementExtension = adapt.setElementExtension.bind(adapt)
     // 标题、对齐方式、列表
     this.executeTitle = adapt.title.bind(adapt)
+    this.executeWordStyle = adapt.wordStyle.bind(adapt)
+    this.executeUpdateWordStyle = adapt.updateWordStyle.bind(adapt)
     this.executeList = adapt.list.bind(adapt)
     this.executeRowFlex = adapt.rowFlex.bind(adapt)
     this.executeRowMargin = adapt.rowMargin.bind(adapt)

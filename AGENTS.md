@@ -20,6 +20,7 @@ npm run build                  # Build application
 
 # Code Quality
 npm run lint                   # Run ESLint
+npm run type:check:fast        # Fast native TypeScript checking via tsgo
 npm run type:check            # TypeScript type checking
 
 # Testing
@@ -30,6 +31,11 @@ npm run cypress:run           # Run Cypress tests headless
 ### Pre-commit Hooks
 - Automatically runs `npm run lint && npm run type:check` before commits
 - Commit messages must follow conventional commit format (feat:, fix:, docs:, etc.)
+
+### Type Checking Guidance
+- Prefer `npm run type:check:fast` for quick local validation because it uses `tsgo` from `@typescript/native-preview`.
+- Use `npm run type:check` before relying on results for build parity, because the repository still treats standard `tsc` as the compatibility baseline.
+- Do not replace existing `tsc`-based build or hook flows unless the task explicitly includes migrating the toolchain.
 
 ## Code Style Guidelines
 

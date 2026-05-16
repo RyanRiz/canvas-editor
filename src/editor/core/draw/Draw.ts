@@ -4413,7 +4413,8 @@ export class Draw {
       // Also find the ZERO element to access paragraph-level properties
       // (firstLineIndent lives on the ZERO like indent).
       const zeroEl = curRow.elementList.find(el => el.value === ZERO)
-      if (repEl?.indent) {
+      const paragraphEl = repEl || zeroEl
+      if (paragraphEl?.indent) {
         // Always compute from a fresh base to avoid double-counting when
         // incremental layout convergence reuses old row objects that already
         // had curRow.offsetX set by a previous post-processing pass.
@@ -4423,12 +4424,12 @@ export class Draw {
               curRow.elementList.find(e => e.listId)?.listId ?? ''
             ) || 0
           : 0
-        curRow.offsetX = listBase + repEl.indent * defaultTabWidth * scale
+        curRow.offsetX = listBase + paragraphEl.indent * defaultTabWidth * scale
         // Apply firstLineIndent to the first row of each paragraph
         // (the row containing a ZERO delimiter). For normal indent this
         // adds; for hanging indent (negative firstLineIndent) it subtracts,
         // giving the first line a different offset than subsequent lines.
-        const firstLineEl = zeroEl || repEl
+        const firstLineEl = zeroEl || paragraphEl
         if (zeroEl && (firstLineEl.firstLineIndent || 0) !== 0) {
           curRow.offsetX +=
             (firstLineEl.firstLineIndent || 0) * defaultTabWidth * scale
@@ -4437,8 +4438,8 @@ export class Draw {
       // Right indent: same fresh-base recompute so incremental layout reuse
       // doesn't compound the value across frames. Right offset is independent
       // of the list bullet base (lists don't take right-side gutter space).
-      curRow.rightOffsetX = repEl?.rightIndent
-        ? repEl.rightIndent * defaultTabWidth * scale
+      curRow.rightOffsetX = paragraphEl?.rightIndent
+        ? paragraphEl.rightIndent * defaultTabWidth * scale
         : 0
     }
     // 段前段后间距
@@ -4472,12 +4473,13 @@ export class Draw {
       const hasTextContent = curRow.elementList.some(
         el => el.value !== ZERO && el.value !== WRAP
       )
-      if (!hasTextContent) continue
-      const isFirstOfParagraph =
+      const isEmptyParagraphRow =
+        !hasTextContent && curRow.elementList.some(el => el.value === ZERO)
+      const isFirstOfParagraph = isEmptyParagraphRow ||
         !prevRow ||
         elementList[prevRow.startIndex + prevRow.elementList.length]?.value ===
           ZERO
-      const isLastOfParagraph =
+      const isLastOfParagraph = isEmptyParagraphRow ||
         !nextRow ||
         elementList[curRow.startIndex + curRow.elementList.length]?.value ===
           ZERO
