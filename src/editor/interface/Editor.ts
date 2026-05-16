@@ -144,6 +144,13 @@ export interface IEditorOption {
   pagePaintStrategy?: 'full' | 'visible-sync-lazy'
   // visible-sync-lazy 模式下，可见页两侧额外同步重绘的页数。
   pagePaintOverscan?: number
+  /**
+   * Enable markdown-style autoshortcuts in the editor. Currently only headings
+   * via `#` … `######` followed by a space at the start of a paragraph. The
+   * shortcut deletes the typed `#`s + space and applies the corresponding
+   * heading level. Undo reverts the transformation. Default: false.
+   */
+  markdownShortcut?: boolean
 }
 
 export interface IEditorResult {

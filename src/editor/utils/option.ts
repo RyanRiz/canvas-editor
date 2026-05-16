@@ -257,6 +257,7 @@ export function mergeOption(
     pageOuterSelectionDisable: false,
     pagePaintStrategy: 'visible-sync-lazy',
     pagePaintOverscan: 1,
+    markdownShortcut: false,
     ...options,
     plainTextPasteStyle: options.plainTextPasteStyle || (() => undefined),
     table: tableOptions,
