@@ -256,6 +256,20 @@ export class Draw {
   private _paintPlanFirstShiftedPage: number | null
   // 已绘制（且未被标脏）的 page 索引集合：lazy 渲染时这些页不再重复绘制
   private _drawnPages: Set<number>
+  // Per-section orientation MVP. When set, every call that asks "what is the
+  // current paper direction?" (via `getPaperDirection()`) returns this override
+  // instead of `options.paperDirection`. Callers must set it before entering a
+  // per-page paint pass / per-section row computation and clear it after. The
+  // override lives on the instance (not a stack) because canvas-editor's paint
+  // and layout passes are non-reentrant. See `pageDirectionList` for the
+  // resolved per-page values and `setPaperDirection` for where overrides are
+  // stamped (on a SECTION_BREAK element rather than `options`).
+  private _paintDirectionOverride: PaperDirection | null = null
+  // Parallel to `pageList`: the resolved orientation for each page. Populated
+  // at the end of `_computePageList` by walking the first element of each page
+  // through `getPaperDirectionAtIndex`. Read by `_resizePageBacking` callers
+  // and the per-page paint loop to size and orient each page independently.
+  private pageDirectionList: PaperDirection[] = []
   // PERF-PLAN §2.2 / Phase 2B：主元素列表 computeRowList 的行边界 checkpoint。
   // 与 this.rowList 平行索引——_mainRowCheckpoints[R] 描述「即将进入行 R 的第一个
   // 元素的迭代」时的循环局部状态。仅当主体进行 full / 增量布局后才有值；
@@ -706,14 +720,59 @@ export class Draw {
     return this.mode === EditorMode.GRAFFITI
   }
 
+  /**
+   * Resolved paper direction for the current context. Consults
+   * `_paintDirectionOverride` (set by the per-page paint pass / per-section
+   * row compute pass) and falls back to the document-wide
+   * `options.paperDirection`. All direction-sensitive getters
+   * (`getOriginalWidth/Height/Margins`) route through this.
+   */
+  public getPaperDirection(): PaperDirection {
+    return this._paintDirectionOverride ?? this.options.paperDirection
+  }
+
+  /**
+   * Direction stored for a specific page (resolved at the end of
+   * `_computePageList`). External per-page paint surfaces (the Ruler, custom
+   * overlays, etc.) call this when they need to render at a specific page's
+   * dimensions even though the cursor is elsewhere.
+   *
+   * Out-of-range / unset entries fall back to the document-wide direction so
+   * callers never get `undefined`.
+   */
+  public getPageDirection(pageNo: number): PaperDirection {
+    return this.pageDirectionList[pageNo] ?? this.options.paperDirection
+  }
+
+  /**
+   * Public escape hatch for per-frame surfaces (Ruler) that need to wrap a
+   * paint pass in a specific page's direction context. Pair with
+   * `getPaintDirectionOverride` for save/restore:
+   *
+   *   const prev = draw.getPaintDirectionOverride()
+   *   draw.setPaintDirectionOverride(direction)
+   *   try { ... } finally { draw.setPaintDirectionOverride(prev) }
+   *
+   * Pass `null` to clear. Direction-sensitive getters return the override
+   * value while it's set.
+   */
+  public setPaintDirectionOverride(direction: PaperDirection | null): void {
+    this._paintDirectionOverride = direction
+  }
+
+  /** Companion getter for `setPaintDirectionOverride` save/restore. */
+  public getPaintDirectionOverride(): PaperDirection | null {
+    return this._paintDirectionOverride
+  }
+
   public getOriginalWidth(): number {
-    const { paperDirection, width, height } = this.options
-    return paperDirection === PaperDirection.VERTICAL ? width : height
+    const { width, height } = this.options
+    return this.getPaperDirection() === PaperDirection.VERTICAL ? width : height
   }
 
   public getOriginalHeight(): number {
-    const { paperDirection, width, height } = this.options
-    return paperDirection === PaperDirection.VERTICAL ? height : width
+    const { width, height } = this.options
+    return this.getPaperDirection() === PaperDirection.VERTICAL ? height : width
   }
 
   public getWidth(): number {
@@ -820,6 +879,45 @@ export class Draw {
     return pageColumns
   }
 
+  /**
+   * Forward-walking lookup for the active paper direction at a given element
+   * index. Mirrors `getPageColumnsAtIndex`: walks the element list from 0 to
+   * `index` and picks up the most recent `paperDirection` override. Typically
+   * the carrier is a SECTION_BREAK element (MS Word stamps section properties
+   * on the section-break paragraph mark), but the lookup is element-agnostic
+   * so any element can carry an override.
+   *
+   * Returns the document-wide `options.paperDirection` when no override has
+   * been seen up to `index` — that's the "base" direction for the leading
+   * section (everything before the first override).
+   */
+  public getPaperDirectionAtIndex(index: number): PaperDirection {
+    let direction = this.options.paperDirection
+    const maxIndex = Math.min(index, this.elementList.length - 1)
+    if (maxIndex < 0) return direction
+    for (let i = 0; i <= maxIndex; i++) {
+      const next = this.elementList[i].paperDirection
+      if (next) direction = next
+    }
+    return direction
+  }
+
+  /**
+   * Index in `elementList` of the most recent SECTION_BREAK element carrying
+   * a `paperDirection` override. Used by the per-section orientation MVP to
+   * locate the "trailing section" boundary (everything from this index onward
+   * uses the trailing direction). Returns -1 when no override exists.
+   */
+  public getTrailingDirectionBreakIndex(): number {
+    for (let i = this.elementList.length - 1; i >= 0; i--) {
+      const el = this.elementList[i]
+      if (el.type === ElementType.SECTION_BREAK && el.paperDirection) {
+        return i
+      }
+    }
+    return -1
+  }
+
   public getColumnCount(pageColumns?: IPageColumns | null): number {
     const count = this.normalizePageColumns(pageColumns).columnCount
     return count > 1 ? Math.floor(count) : 1
@@ -903,8 +1001,8 @@ export class Draw {
   }
 
   public getOriginalMargins(): number[] {
-    const { margins, paperDirection } = this.options
-    return paperDirection === PaperDirection.VERTICAL
+    const { margins } = this.options
+    return this.getPaperDirection() === PaperDirection.VERTICAL
       ? margins
       : [margins[1], margins[2], margins[3], margins[0]]
   }
@@ -3381,7 +3479,28 @@ export class Draw {
         }
       }
     }
+    // Per-section orientation MVP: track the direction active for each
+    // iteration so any direction-sensitive getter (notably
+    // `getColumnInnerWidth` for the new row's `innerWidth`) returns the
+    // value matching the section the current element belongs to. The
+    // override is reset at the top of every iteration and cleared after
+    // the loop so it never leaks into the post-process loops or callers.
+    const prevComputeDirectionOverride = this._paintDirectionOverride
+    let activeComputeDirection: PaperDirection =
+      i > 0 ? this.getPaperDirectionAtIndex(i - 1) : this.options.paperDirection
+    this._paintDirectionOverride = activeComputeDirection
     for (; i < elementList.length; i++) {
+      // Per-section orientation MVP: when an element carries a
+      // `paperDirection` override (typically a SECTION_BREAK that opens a
+      // new section), switch the active direction starting at this
+      // element. Subsequent calls to `getColumnInnerWidth` etc. within
+      // this iteration return the trailing section's values so the new
+      // row created below has the correct `innerWidth` for that section.
+      const elementOverride = elementList[i].paperDirection
+      if (elementOverride && elementOverride !== activeComputeDirection) {
+        activeComputeDirection = elementOverride
+      }
+      this._paintDirectionOverride = activeComputeDirection
       // PERF chunked-rAF: bail out at iteration top when we've reached the
       // caller's chunk boundary. State right here is "before processing
       // element i" — exactly what a follow-up resumeFrom call needs as
@@ -4406,6 +4525,11 @@ export class Draw {
         }
       }
     }
+    // Per-section orientation MVP: restore the override the caller had set
+    // (typically null, or a value placed by `_drawPageWithContexts` if the
+    // caller was a paint pass — paint and layout shouldn't normally overlap
+    // but save/restore is the safe pattern).
+    this._paintDirectionOverride = prevComputeDirectionOverride
     // 段落缩进
     for (let r = 0; r < rowList.length; r++) {
       const curRow = rowList[r]
@@ -4477,11 +4601,13 @@ export class Draw {
       )
       const isEmptyParagraphRow =
         !hasTextContent && curRow.elementList.some(el => el.value === ZERO)
-      const isFirstOfParagraph = isEmptyParagraphRow ||
+      const isFirstOfParagraph =
+        isEmptyParagraphRow ||
         !prevRow ||
         elementList[prevRow.startIndex + prevRow.elementList.length]?.value ===
           ZERO
-      const isLastOfParagraph = isEmptyParagraphRow ||
+      const isLastOfParagraph =
+        isEmptyParagraphRow ||
         !nextRow ||
         elementList[curRow.startIndex + curRow.elementList.length]?.value ===
           ZERO
@@ -4668,13 +4794,35 @@ export class Draw {
       pageMode,
       pageNumber: { maxPageNo }
     } = this.options
-    const height = this.getHeight()
-    const margins = this.getMargins()
-    const headerExtraHeight = this.header.getExtraHeight()
-    const marginHeight = this.getMainOuterHeight()
-    const contentStartY = margins[0] + headerExtraHeight
-    const trailingOuterHeight = marginHeight - contentStartY
-    const contentBottomY = height - trailingOuterHeight
+    // Per-section orientation MVP. These metrics depend on the active paper
+    // direction. They start at the document's base direction and get
+    // re-derived inside `advanceForSectionBreak` when crossing a section
+    // break whose element carries a `paperDirection` override — that's how
+    // the trailing landscape section gets its own taller page height etc.
+    // without affecting earlier portrait pages.
+    let activeDirection = this.options.paperDirection
+    let height = this.getHeight()
+    let margins = this.getMargins()
+    let headerExtraHeight = this.header.getExtraHeight()
+    let marginHeight = this.getMainOuterHeight()
+    let contentStartY = margins[0] + headerExtraHeight
+    let trailingOuterHeight = marginHeight - contentStartY
+    let contentBottomY = height - trailingOuterHeight
+    const recomputeMetrics = () => {
+      const prev = this._paintDirectionOverride
+      this._paintDirectionOverride = activeDirection
+      try {
+        height = this.getHeight()
+        margins = this.getMargins()
+        headerExtraHeight = this.header.getExtraHeight()
+        marginHeight = this.getMainOuterHeight()
+        contentStartY = margins[0] + headerExtraHeight
+        trailingOuterHeight = marginHeight - contentStartY
+        contentBottomY = height - trailingOuterHeight
+      } finally {
+        this._paintDirectionOverride = prev
+      }
+    }
     let pageNo = 0
     let pageHeight = marginHeight
     const pushRow = (row: IRow) => {
@@ -4718,6 +4866,15 @@ export class Draw {
       // CONTINUOUS does not advance pages here — it is handled below by
       // simply not triggering nextPage at all.
       // For NEXT_PAGE / EVEN_PAGE / ODD_PAGE, advance at least once.
+      // Per-section orientation: the page we're about to advance to belongs
+      // to the section starting at `cutIndex`. Look up the direction there
+      // and re-derive page metrics BEFORE `nextPage` so it resets
+      // `pageHeight` from the new section's `marginHeight`.
+      const newDirection = this.getPaperDirectionAtIndex(cutIndex)
+      if (newDirection !== activeDirection) {
+        activeDirection = newDirection
+        recomputeMetrics()
+      }
       if (!nextPage(cutIndex)) return false
       if (type === SectionBreakType.EVEN_PAGE) {
         // Even pages are pageNo 1, 3, 5… i.e. pageNo % 2 === 1.
@@ -4936,7 +5093,67 @@ export class Draw {
         pageHeight = Math.max(...columnHeightList) + trailingOuterHeight
       }
     }
+    // Stamp per-page direction so paint/sizing passes can size each page
+    // independently. The first row of each page determines the section it
+    // belongs to (and therefore the direction). Empty pages (rare — only
+    // happens with EVEN/ODD parity-insert when no content follows yet)
+    // inherit the previous page's direction; on the first page we fall back
+    // to the document-wide `options.paperDirection`.
+    this.pageDirectionList = []
+    let lastDirection = this.options.paperDirection
+    for (let pn = 0; pn < pageRowList.length; pn++) {
+      const firstRow = pageRowList[pn]?.[0]
+      if (firstRow) {
+        lastDirection = this.getPaperDirectionAtIndex(firstRow.startIndex)
+      }
+      this.pageDirectionList[pn] = lastDirection
+    }
+    // Re-sync canvas backings if any page's actual size now differs from
+    // what its direction dictates. This handles the case where pages were
+    // initially created (or last resized) at the global direction but a
+    // section break override flips the trailing pages — they need to be
+    // sized as landscape (or vice-versa) before the paint pass renders.
+    this._syncPageCanvasesToDirections()
     return pageRowList
+  }
+
+  /**
+   * Per-section orientation MVP. Walks `pageList` and resizes any page whose
+   * current canvas dimensions disagree with `pageDirectionList[pn]`. Also
+   * keeps `container.style.width` set to the WIDEST page width — necessary
+   * when a portrait + landscape mix means the landscape pages need more
+   * horizontal room than the portrait ones. Cheap when nothing changed
+   * (just compares numbers, no DOM writes).
+   */
+  private _syncPageCanvasesToDirections(): void {
+    if (this.pageDirectionList.length === 0) return
+    const dpr = this.getPagePixelRatio()
+    const baseW = this.options.width
+    const baseH = this.options.height
+    const scale = this.options.scale
+    let maxWidth = 0
+    for (let pn = 0; pn < this.pageList.length; pn++) {
+      const direction =
+        this.pageDirectionList[pn] ?? this.options.paperDirection
+      const isVertical = direction === PaperDirection.VERTICAL
+      const w = Math.floor((isVertical ? baseW : baseH) * scale)
+      const h = Math.floor((isVertical ? baseH : baseW) * scale)
+      if (w > maxWidth) maxWidth = w
+      const base = this.pageList[pn]
+      const currentW = Number(base.style.width.replace('px', ''))
+      const currentH = Number(base.style.height.replace('px', ''))
+      if (currentW !== w || currentH !== h) {
+        this._resizePageBacking(pn, w, h, dpr)
+      }
+    }
+    if (maxWidth > 0) {
+      const currentContainerWidth = Number(
+        this.container.style.width.replace('px', '')
+      )
+      if (currentContainerWidth !== maxWidth) {
+        this.container.style.width = `${maxWidth}px`
+      }
+    }
   }
 
   private _drawHighlight(
@@ -5569,114 +5786,127 @@ export class Draw {
     suppressDecorationPaint = false
   ) {
     const { elementList, positionList, rowList, pageNo } = payload
-    const { inactiveAlpha, lineNumber } = this.options
-    const isPrintMode = this.mode === EditorMode.PRINT
-    const innerWidth = this.getInnerWidth()
-    const canPartialPaint =
-      !suppressDecorationPaint &&
-      this._dirtyRange !== null &&
-      !this._isDecorationActive() &&
-      this.getIsPagingMode() &&
-      (this._paintPlanFirstShiftedPage === null ||
-        pageNo < this._paintPlanFirstShiftedPage) &&
-      !this._pageHasFloatImageOnPage(pageNo)
-    const partialInfo = canPartialPaint
-      ? this._getDirtyClipInfoForPage(rowList, positionList)
-      : null
-    const clipTop = partialInfo?.clipTop ?? 0
-    const rowListToPaint = partialInfo
-      ? rowList.slice(partialInfo.fromRowIndex)
-      : rowList
-    const w = this.getWidth()
-    const h = this.getHeight()
-    // PERF-PLAN — Strategy B：drawRow 内部 range / table-cross-row paint 时
-    // 取这个 ctx 作为目标。打印模式不需要选区——保留 null，落到 base ctx 上
-    // 保持原行为（实际打印模式下 startIndex===endIndex，不会画选区）。
-    this._suppressDecorationPaint = suppressDecorationPaint
-    this._currentDecorationCtx = !isPrintMode ? decoCtx : null
-    // 判断当前激活区域-非正文区域时元素透明度降低
-    ctx.globalAlpha = !this.zone.isMainActive() ? inactiveAlpha : 1
-    if (decoCtx && decoCtx !== ctx) decoCtx.globalAlpha = ctx.globalAlpha
-    this._clearPageContexts(pageNo, ctx, decoCtx, clipTop)
-    const needsClip = clipTop > 0 && clipTop < h
-    if (needsClip) {
-      ctx.save()
-      ctx.beginPath()
-      ctx.rect(0, clipTop, w, h - clipTop)
-      ctx.clip()
-      if (decoCtx && decoCtx !== ctx) {
-        decoCtx.save()
-        decoCtx.beginPath()
-        decoCtx.rect(0, clipTop, w, h - clipTop)
-        decoCtx.clip()
+    // Per-section orientation MVP: route every direction-sensitive getter
+    // (getWidth/getHeight/getMargins/getInnerWidth) called inside this paint
+    // pass through the page-specific direction stored in pageDirectionList.
+    // Cleared in `finally` to avoid leaking the override into unrelated code
+    // paths if paint throws partway through.
+    const prevDirectionOverride = this._paintDirectionOverride
+    if (this.pageDirectionList[pageNo]) {
+      this._paintDirectionOverride = this.pageDirectionList[pageNo]
+    }
+    try {
+      const { inactiveAlpha, lineNumber } = this.options
+      const isPrintMode = this.mode === EditorMode.PRINT
+      const innerWidth = this.getInnerWidth()
+      const canPartialPaint =
+        !suppressDecorationPaint &&
+        this._dirtyRange !== null &&
+        !this._isDecorationActive() &&
+        this.getIsPagingMode() &&
+        (this._paintPlanFirstShiftedPage === null ||
+          pageNo < this._paintPlanFirstShiftedPage) &&
+        !this._pageHasFloatImageOnPage(pageNo)
+      const partialInfo = canPartialPaint
+        ? this._getDirtyClipInfoForPage(rowList, positionList)
+        : null
+      const clipTop = partialInfo?.clipTop ?? 0
+      const rowListToPaint = partialInfo
+        ? rowList.slice(partialInfo.fromRowIndex)
+        : rowList
+      const w = this.getWidth()
+      const h = this.getHeight()
+      // PERF-PLAN — Strategy B：drawRow 内部 range / table-cross-row paint 时
+      // 取这个 ctx 作为目标。打印模式不需要选区——保留 null，落到 base ctx 上
+      // 保持原行为（实际打印模式下 startIndex===endIndex，不会画选区）。
+      this._suppressDecorationPaint = suppressDecorationPaint
+      this._currentDecorationCtx = !isPrintMode ? decoCtx : null
+      // 判断当前激活区域-非正文区域时元素透明度降低
+      ctx.globalAlpha = !this.zone.isMainActive() ? inactiveAlpha : 1
+      if (decoCtx && decoCtx !== ctx) decoCtx.globalAlpha = ctx.globalAlpha
+      this._clearPageContexts(pageNo, ctx, decoCtx, clipTop)
+      const needsClip = clipTop > 0 && clipTop < h
+      if (needsClip) {
+        ctx.save()
+        ctx.beginPath()
+        ctx.rect(0, clipTop, w, h - clipTop)
+        ctx.clip()
+        if (decoCtx && decoCtx !== ctx) {
+          decoCtx.save()
+          decoCtx.beginPath()
+          decoCtx.rect(0, clipTop, w, h - clipTop)
+          decoCtx.clip()
+        }
       }
-    }
-    this._blitPageChrome(ctx, pageNo)
-    // 绘制区域
-    if (!isPrintMode) {
-      this.area.render(ctx, pageNo)
-    }
-    // 渲染衬于文字下方元素
-    this._drawFloat(ctx, {
-      pageNo,
-      imgDisplays: [ImageDisplay.FLOAT_BOTTOM]
-    })
-    // 控件高亮
-    if (!isPrintMode) {
-      this.control.renderHighlightList(ctx, pageNo)
-    }
-    // 渲染元素
-    const index = rowListToPaint[0]?.startIndex
-    this.drawRow(ctx, {
-      elementList,
-      positionList,
-      rowList: rowListToPaint,
-      pageNo,
-      startIndex: index,
-      innerWidth,
-      zone: EditorZone.MAIN
-    })
-    // 渲染浮于文字上方元素
-    this._drawFloat(ctx, {
-      pageNo,
-      imgDisplays: [ImageDisplay.FLOAT_TOP, ImageDisplay.SURROUND]
-    })
-    // 搜索匹配绘制——PERF-PLAN — Strategy B：装饰层。打印模式没有搜索高亮，
-    // 走原 ctx 是 no-op；其它情况落到 decoration canvas 上，便于 search-next
-    // 触发的快路径重绘只擦除 decoration、不动 base 文字。
-    if (
-      !this._suppressDecorationPaint &&
-      !isPrintMode &&
-      this.search.getSearchKeyword()
-    ) {
-      this.search.render(this._currentDecorationCtx ?? ctx, pageNo)
-    }
-    // 绘制空白占位符
-    if (this.elementList.length <= 1 && !this.elementList[0]?.listId) {
-      this.placeholder.render(ctx)
-    }
-    // 渲染行数
-    if (!lineNumber.disabled) {
-      this.lineNumber.render(ctx, pageNo)
-    }
-    // 绘制签章
-    this.badge.render(ctx, pageNo)
-    // 绘制涂鸦
-    if (this.isGraffitiMode()) {
-      this.graffiti.render(ctx, pageNo)
-    }
-    // PERF-PLAN — Strategy B：完成本页后 decoration 视为最新；后续若仅
-    // selection / search 改动则可走快路径只重绘装饰层。
-    // B-γ：用 _decorationVersion 而非常量打 tag——下次 decoration-only render
-    // 命中后即可跳过重绘（同 (range, search) 状态多次重入时直接复用）。
-    this._decorationDrawnPages.set(pageNo, this._decorationVersion)
-    this._currentDecorationCtx = null
-    this._suppressDecorationPaint = false
-    if (needsClip) {
-      if (decoCtx && decoCtx !== ctx) {
-        decoCtx.restore()
+      this._blitPageChrome(ctx, pageNo)
+      // 绘制区域
+      if (!isPrintMode) {
+        this.area.render(ctx, pageNo)
       }
-      ctx.restore()
+      // 渲染衬于文字下方元素
+      this._drawFloat(ctx, {
+        pageNo,
+        imgDisplays: [ImageDisplay.FLOAT_BOTTOM]
+      })
+      // 控件高亮
+      if (!isPrintMode) {
+        this.control.renderHighlightList(ctx, pageNo)
+      }
+      // 渲染元素
+      const index = rowListToPaint[0]?.startIndex
+      this.drawRow(ctx, {
+        elementList,
+        positionList,
+        rowList: rowListToPaint,
+        pageNo,
+        startIndex: index,
+        innerWidth,
+        zone: EditorZone.MAIN
+      })
+      // 渲染浮于文字上方元素
+      this._drawFloat(ctx, {
+        pageNo,
+        imgDisplays: [ImageDisplay.FLOAT_TOP, ImageDisplay.SURROUND]
+      })
+      // 搜索匹配绘制——PERF-PLAN — Strategy B：装饰层。打印模式没有搜索高亮，
+      // 走原 ctx 是 no-op；其它情况落到 decoration canvas 上，便于 search-next
+      // 触发的快路径重绘只擦除 decoration、不动 base 文字。
+      if (
+        !this._suppressDecorationPaint &&
+        !isPrintMode &&
+        this.search.getSearchKeyword()
+      ) {
+        this.search.render(this._currentDecorationCtx ?? ctx, pageNo)
+      }
+      // 绘制空白占位符
+      if (this.elementList.length <= 1 && !this.elementList[0]?.listId) {
+        this.placeholder.render(ctx)
+      }
+      // 渲染行数
+      if (!lineNumber.disabled) {
+        this.lineNumber.render(ctx, pageNo)
+      }
+      // 绘制签章
+      this.badge.render(ctx, pageNo)
+      // 绘制涂鸦
+      if (this.isGraffitiMode()) {
+        this.graffiti.render(ctx, pageNo)
+      }
+      // PERF-PLAN — Strategy B：完成本页后 decoration 视为最新；后续若仅
+      // selection / search 改动则可走快路径只重绘装饰层。
+      // B-γ：用 _decorationVersion 而非常量打 tag——下次 decoration-only render
+      // 命中后即可跳过重绘（同 (range, search) 状态多次重入时直接复用）。
+      this._decorationDrawnPages.set(pageNo, this._decorationVersion)
+      this._currentDecorationCtx = null
+      this._suppressDecorationPaint = false
+      if (needsClip) {
+        if (decoCtx && decoCtx !== ctx) {
+          decoCtx.restore()
+        }
+        ctx.restore()
+      }
+    } finally {
+      this._paintDirectionOverride = prevDirectionOverride
     }
   }
 
@@ -5693,24 +5923,32 @@ export class Draw {
     decoCtx: CanvasRenderingContext2D
   ) {
     const { pageNo, elementList, positionList, rowList } = payload
-    decoCtx.globalAlpha = !this.zone.isMainActive()
-      ? this.options.inactiveAlpha
-      : 1
-    decoCtx.clearRect(0, 0, this.getWidth(), this.getHeight())
-    if (!this._isDecorationActive()) {
-      return
+    const prevDirectionOverride = this._paintDirectionOverride
+    if (this.pageDirectionList[pageNo]) {
+      this._paintDirectionOverride = this.pageDirectionList[pageNo]
     }
-    this._walkDecorationRow(decoCtx, {
-      elementList,
-      positionList,
-      rowList,
-      pageNo,
-      startIndex: rowList[0]?.startIndex ?? 0,
-      innerWidth: this.getInnerWidth(),
-      zone: EditorZone.MAIN
-    })
-    if (this.search.getSearchKeyword()) {
-      this.search.render(decoCtx, pageNo)
+    try {
+      decoCtx.globalAlpha = !this.zone.isMainActive()
+        ? this.options.inactiveAlpha
+        : 1
+      decoCtx.clearRect(0, 0, this.getWidth(), this.getHeight())
+      if (!this._isDecorationActive()) {
+        return
+      }
+      this._walkDecorationRow(decoCtx, {
+        elementList,
+        positionList,
+        rowList,
+        pageNo,
+        startIndex: rowList[0]?.startIndex ?? 0,
+        innerWidth: this.getInnerWidth(),
+        zone: EditorZone.MAIN
+      })
+      if (this.search.getSearchKeyword()) {
+        this.search.render(decoCtx, pageNo)
+      }
+    } finally {
+      this._paintDirectionOverride = prevDirectionOverride
     }
   }
 
