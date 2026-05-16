@@ -214,10 +214,18 @@ export class TableParticle {
         ctx.translate(0.5, 0.5)
         ctx.beginPath()
         // 单元格显式边框（borderTypes 路径）
+        // Shared edges are deduplicated: TOP is skipped when the top neighbour
+        // already draws its BOTTOM; LEFT is skipped when the left neighbour
+        // already draws its RIGHT.  This prevents double-stroking on shared
+        // cell edges, which would make those lines appear visually bolder than
+        // unmodified grid lines.
         if (td.borderTypes?.includes(TdBorder.TOP)) {
-          ctx.moveTo(x - width, y)
-          ctx.lineTo(x, y)
-          ctx.stroke()
+          const topNeighbor = tdMap.get(`${td.rowIndex! - 1},${td.colIndex}`)
+          if (!topNeighbor?.borderTypes?.includes(TdBorder.BOTTOM)) {
+            ctx.moveTo(x - width, y)
+            ctx.lineTo(x, y)
+            ctx.stroke()
+          }
         }
         if (td.borderTypes?.includes(TdBorder.RIGHT)) {
           ctx.moveTo(x, y)
@@ -230,9 +238,12 @@ export class TableParticle {
           ctx.stroke()
         }
         if (td.borderTypes?.includes(TdBorder.LEFT)) {
-          ctx.moveTo(x - width, y)
-          ctx.lineTo(x - width, y + height)
-          ctx.stroke()
+          const leftNeighbor = tdMap.get(`${td.rowIndex},${td.colIndex! - 1}`)
+          if (!leftNeighbor?.borderTypes?.includes(TdBorder.RIGHT)) {
+            ctx.moveTo(x - width, y)
+            ctx.lineTo(x - width, y + height)
+            ctx.stroke()
+          }
         }
         // 表格默认网格线
         // 如果单元格有显式 borderTypes（包括空数组），则跳过网格线

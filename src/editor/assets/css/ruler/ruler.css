@@ -1,0 +1,101 @@
+/*
+ * Ruler — MS Word-style horizontal + vertical strips attached to each page.
+ *
+ * Layout strategy: the ruler DOM children sit as *absolute-positioned*
+ * children of `.ce-page-wrapper`, anchored at negative coordinates so they
+ * extend *outside* the wrapper's bounding box. The editor container gets
+ * `padding-left`/`padding-top` of one ruler width, which makes that negative
+ * space part of the container's *padding-box* — so the rulers stay clipped
+ * to the container's outer edge and `margin: 0 auto` keeps the editor
+ * centered in its parent (the demo's `.editor > div { margin: 80px auto }`).
+ *
+ * Why padding-on-the-container rather than margins / page-container-padding:
+ * the cursor DOM lives inside the editor container at `position: absolute`
+ * with page-relative coordinates. Absolute children resolve `top`/`left`
+ * against the **padding-box edge**, so adding container padding leaves the
+ * cursor aligned with the page-container (also a static child of the
+ * container, also offset by the padding). Margin / page-container padding
+ * would shift the page-container but NOT the cursor → misalignment.
+ *
+ * Cursor styles (ew-resize / col-resize / row-resize / pointer / default) are
+ * toggled in JS to match the marker / boundary / content-band under the
+ * pointer. We also fall back to `pointer` over the content band so users can
+ * see the ruler is actionable (clicking adds a tab stop).
+ */
+
+.ce-ruler-corner {
+  background: #e8e8e8;
+  border-right: 1px solid #c8c8c8;
+  border-bottom: 1px solid #c8c8c8;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ce-ruler-h,
+.ce-ruler-v {
+  background: transparent;
+  user-select: none;
+  /* Default cursor is overridden by JS on hover to indicate interactable
+     zones; this keeps the resting state from looking like dead pixels. */
+}
+
+.ce-ruler-h-canvas,
+.ce-ruler-v-canvas {
+  display: block;
+  /* Canvases inherit their strip's pixel-perfect width/height from JS. */
+}
+
+/* Word-style ruler context menu (right-click / double-click). Appended to
+   document.body so it sits in its own stacking context and is unaffected by
+   editor scroll or any transformed ancestor. */
+.ce-ruler-menu {
+  min-width: 200px;
+  padding: 4px 0;
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  color: #1f1f1f;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.16), 0 2px 6px rgba(0, 0, 0, 0.06);
+  user-select: none;
+}
+
+.ce-ruler-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 14px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ce-ruler-menu-item:hover {
+  background: #f0f3f7;
+}
+
+.ce-ruler-menu-item.disabled {
+  color: #b0b0b0;
+  cursor: default;
+}
+
+.ce-ruler-menu-item.disabled:hover {
+  background: transparent;
+}
+
+.ce-ruler-menu-glyph {
+  display: inline-block;
+  width: 16px;
+  text-align: center;
+  color: #555;
+  font-family: 'Segoe UI Symbol', 'Apple Symbols', sans-serif;
+}
+
+.ce-ruler-menu-item.disabled .ce-ruler-menu-glyph {
+  color: #c8c8c8;
+}
+
+.ce-ruler-menu-sep {
+  height: 1px;
+  margin: 4px 0;
+  background: rgba(0, 0, 0, 0.08);
+}

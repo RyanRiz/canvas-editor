@@ -48,7 +48,11 @@ export class ListParticle {
     this.options = draw.getOptions()
   }
 
-  public setList(listType: ListType | null, listStyle?: ListStyle, checklistStyle?: 'standard' | 'plain') {
+  public setList(
+    listType: ListType | null,
+    listStyle?: ListStyle,
+    checklistStyle?: 'standard' | 'plain'
+  ) {
     const isReadonly = this.draw.isReadonly()
     if (isReadonly) return
     const { startIndex, endIndex } = this.range.getRange()
@@ -73,18 +77,23 @@ export class ListParticle {
     const changeElementList = this.range.getRangeParagraphElementList()
     if (!changeElementList || !changeElementList.length) return
     // Skip toggle-off when explicitly changing checklist style variant
-    const isUnsetList = !checklistStyle && changeElementList.find(
-      el => el.listType === listType && el.listStyle === effectiveStyle
-    )
+    const isUnsetList =
+      !checklistStyle &&
+      changeElementList.find(
+        el => el.listType === listType && el.listStyle === effectiveStyle
+      )
     if (isUnsetList || !listType) {
       this.unsetList()
       return
     }
     // Detect checklist→non-checklist conversion early so the neighbour
     // expansion loop (below) can force isSelected on all paragraphs.
-    const isChecklistSource = changeElementList.some(
-      el => el.listStyle === ListStyle.CHECKBOX && el.listId
-    ) && effectiveStyle !== ListStyle.CHECKBOX && listType !== null
+    const isChecklistSource =
+      changeElementList.some(
+        el => el.listStyle === ListStyle.CHECKBOX && el.listId
+      ) &&
+      effectiveStyle !== ListStyle.CHECKBOX &&
+      listType !== null
     // Word parity: when the selected paragraph(s) already belong to a list,
     // keep the existing numbering continuous across an interrupted block
     // (e.g. OL→bullet→OL stays 1,2,3,•,4,5) even if legacy data fragmented
@@ -170,7 +179,11 @@ export class ListParticle {
     const requestedChecklistStyle = checklistStyle
     const checklistCleanup: Array<{
       zeroIndex: number
-      textIndices: Array<{ index: number; strikeout: boolean | undefined; color: string | undefined }>
+      textIndices: Array<{
+        index: number
+        strikeout: boolean | undefined
+        color: string | undefined
+      }>
     }> = []
     if (isChecklistSource) {
       const cleanupStart = seedListId ? spanStart : firstChangeIdx
@@ -178,7 +191,11 @@ export class ListParticle {
       for (let p = cleanupStart; p <= cleanupEnd && p < mainList.length; p++) {
         const el = mainList[p]
         if (el.checkbox?.value && el.listStyle === ListStyle.CHECKBOX) {
-          const textEntries: Array<{ index: number; strikeout: boolean | undefined; color: string | undefined }> = []
+          const textEntries: Array<{
+            index: number
+            strikeout: boolean | undefined
+            color: string | undefined
+          }> = []
           let t = p + 1
           while (t < mainList.length && mainList[t].value !== ZERO) {
             const tt = mainList[t].type
@@ -211,7 +228,10 @@ export class ListParticle {
             el.rowMargin = LIST_ROW_MARGIN
           }
           // Apply checklistStyle when entering checklist mode
-          if (effectiveStyle === ListStyle.CHECKBOX && requestedChecklistStyle !== undefined) {
+          if (
+            effectiveStyle === ListStyle.CHECKBOX &&
+            requestedChecklistStyle !== undefined
+          ) {
             el.checklistStyle = requestedChecklistStyle
           }
         }
@@ -389,7 +409,11 @@ export class ListParticle {
     )
     const checklistCleanup: Array<{
       zeroIndex: number
-      textIndices: Array<{ index: number; strikeout: boolean | undefined; color: string | undefined }>
+      textIndices: Array<{
+        index: number
+        strikeout: boolean | undefined
+        color: string | undefined
+      }>
     }> = []
     if (isChecklistUnset) {
       const clMainList = this.draw.getElementList()
@@ -397,7 +421,11 @@ export class ListParticle {
         if (el.checkbox?.value && el.listStyle === ListStyle.CHECKBOX) {
           const zeroIdx = clMainList.indexOf(el)
           if (zeroIdx < 0) continue
-          const textEntries: Array<{ index: number; strikeout: boolean | undefined; color: string | undefined }> = []
+          const textEntries: Array<{
+            index: number
+            strikeout: boolean | undefined
+            color: string | undefined
+          }> = []
           let t = zeroIdx + 1
           while (t < clMainList.length && clMainList[t].value !== ZERO) {
             const tt = clMainList[t].type
@@ -410,7 +438,10 @@ export class ListParticle {
             }
             t++
           }
-          checklistCleanup.push({ zeroIndex: zeroIdx, textIndices: textEntries })
+          checklistCleanup.push({
+            zeroIndex: zeroIdx,
+            textIndices: textEntries
+          })
         }
       }
     }
@@ -428,10 +459,16 @@ export class ListParticle {
     // Issue 4: clear checklist-derived styling immediately
     for (const cs of checklistCleanup) {
       const zero = elementList[cs.zeroIndex]
-      if (zero) { delete zero.checkbox; delete zero.checklistStyle }
+      if (zero) {
+        delete zero.checkbox
+        delete zero.checklistStyle
+      }
       for (const t of cs.textIndices) {
         const te = elementList[t.index]
-        if (te) { delete te.strikeout; delete te.color }
+        if (te) {
+          delete te.strikeout
+          delete te.color
+        }
       }
     }
     const isSetCursor = startIndex === endIndex
@@ -453,10 +490,16 @@ export class ListParticle {
         // Issue 4: clear checklist-derived styling
         for (const cs of checklistCleanup) {
           const zero = list[cs.zeroIndex]
-          if (zero) { delete zero.checkbox; delete zero.checklistStyle }
+          if (zero) {
+            delete zero.checkbox
+            delete zero.checklistStyle
+          }
           for (const t of cs.textIndices) {
             const te = list[t.index]
-            if (te) { delete te.strikeout; delete te.color }
+            if (te) {
+              delete te.strikeout
+              delete te.color
+            }
           }
         }
         if (needZeroInsert) {
@@ -621,9 +664,11 @@ export class ListParticle {
     // Only toggle-off when no explicit styleConfig was provided (plain toggle).
     // When styleConfig is present (dropdown pick), the user wants to change
     // the style — not toggle the list off — even if type+style happen to match.
-    const isUnsetList = !styleConfig && changeElementList.find(
-      el => el.listType === listType && el.listStyle === effectiveStyle
-    )
+    const isUnsetList =
+      !styleConfig &&
+      changeElementList.find(
+        el => el.listType === listType && el.listStyle === effectiveStyle
+      )
     if (isUnsetList || !listType) {
       this.unsetList()
       return
@@ -686,12 +731,19 @@ export class ListParticle {
     // Issue 4: when converting FROM a checklist to another list type, clear
     // checklist-derived text styling (strikethrough, muted color) and checked
     // state so the styling doesn't leak into the new non-checklist list.
-    const isChecklistSourceSetListWithStyle = changeElementList.some(
-      el => el.listStyle === ListStyle.CHECKBOX && el.listId
-    ) && effectiveStyle !== ListStyle.CHECKBOX && listType !== null
+    const isChecklistSourceSetListWithStyle =
+      changeElementList.some(
+        el => el.listStyle === ListStyle.CHECKBOX && el.listId
+      ) &&
+      effectiveStyle !== ListStyle.CHECKBOX &&
+      listType !== null
     const checklistCleanupSetListWithStyle: Array<{
       zeroIndex: number
-      textIndices: Array<{ index: number; strikeout: boolean | undefined; color: string | undefined }>
+      textIndices: Array<{
+        index: number
+        strikeout: boolean | undefined
+        color: string | undefined
+      }>
     }> = []
     if (isChecklistSourceSetListWithStyle) {
       const cleanupStart = seedListId ? spanStart : firstChangeIdx
@@ -699,7 +751,11 @@ export class ListParticle {
       for (let p = cleanupStart; p <= cleanupEnd && p < mainList.length; p++) {
         const el = mainList[p]
         if (el.checkbox?.value && el.listStyle === ListStyle.CHECKBOX) {
-          const textEntries: Array<{ index: number; strikeout: boolean | undefined; color: string | undefined }> = []
+          const textEntries: Array<{
+            index: number
+            strikeout: boolean | undefined
+            color: string | undefined
+          }> = []
           let t = p + 1
           while (t < mainList.length && mainList[t].value !== ZERO) {
             const tt = mainList[t].type
@@ -712,7 +768,10 @@ export class ListParticle {
             }
             t++
           }
-          checklistCleanupSetListWithStyle.push({ zeroIndex: p, textIndices: textEntries })
+          checklistCleanupSetListWithStyle.push({
+            zeroIndex: p,
+            textIndices: textEntries
+          })
         }
       }
     }
@@ -783,7 +842,7 @@ export class ListParticle {
             listBulletChar: el.listBulletChar,
             listNumberStyle: el.listNumberStyle
           }))
-      .filter(v => v.mainIndex >= 0)
+          .filter(v => v.mainIndex >= 0)
       : []
 
     // ---- Combined apply ----
@@ -930,6 +989,17 @@ export class ListParticle {
     ctx: CanvasRenderingContext2D,
     elementList: IElement[]
   ): IListLayoutInfo {
+    // Fast path: skip O(N) glyph/gutter scans when doc has no list elements.
+    let hasList = false
+    for (let i = 0; i < elementList.length; i++) {
+      if (elementList[i].listId) {
+        hasList = true
+        break
+      }
+    }
+    if (!hasList) {
+      return { glyphMap: new Map(), gutterByListId: new Map() }
+    }
     const glyphMap = computeListGlyphMap(elementList)
     const indicesByList = new Map<string, number[]>()
     glyphMap.forEach((_res, idx) => {
@@ -1270,10 +1340,16 @@ export class ListParticle {
       )
       const blockListId = changeElementList[0].listId
       // First pass: same listId
-      while (blockStart > 0 && mainList[blockStart - 1]?.listId === blockListId) {
+      while (
+        blockStart > 0 &&
+        mainList[blockStart - 1]?.listId === blockListId
+      ) {
         blockStart--
       }
-      while (blockEnd < mainList.length - 1 && mainList[blockEnd + 1]?.listId === blockListId) {
+      while (
+        blockEnd < mainList.length - 1 &&
+        mainList[blockEnd + 1]?.listId === blockListId
+      ) {
         blockEnd++
       }
       // Second pass: any adjacent list paragraph (any listId)

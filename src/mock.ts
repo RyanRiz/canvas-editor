@@ -546,5 +546,11 @@ export const options: IEditorOption = {
   maskMargin: [60, 0, 30, 0], // 菜单栏高度60，底部工具栏30为遮盖层
   group: {
     opacity: 0
+  },
+  // Enable the MS Word-style ruler in the demo so reviewers can interact with
+  // it out of the box (defaults to disabled in `defaultRulerOption` for
+  // backwards compatibility).
+  ruler: {
+    disabled: false
   }
 }

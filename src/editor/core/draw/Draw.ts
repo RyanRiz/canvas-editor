@@ -13,6 +13,8 @@ import {
   IGetValueOption,
   IConvergenceTarget,
   ILayoutCheckpoint,
+  IChunkResumeState,
+  IComputeRowListResumePayload,
   IPainterOption
 } from '../../interface/Draw'
 import { HistoryScope } from '../../interface/History'
@@ -33,6 +35,7 @@ import {
   IInsertElementListOption
 } from '../../interface/Element'
 import { IRow, IRowElement } from '../../interface/Row'
+import { ITextMetrics } from '../../interface/Text'
 import { deepClone, getUUID } from '../../utils'
 import { Cursor } from '../cursor/Cursor'
 import { CanvasEvent } from '../event/CanvasEvent'
@@ -130,6 +133,7 @@ import { Area } from './interactive/Area'
 import { Badge } from './frame/Badge'
 import { Graffiti } from './graffiti/Graffiti'
 import { Magnifier } from './interactive/Magnifier'
+import { Ruler } from './ruler/Ruler'
 import { IPageColumns } from '../../interface/PageColumns'
 import { IRange } from '../../interface/Range'
 import { IPositionContext } from '../../interface/Position'
@@ -258,6 +262,21 @@ export class Draw {
   // 任何能让前缀行内容失效的事件（setEditorData / 跨字号字距的设置变更）必须
   // 通过 _invalidatePaintCache() 一并清空。
   private _mainRowCheckpoints: ILayoutCheckpoint[]
+  // PERF: per-element fontMetrics memoization for computeRowList. Held in
+  // a WeakMap rather than as fields on the element so element shape stays
+  // unchanged — attaching cache fields directly to elements caused V8
+  // hidden-class transitions that slowed adjacent hot loops (paint and
+  // computePositionList) by 10× and ~50% respectively. See
+  // {@link _measureElementText}.
+  private _fontMetricsCache: WeakMap<
+    IElement,
+    {
+      fontStr: string
+      value: string
+      elementWidth: number | undefined
+      metrics: ITextMetrics
+    }
+  > = new WeakMap()
   // 上一帧主布局的「输入签名」。option.scale / innerWidth / pagingMode 等会改变
   // 任意 row 的几何形状的字段都纳入；不一致时禁用增量布局，回退到全量。
   private _mainLayoutSig: {
@@ -310,6 +329,25 @@ export class Draw {
   // Fit-to-Width 在此路径下省下数百毫秒主线程时间。仅 setPageScale 内部使用，
   // render() 完成后立即清零；不应跨多次 render 持续。
   private _skipMainRowCompute: boolean
+  // PERF: lazy-positions tracking. When `isLazyPosition: true` is passed to
+  // render(), computePositionListIncremental stops after the visible-page
+  // range, leaving positions for pages >= this value stale (entries from the
+  // previous frame, wrong coordinates). Cleared by a full computePositionList
+  // pass — either the scheduled async refresh (`_lazyPositionRefreshTimer`)
+  // or an on-demand refresh just before painting a stale page.
+  private _lazyPositionStaleFromPageNo: number | null
+  private _lazyPositionRefreshTimer: ReturnType<typeof setTimeout> | null
+  // PERF: chunked-rAF setPaperMarginAsync — monotonic op id used to cancel
+  // a stale in-flight op when a new setPaperMargin / setPaperMarginAsync /
+  // render races in. The chunked driver bails out as soon as it observes
+  // its id no longer matches.
+  private _chunkedOpId: number
+  // True while `_runChunkedFullReflow` is between `markDirty` and its
+  // trailing fast-lane render. Read by `render()` to cancel chunks when an
+  // external render (typing / Enter / cursor mutation) lands mid-stream —
+  // otherwise the chunked fast-lane would overwrite the external render's
+  // result when chunks finish.
+  private _chunkedAsyncInFlight: boolean
   private pageNo: number
   private renderCount: number
   private pagePixelRatio: number | null
@@ -374,6 +412,7 @@ export class Draw {
   private selectionObserver: SelectionObserver
   private imageObserver: ImageObserver
   private graffiti: Graffiti
+  public ruler: Ruler
 
   private LETTER_REG: RegExp
   private WORD_LIKE_REG: RegExp
@@ -434,6 +473,12 @@ export class Draw {
     this._mainSurroundCount = null
     this._mainAreaCount = null
     this._skipMainRowCompute = false
+    // PERF: lazy-position state. See IRenderConfig.isLazyPosition (Draw.ts
+    // interface) and the lazy branch in render() / paintPageOnDom guards.
+    this._lazyPositionStaleFromPageNo = null
+    this._lazyPositionRefreshTimer = null
+    this._chunkedOpId = 0
+    this._chunkedAsyncInFlight = false
     this.pageNo = 0
     this.renderCount = 0
     this.pagePixelRatio = null
@@ -529,12 +574,19 @@ export class Draw {
       this.setPrintData()
     }
     this.range.setRange(0, 0)
+    // Ruler must instantiate *before* the first render so the page wrappers
+    // are wrapped in `.ce-page-frame` grid cells and the first paint already
+    // accounts for the v-ruler's stolen left strip. Marker / tick drawing
+    // itself runs through the ruler's own `render()` (subscribed to the same
+    // page-size / scale / content / cursor events as the document repaint).
+    this.ruler = new Ruler(this)
     this.render({
       isInit: true,
       isSetCursor: true,
       isFirstRender: true,
       curIndex: 0
     })
+    this.ruler.render()
     this.cursor.focus()
   }
 
@@ -990,6 +1042,18 @@ export class Draw {
   }
 
   public paintPageOnDom(payload: IDrawPagePayload) {
+    // PERF: lazy-positions guard. If we're about to paint a page whose
+    // positionList entries are stale (left over from before a lazy render
+    // capped its position recompute), flush the deferred refresh first
+    // so we paint with correct coordinates. The fast-path "stale === null"
+    // check is essentially free — the heavy work only runs when needed
+    // and once per stale window.
+    if (
+      this._lazyPositionStaleFromPageNo !== null &&
+      payload.pageNo >= this._lazyPositionStaleFromPageNo
+    ) {
+      this._flushLazyPositionRefresh()
+    }
     this._drawPage(payload)
   }
 
@@ -1985,6 +2049,8 @@ export class Draw {
   }
 
   public setPaperSize(width: number, height: number) {
+    // Bump the chunked-op id so any in-flight setPaperSizeAsync abandons.
+    this._chunkedOpId++
     this.options.width = width
     this.options.height = height
     const dpr = this.getPagePixelRatio()
@@ -2001,6 +2067,8 @@ export class Draw {
   }
 
   public setPaperDirection(payload: PaperDirection) {
+    // Bump the chunked-op id so any in-flight setPaperDirectionAsync abandons.
+    this._chunkedOpId++
     const dpr = this.getPagePixelRatio()
     this.options.paperDirection = payload
     const width = this.getWidth()
@@ -2016,10 +2084,397 @@ export class Draw {
   }
 
   public setPaperMargin(payload: IMargin) {
+    // PERF: V-ruler margin drag on a 36-page / 28k-word document used to
+    // freeze for ~2.2s on mouseup — `computeRowList` accounts for 93% of
+    // that. Top/bottom margins don't change `innerWidth`, so text wrapping
+    // is unchanged; only `_computePageList` (page assignment + row offsetY)
+    // and `positionList` need refreshing. Reuse the same fast lane
+    // `setPageScale` uses (`_skipMainRowCompute`, see line 5943) when safe.
+    // Bump the chunked-op id so any in-flight `setPaperMarginAsync` abandons
+    // its remaining chunks before we mutate margins.
+    this._chunkedOpId++
+    const oldInnerWidth = this.getInnerWidth()
     this.options.margins = payload
+    const newInnerWidth = this.getInnerWidth()
+    const innerWidthChanged = oldInnerWidth !== newInnerWidth
+    // Tables are split inside `computeRowList` (around line 3248) using
+    // `getMainOuterHeight()` which depends on top+bottom margins — skipping
+    // computeRowList for a doc with tables would leave split-points stale.
+    // Collect the index of each logical table's FIRST clone (paging clones
+    // share `pagingId`; single-page tables have no `pagingId`).
+    const tableFirstClones: number[] = []
+    const seenPagingIds = new Set<string>()
+    for (let i = 0; i < this.elementList.length; i++) {
+      const el = this.elementList[i]
+      if (el.type !== ElementType.TABLE) continue
+      const pid = (el as unknown as { pagingId?: string }).pagingId
+      if (pid && seenPagingIds.has(pid)) continue
+      if (pid) seenPagingIds.add(pid)
+      tableFirstClones.push(i)
+    }
+    const hasTable = tableFirstClones.length > 0
+    const canFastPath =
+      !innerWidthChanged &&
+      !hasTable &&
+      this.rowList.length > 0 &&
+      this._dirtyRange === null &&
+      this._prevPageRowCounts !== null &&
+      !this.isPrintMode()
+    if (canFastPath) {
+      this._skipMainRowCompute = true
+      // Force the paint plan to treat ALL pages as shifted. Top/bottom
+      // margin changes shift every page's contentStartY but don't show up
+      // in the row-based per-page signature (which captures row counts /
+      // height sums only). Without this, `_findFirstShiftedPage` returns
+      // `null`, `_collectPagesNeedingPaint` narrows `needed` to just the
+      // dirty page, `effectiveDeferredPages` ends up empty, and
+      // `_lazyRender` early-exits — leaving the visible page's canvas
+      // bitmap stale even though pageRowList was correctly updated.
+      this._prevPageLayoutSignatures = []
+      try {
+        this.render({ isSubmitHistory: false, isSetCursor: false })
+      } finally {
+        this._skipMainRowCompute = false
+      }
+      return
+    }
+    // Per-table-pass path: innerWidth unchanged but tables present.
+    // Process each table in its own render pass, reverse order. Each pass
+    // only needs to re-evaluate ONE table's split decisions; inter-table
+    // text doesn't depend on top/bottom margins so convergence engages
+    // immediately past the table being processed.
+    // Reverse order keeps earlier-table indices stable when later tables
+    // splice their paging clones (splice only shifts elements AFTER).
+    // Compared to a single dirty range `[firstTableIdx, lastTableIdx]`,
+    // this avoids reprocessing the text between tables (observed at
+    // 803 rows / 661ms on a 28k-word / 2-table doc).
+    const canPerTableDirty =
+      !innerWidthChanged &&
+      hasTable &&
+      this.rowList.length > 0 &&
+      this._dirtyRange === null &&
+      this._prevPageRowCounts !== null &&
+      !this.isPrintMode()
+    if (canPerTableDirty) {
+      for (let k = tableFirstClones.length - 1; k >= 0; k--) {
+        const idx = tableFirstClones[k]
+        this.markDirty(idx, idx)
+        // See comment in fast-path branch: force firstShiftedPage=0 so
+        // the paint plan keeps visible pages in `needed`. Clearing before
+        // EACH render is necessary because each render writes new sigs.
+        this._prevPageLayoutSignatures = []
+        this.render({ isSubmitHistory: false, isSetCursor: false })
+      }
+      // Each per-table render uses `resumeFrom` + `computePositionListIncremental`,
+      // which only refreshes positions from the resume point onward. The PREFIX
+      // before each table keeps stale `positionList` entries (x,y from OLD
+      // margins). Since the painter reads element coordinates from positionList
+      // (Draw.ts:4549-4554), pages before the first table — i.e. the visible
+      // top of the doc — render at the OLD top-margin Y, leaving content
+      // visually unshifted (and overlapping on undo).
+      //
+      // Run one extra fast-lane render to call the FULL computePositionList
+      // (`_skipMainRowCompute` branch at Draw.ts:5943 calls
+      // `this.position.computePositionList()` without an `incremental` flag),
+      // refreshing every page's positions in one pass. Cheap: ~30-50ms
+      // because the row list is already correct from the loop above.
+      this._skipMainRowCompute = true
+      this._prevPageLayoutSignatures = []
+      try {
+        this.render({ isSubmitHistory: false, isSetCursor: false })
+      } finally {
+        this._skipMainRowCompute = false
+      }
+      return
+    }
+    // Slow lane: innerWidth changed — must re-wrap from scratch. The
+    // computeRowList cost (~2.5s on 28k-element doc) is inherent to a
+    // viewport-width change, but the position-list cost (~150ms) is not:
+    // pass `isLazyPosition: true` so only visible+overscan pages get their
+    // positions recomputed eagerly. Off-screen pages keep their previous
+    // entries (stale) and refresh on-demand when scrolled to, or via the
+    // ~100ms async timer scheduled by render().
+    this.markDirty(0, Math.max(0, this.getOriginalElementList().length - 1))
     this.render({
       isSubmitHistory: false,
-      isSetCursor: false
+      isSetCursor: false,
+      isLazyPosition: true
+    })
+  }
+
+  /**
+   * Chunked-rAF flavour of setPaperMargin. When `innerWidth` changes
+   * (left/right page-margin drag), `computeRowList(full)` is the dominant
+   * cost — ~2.5s on a 28k-element doc because every paragraph re-wraps at
+   * the new width. The sync `setPaperMargin` blocks the main thread for
+   * that entire time; this async version splits the row-layout work into
+   * chunks separated by `requestAnimationFrame` so the browser stays
+   * responsive during the operation and the visible page repaints between
+   * chunks (progressive paint).
+   *
+   * Falls back to the sync `setPaperMargin` when `innerWidth` is unchanged
+   * (top/bottom margin drag): that's already fast (~30-200ms) and chunking
+   * would only add overhead.
+   *
+   * Concurrent calls cancel earlier ones via `_chunkedOpId`.
+   */
+  public async setPaperMarginAsync(payload: IMargin): Promise<void> {
+    const oldInnerWidth = this.getInnerWidth()
+    this.options.margins = payload
+    const newInnerWidth = this.getInnerWidth()
+    if (oldInnerWidth === newInnerWidth) {
+      // Top/bottom margin change — sync fast path is faster (no rAF overhead).
+      this.setPaperMargin(payload)
+      return
+    }
+    await this._runChunkedFullReflow()
+  }
+
+  /**
+   * Chunked-rAF flavour of setPaperSize. Changing paper dimensions changes
+   * `innerWidth` (smaller paper = less content width), forcing a full text
+   * re-wrap. Uses the same chunked pipeline as setPaperMarginAsync so the
+   * UI stays responsive and the visible page repaints progressively.
+   */
+  public async setPaperSizeAsync(width: number, height: number): Promise<void> {
+    this.options.width = width
+    this.options.height = height
+    const dpr = this.getPagePixelRatio()
+    const realWidth = this.getWidth()
+    const realHeight = this.getHeight()
+    this.container.style.width = `${realWidth}px`
+    for (let i = 0; i < this.pageList.length; i++) {
+      this._resizePageBacking(i, realWidth, realHeight, dpr)
+    }
+    await this._runChunkedFullReflow()
+  }
+
+  /**
+   * Chunked-rAF flavour of setPaperDirection (portrait ↔ landscape).
+   * Rotating page orientation swaps width/height (and rotates the margin
+   * array via getOriginalMargins), changing `innerWidth`. Re-uses the
+   * chunked pipeline.
+   */
+  public async setPaperDirectionAsync(payload: PaperDirection): Promise<void> {
+    const dpr = this.getPagePixelRatio()
+    this.options.paperDirection = payload
+    const width = this.getWidth()
+    const height = this.getHeight()
+    this.container.style.width = `${width}px`
+    for (let i = 0; i < this.pageList.length; i++) {
+      this._resizePageBacking(i, width, height, dpr)
+    }
+    await this._runChunkedFullReflow()
+  }
+
+  /**
+   * Public escape hatch — generic chunked-rAF full-document reflow. Use
+   * this when you've mutated layout-affecting options that the dedicated
+   * `*Async` helpers (`setPaperMarginAsync`, `setPaperSizeAsync`,
+   * `setPaperDirectionAsync`) don't cover, e.g.:
+   *
+   *   editor.draw.getOptions().defaultRowMargin = 4
+   *   editor.draw.getOptions().defaultTabWidth = 40
+   *   await editor.draw.runChunkedFullReflow()
+   *
+   * Caller is responsible for any DOM-level side effects the dedicated
+   * helpers do (e.g. `container.style.width`, `_resizePageBacking` on each
+   * page). For pure layout-option changes that don't move the page DOM,
+   * those side effects aren't needed.
+   *
+   * Returns a Promise that resolves when the final render completes.
+   * Concurrent reflows cancel earlier ones via `_chunkedOpId`.
+   */
+  public runChunkedFullReflow(): Promise<void> {
+    return this._runChunkedFullReflow()
+  }
+
+  /**
+   * Cancel any in-flight chunked reflow. Safe to call when nothing is in
+   * flight (no-op). Used by `CommandAdapt.forceUpdate` so a synchronous
+   * render path (e.g. `updateOptions`, font/style commands) preempts any
+   * background chunked work that would otherwise complete with stale
+   * option values.
+   *
+   * Note: the dedicated sync `setPaperSize` / `setPaperDirection` /
+   * `setPaperMargin` already bump `_chunkedOpId` themselves, so calling
+   * this from them is redundant — but cheap.
+   */
+  public cancelChunkedReflow(): void {
+    this._chunkedOpId++
+  }
+
+  /**
+   * Shared chunked-rAF pipeline driver. Caller must have already mutated
+   * `this.options` (margins / width / height / paperDirection) so the
+   * derived getters (`getInnerWidth`, `getMargins`, …) return the new
+   * values. Strategy:
+   *
+   *  1. markDirty(0, N-1) so the trailing fast-lane render knows the doc
+   *     is dirty.
+   *  2. Reset `_mainRowCheckpoints` — we're rebuilding from scratch.
+   *  3. Loop: call `computeRowList` with `maxElementIndex` + `chunkSink`,
+   *     handing the partial rowList to `_progressivePaintVisible` between
+   *     chunks. Yield via `requestAnimationFrame` so the browser handles
+   *     events.
+   *  4. After the loop, set `this.rowList = result` and call `render()`
+   *     with `_skipMainRowCompute = true` — the fast-lane reuses the
+   *     freshly-built rowList and only does `_computePageList`, lazy
+   *     position list, area, and final paint.
+   *
+   * Concurrent reflows cancel via `_chunkedOpId`.
+   */
+  private async _runChunkedFullReflow(): Promise<void> {
+    const opId = ++this._chunkedOpId
+    this._chunkedAsyncInFlight = true
+    this.markDirty(0, Math.max(0, this.getOriginalElementList().length - 1))
+    const margins = this.getMargins()
+    const pageHeight = this.getHeight()
+    const extraHeight = this.header.getExtraHeight()
+    const mainOuterHeight = this.getMainOuterHeight()
+    const startX = this.getColumnStartX(0)
+    const startY = margins[0] + extraHeight
+    const isPagingMode = this.getIsPagingMode()
+    const innerWidth = this.getInnerWidth()
+    const CHUNK_SIZE = 3000
+    const PROGRESSIVE_OVERSCAN = 2
+    // Estimate the element index that brackets the currently-visible
+    // viewport (plus a forward overscan), using the OLD positionList —
+    // still valid here because no chunk has mutated rowList yet. The
+    // first chunk is sized to fully cover this range so the user's
+    // viewport repaints with the new layout on the very first chunk
+    // instead of waiting for chunk 2/3 to reach the page-below-viewport.
+    // Inflated by 40% because a narrower innerWidth re-wrap typically
+    // produces more rows per page → the same elements end up spread
+    // across a wider page range in the new layout.
+    let firstChunkSize = CHUNK_SIZE
+    if (this.visiblePageNoList.length > 0) {
+      const lastVisible = Math.max(...this.visiblePageNoList)
+      const targetPage = lastVisible + PROGRESSIVE_OVERSCAN
+      const oldPositions = this.position.getOriginalMainPositionList()
+      if (oldPositions.length > 0) {
+        let lo = 0
+        let hi = oldPositions.length - 1
+        while (lo < hi) {
+          const mid = (lo + hi + 1) >> 1
+          const pn = oldPositions[mid]?.pageNo ?? 0
+          if (pn <= targetPage) lo = mid
+          else hi = mid - 1
+        }
+        // `lo` is the last OLD element index on (lastVisible + overscan).
+        // Inflate for new layout density and floor to at least CHUNK_SIZE
+        // so we never go SMALLER than the default — small viewports
+        // shouldn't make chunks tiny.
+        firstChunkSize = Math.max(CHUNK_SIZE, Math.ceil(lo * 1.4))
+        // Cap the first chunk so we don't end up doing the entire doc
+        // synchronously on a small doc viewed all at once. Default cap
+        // is 3× the regular chunk size — bounded freeze, still big
+        // enough to cover most viewports.
+        firstChunkSize = Math.min(firstChunkSize, CHUNK_SIZE * 3)
+      }
+    }
+    let resumeFrom: IComputeRowListResumePayload | undefined = undefined
+    let rowList: IRow[] = []
+    let nextChunkStart = 0
+    let isFirstChunk = true
+    this._mainRowCheckpoints = []
+    while (true) {
+      if (this._chunkedOpId !== opId) {
+        this._chunkedAsyncInFlight = false
+        return
+      }
+      const chunkSink: { state: IChunkResumeState | null } = { state: null }
+      // First chunk uses the viewport-sized estimate so visible pages
+      // land in chunk 1's partial layout; subsequent chunks use the
+      // default size for balanced responsiveness.
+      const chunkSize = isFirstChunk ? firstChunkSize : CHUNK_SIZE
+      isFirstChunk = false
+      const maxIdx = nextChunkStart + chunkSize - 1
+      rowList = this.computeRowList({
+        startX,
+        startY,
+        pageHeight,
+        mainOuterHeight,
+        isPagingMode,
+        innerWidth,
+        elementList: this.elementList,
+        checkpointSink: this._mainRowCheckpoints,
+        resumeFrom,
+        maxElementIndex: maxIdx,
+        chunkSink
+      })
+      if (chunkSink.state === null) break
+      // Progressive paint — repaint visible pages + small forward overscan
+      // using the partial rowList so the layout converges progressively
+      // toward the new width instead of waiting until the very end.
+      this._progressivePaintVisible(rowList, PROGRESSIVE_OVERSCAN)
+      nextChunkStart = chunkSink.state.startElementIndex
+      resumeFrom = {
+        prefixRowList: rowList,
+        startElementIndex: chunkSink.state.startElementIndex,
+        checkpoint: {
+          x: chunkSink.state.x,
+          y: chunkSink.state.y,
+          pageNo: chunkSink.state.pageNo,
+          listId: chunkSink.state.listId,
+          listIndex: chunkSink.state.listIndex,
+          controlRealWidth: chunkSink.state.controlRealWidth,
+          currentPageColumns: chunkSink.state.currentPageColumns,
+          surroundElementList: chunkSink.state.surroundElementList
+        }
+      }
+      await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+    }
+    if (this._chunkedOpId !== opId) {
+      this._chunkedAsyncInFlight = false
+      return
+    }
+    this.rowList = rowList
+    if (this._mainRowCheckpoints.length !== rowList.length) {
+      console.warn(
+        '[ChunkedReflow] checkpoint/row length mismatch — clearing',
+        {
+          checkpoints: this._mainRowCheckpoints.length,
+          rows: rowList.length
+        }
+      )
+      this._mainRowCheckpoints = []
+    }
+    this.clearDirtyRange()
+    this._skipMainRowCompute = true
+    // Diag: log sig at chunked-finalization entry/exit so a subsequent
+    // _tryBuildResumeFrom "layout sig incompatible" rejection can be
+    // correlated with WHICH field drifted.
+    const preInner = this.getInnerWidth()
+    const prePaging = this.getIsPagingMode()
+    console.log('[ChunkedReflow] pre-finalize-render', {
+      innerWidth: preInner,
+      isPagingMode: prePaging,
+      scale: this.options.scale,
+      defaultSize: this.options.defaultSize,
+      defaultRowMargin: this.options.defaultRowMargin,
+      defaultTabWidth: this.options.defaultTabWidth
+    })
+    try {
+      this.render({
+        isSubmitHistory: false,
+        isSetCursor: false,
+        isLazyPosition: true
+      })
+    } finally {
+      this._skipMainRowCompute = false
+      this._chunkedAsyncInFlight = false
+    }
+    console.log('[ChunkedReflow] post-finalize-render', {
+      storedSig: this._mainLayoutSig,
+      currentSig: {
+        scale: this.options.scale,
+        innerWidth: this.getInnerWidth(),
+        isPagingMode: this.getIsPagingMode(),
+        defaultSize: this.options.defaultSize,
+        defaultRowMargin: this.options.defaultRowMargin,
+        defaultTabWidth: this.options.defaultTabWidth
+      }
     })
   }
 
@@ -2181,17 +2636,40 @@ export class Draw {
     isPagingMode: boolean
     innerWidth: number
   }): boolean {
-    if (!this._mainLayoutSig) return false
+    if (!this._mainLayoutSig) {
+      console.log('[LayoutSig] incompatible: stored sig is null')
+      return false
+    }
     const cur = this._buildLayoutSig(extra)
     const old = this._mainLayoutSig
-    return (
+    const eq =
       cur.scale === old.scale &&
       cur.innerWidth === old.innerWidth &&
       cur.isPagingMode === old.isPagingMode &&
       cur.defaultSize === old.defaultSize &&
       cur.defaultRowMargin === old.defaultRowMargin &&
       cur.defaultTabWidth === old.defaultTabWidth
-    )
+    if (!eq) {
+      // Identify which field drifted — diagnostic for `_runChunkedFullReflow`
+      // and other chunked / async paths.
+      const diff: Record<string, { stored: unknown; current: unknown }> = {}
+      ;(
+        [
+          'scale',
+          'innerWidth',
+          'isPagingMode',
+          'defaultSize',
+          'defaultRowMargin',
+          'defaultTabWidth'
+        ] as const
+      ).forEach(k => {
+        if (cur[k] !== old[k]) {
+          diff[k] = { stored: old[k], current: cur[k] }
+        }
+      })
+      console.log('[LayoutSig] incompatible: field drift', diff)
+    }
+    return eq
   }
 
   /**
@@ -2618,6 +3096,69 @@ export class Draw {
     }px ${font}`
   }
 
+  /**
+   * Element-level fontMetrics memoization (PERF: L/R margin drag).
+   *
+   * Skips the canvas roundtrip (ctx.font = + ctx.measureText) when the
+   * element's resolved font string, value, and explicit `width` override
+   * are identical to the previous layout pass. On a margin-only reflow
+   * none of those inputs change, so every TEXT/LABEL element hits cache
+   * and the layout loop avoids ~28k canvas API calls on large docs.
+   *
+   * The cache is held in a side-channel `WeakMap` rather than as fields
+   * on the element. Attaching the cache directly to elements polluted
+   * their hidden class and caused observable slowdowns elsewhere
+   * (~10x in paint and ~50% in computePositionList) because adjacent
+   * hot loops then took deoptimized property-access paths. A WeakMap
+   * keyed on the element keeps element shape unchanged and lets cache
+   * entries be GC'd naturally with the element.
+   *
+   * Cache is keyed on the *unscaled* font string (getElementFont with
+   * default scale=1). _scaleLayoutInPlace mutates element.metrics for
+   * scale changes without going through this path, so a uniform scale
+   * change does not invalidate the cache; the unscaled fontMetrics it
+   * returns remains correct as the post-cache `* scale` arithmetic in
+   * the layout loop bakes scale back in.
+   *
+   * Stored metrics are plain {ITextMetrics} objects (not the host
+   * `TextMetrics` class), so any element that flows through
+   * `structuredClone` (e.g. TableParticle.getTrListGroupByCol) is
+   * unaffected — the cache lives in `this`, not on the element.
+   */
+  private _measureElementText(
+    ctx: CanvasRenderingContext2D,
+    element: IElement
+  ): ITextMetrics {
+    const fontStr = this.getElementFont(element)
+    const cached = this._fontMetricsCache.get(element)
+    if (
+      cached &&
+      cached.fontStr === fontStr &&
+      cached.value === element.value &&
+      cached.elementWidth === element.width
+    ) {
+      return cached.metrics
+    }
+    ctx.font = fontStr
+    const fontMetrics = this.textParticle.measureText(ctx, element)
+    const plainMetrics: ITextMetrics = {
+      width: fontMetrics.width,
+      actualBoundingBoxAscent: fontMetrics.actualBoundingBoxAscent,
+      actualBoundingBoxDescent: fontMetrics.actualBoundingBoxDescent,
+      actualBoundingBoxLeft: fontMetrics.actualBoundingBoxLeft,
+      actualBoundingBoxRight: fontMetrics.actualBoundingBoxRight,
+      fontBoundingBoxAscent: fontMetrics.fontBoundingBoxAscent,
+      fontBoundingBoxDescent: fontMetrics.fontBoundingBoxDescent
+    }
+    this._fontMetricsCache.set(element, {
+      fontStr,
+      value: element.value,
+      elementWidth: element.width,
+      metrics: plainMetrics
+    })
+    return plainMetrics
+  }
+
   public getElementSize(el: IElement) {
     return el.actualSize || el.size || this.options.defaultSize
   }
@@ -2748,7 +3289,9 @@ export class Draw {
       pageHeight = 0,
       mainOuterHeight = 0,
       checkpointSink,
-      resumeFrom
+      resumeFrom,
+      maxElementIndex,
+      chunkSink
     } = payload
     // surroundElementList 在循环里会就地裁剪（deleteSurroundElementList），
     // 因此在 resumeFrom 路径下不能继续沿用调用方传入的引用——
@@ -2776,6 +3319,7 @@ export class Draw {
     let controlRealWidth: number
     let i: number
 
+    const resumePrefixLen = resumeFrom?.prefixRowList.length ?? 0
     if (resumeFrom) {
       // PERF-PLAN §2.2 / Phase 2B：从已捕获的 checkpoint 恢复布局。
       // 跳过 prefix 元素的 measureText / 包装判定 / surround 计算等 O(N) 工作，
@@ -2855,6 +3399,30 @@ export class Draw {
       }
     }
     for (; i < elementList.length; i++) {
+      // PERF chunked-rAF: bail out at iteration top when we've reached the
+      // caller's chunk boundary. State right here is "before processing
+      // element i" — exactly what a follow-up resumeFrom call needs as
+      // its checkpoint. The `rowList` we've built so far becomes that
+      // call's `prefixRowList`. `break` (not `return`) so the paragraph
+      // indent + spacing post-process loops below run on the partial
+      // rowList — required for the progressive-paint path in
+      // setPaperMarginAsync, and idempotent for the next chunk's resume.
+      if (maxElementIndex !== undefined && chunkSink && i > maxElementIndex) {
+        chunkSink.state = {
+          x,
+          y,
+          pageNo,
+          listId,
+          listIndex,
+          controlRealWidth,
+          currentPageColumns,
+          surroundElementList: surroundElementList.length
+            ? surroundElementList.slice()
+            : [],
+          startElementIndex: i
+        }
+        break
+      }
       // PERF-PLAN §2.2 / Phase 2B：在循环顶部（即「iter (i-1) END / iter i TOP」）
       // 捕获一份 checkpoint 候选；若本次迭代实际创建了新行（page-column 分支或
       // wrap 分支），就把它写入 sink；否则丢弃。仅当调用方传入 checkpointSink
@@ -2944,10 +3512,27 @@ export class Draw {
       // preventing mixed-indent rows (e.g. first-line-Tab + wrapped elements)
       // from producing a wider layout than the rendered curRow.offsetX allows.
       const isStartElement = curRow.elementList.length === 1
-      if (isStartElement && !curRow.offsetX && !element.listId) {
+      if (isStartElement && curRow.offsetX === undefined && !element.listId) {
         const firstEl = curRow.elementList[0]
-        if (firstEl?.indent) {
-          curRow.offsetX = firstEl.indent * defaultTabWidth * scale
+        // MS Word first-line indent: only applies to the *first* row of the
+        // paragraph. canvas-editor places the paragraph's ZERO (U+200B)
+        // delimiter as the FIRST element of each paragraph, so a row is the
+        // "first row of its paragraph" exactly when its first element is
+        // that ZERO. Wrapped rows of the same paragraph begin with a
+        // content character and therefore never see the firstLineIndent
+        // contribution.
+        const isFirstRowOfParagraph = firstEl?.value === ZERO
+        const indentSteps = firstEl?.indent || 0
+        const firstLineSteps = isFirstRowOfParagraph
+          ? firstEl?.firstLineIndent || 0
+          : 0
+        const totalSteps = indentSteps + firstLineSteps
+        // Always set curRow.offsetX when indent is involved — even when
+        // totalSteps is 0 (hanging indent: indent cancels firstLineIndent).
+        // An explicitly-set 0 must not fall through to the raw
+        // element.indent in the offsetX fallback chain below.
+        if (totalSteps || indentSteps) {
+          curRow.offsetX = totalSteps * defaultTabWidth * scale
         }
       }
       // Lock right indent off the row's first element too, by the same logic
@@ -2966,11 +3551,11 @@ export class Draw {
       const rightIndentOffsetX = element.rightIndent
         ? element.rightIndent * defaultTabWidth * scale
         : 0
-      const listOffsetX = element.listId
-        ? (listStyleMap.get(element.listId) || 0) +
-          this.listParticle.getLevelIndent(element.listLevel)
-        : 0
-      const offsetX = curRow.offsetX || listOffsetX || indentOffsetX
+      const offsetX =
+        curRow.offsetX !== undefined
+          ? curRow.offsetX
+          : (element.listId && listStyleMap.get(element.listId)) ||
+            indentOffsetX
       const rightOffsetX = curRow.rightOffsetX || rightIndentOffsetX
       const rowInnerWidth = curRow.innerWidth || innerWidth
       const availableWidth = rowInnerWidth - offsetX - rightOffsetX
@@ -3416,7 +4001,49 @@ export class Draw {
         metrics.width = elementWidth * scale
         metrics.height = height * scale
       } else if (element.type === ElementType.TAB) {
-        metrics.width = defaultTabWidth * scale
+        // MS Word tab semantics: a TAB advances the cursor to the next tab
+        // stop ≥ current column, not by a fixed width. Two-tier lookup:
+        //   1. **Paragraph-explicit tab stops** (`element.tabStops`, set by
+        //      the ruler) — find the first stop > currentLogicalX.
+        //   2. **Implicit default grid** — `options.ruler.defaultTabStopInterval`
+        //      (Word's default is 0.5 inch = 48 px at scale=1). The legacy
+        //      `defaultTabWidth` fallback is used as a last resort so the
+        //      historical "fixed-width tab" behavior is preserved when the
+        //      ruler option is disabled.
+        //
+        // `x` here is the running layout cursor in screen px; by line 2980
+        // the row's offsetX has already been added to it (for the first
+        // element of the row), so `x - startX - offsetX` is the column
+        // position relative to the paragraph's content-left edge, in screen
+        // px. Divide by scale to compare with the logical-px tab stops.
+        let advance = defaultTabWidth * scale
+        const paragraphTabStops = element.tabStops
+        const currentLogicalX = (x - startX - offsetX) / scale
+        if (paragraphTabStops && paragraphTabStops.length) {
+          // tabStops is kept sorted by `position` on insert/move; pick the
+          // first one strictly past the current column. A small epsilon (0.5
+          // logical px) lets a tab parked exactly on a stop advance to the
+          // NEXT stop, matching Word's "Tab moves past, not onto, the
+          // current stop" behavior.
+          const next = paragraphTabStops.find(
+            t => t.position > currentLogicalX + 0.5
+          )
+          if (next) {
+            advance = (next.position - currentLogicalX) * scale
+          }
+        } else if (!this.options.ruler.disabled) {
+          // Word's default tab grid kicks in only when the ruler subsystem
+          // is enabled; otherwise we preserve the legacy fixed-step tab.
+          const grid = this.options.ruler.defaultTabStopInterval
+          if (grid > 0) {
+            const nextGridLogical =
+              Math.floor(currentLogicalX / grid + 1e-3 + 1) * grid
+            advance = (nextGridLogical - currentLogicalX) * scale
+          }
+        }
+        // Floor of one default-tab-width keeps the tab visually present even
+        // in pathological cases (e.g. a stop placed exactly at the caret).
+        metrics.width = Math.max(advance, defaultTabWidth * 0.25 * scale)
         metrics.height = defaultSize * scale
         metrics.boundingBoxDescent = 0
         metrics.boundingBoxAscent =
@@ -3436,8 +4063,7 @@ export class Draw {
           defaultSize,
           label: { defaultPadding }
         } = this.options
-        ctx.font = this.getElementFont(element)
-        const fontMetrics = this.textParticle.measureText(ctx, element)
+        const fontMetrics = this._measureElementText(ctx, element)
         metrics.width =
           (fontMetrics.width + defaultPadding[1] + defaultPadding[3]) * scale
         metrics.height = (element.size || defaultSize) * scale
@@ -3454,8 +4080,7 @@ export class Draw {
           element.actualSize = Math.ceil(size * 0.6)
         }
         metrics.height = (element.actualSize || size) * scale
-        ctx.font = this.getElementFont(element)
-        const fontMetrics = this.textParticle.measureText(ctx, element)
+        const fontMetrics = this._measureElementText(ctx, element)
         metrics.width = fontMetrics.width * scale
         if (element.letterSpacing) {
           metrics.width += element.letterSpacing * scale
@@ -3806,11 +4431,18 @@ export class Draw {
       }
     }
     // 段落缩进
-    for (let r = 0; r < rowList.length; r++) {
+    // PERF-PLAN §2.2 — Idempotency: when resumeFrom provided, prefix rows
+    // were already finalized by a prior render and their indent/offsetX are
+    // pure functions of unchanged element properties. Skip them so this
+    // post-pass scales with dirty-suffix length, not full doc.
+    for (let r = resumePrefixLen; r < rowList.length; r++) {
       const curRow = rowList[r]
       const repEl = curRow.elementList.find(
         el => el.value !== ZERO && el.value !== WRAP
       )
+      // Also find the ZERO element to access paragraph-level properties
+      // (firstLineIndent lives on the ZERO like indent).
+      const zeroEl = curRow.elementList.find(el => el.value === ZERO)
       if (repEl?.indent) {
         // Always compute from a fresh base to avoid double-counting when
         // incremental layout convergence reuses old row objects that already
@@ -3822,6 +4454,15 @@ export class Draw {
             ) || 0
           : 0
         curRow.offsetX = listBase + repEl.indent * defaultTabWidth * scale
+        // Apply firstLineIndent to the first row of each paragraph
+        // (the row containing a ZERO delimiter). For normal indent this
+        // adds; for hanging indent (negative firstLineIndent) it subtracts,
+        // giving the first line a different offset than subsequent lines.
+        const firstLineEl = zeroEl || repEl
+        if (zeroEl && (firstLineEl.firstLineIndent || 0) !== 0) {
+          curRow.offsetX +=
+            (firstLineEl.firstLineIndent || 0) * defaultTabWidth * scale
+        }
       }
       // Right indent: same fresh-base recompute so incremental layout reuse
       // doesn't compound the value across frames. Right offset is independent
@@ -3844,7 +4485,20 @@ export class Draw {
     // before applying spacing, so the result is a pure function of the current
     // (isFirst/isLast, spaceBefore/spaceAfter) and never accumulates.
     let paragraphZero: (typeof elementList)[0] | undefined
-    for (let r = 0; r < rowList.length; r++) {
+    // PERF-PLAN §2.2 — Same idempotency argument as the indent pass: prefix
+    // rows already carry final height/ascent from the prior render. Seed
+    // paragraphZero by scanning back from the resume boundary so spacing for
+    // the first dirty row of an ongoing paragraph stays correct.
+    if (resumePrefixLen > 0) {
+      for (let r = resumePrefixLen - 1; r >= 0; r--) {
+        const z = rowList[r]?.elementList.find(el => el.value === ZERO)
+        if (z) {
+          paragraphZero = z
+          break
+        }
+      }
+    }
+    for (let r = resumePrefixLen; r < rowList.length; r++) {
       const curRow = rowList[r]
       // Reset to natural geometry. baseHeight is set at every row construction
       // and every in-loop height write — should always be defined here; the
@@ -4493,15 +5147,27 @@ export class Draw {
         } else if (element.type === ElementType.SEPARATOR) {
           this.separatorParticle.render(ctx, element, x, y)
         } else if (element.type === ElementType.PAGE_BREAK) {
-          if (this.mode !== EditorMode.CLEAN && !isPrintMode) {
+          if (
+            this.mode !== EditorMode.CLEAN &&
+            !isPrintMode &&
+            !this.options.pageBreak.disabled
+          ) {
             this.pageBreakParticle.render(ctx, element, x, y)
           }
         } else if (element.type === ElementType.COLUMN_BREAK) {
-          if (this.mode !== EditorMode.CLEAN && !isPrintMode) {
+          if (
+            this.mode !== EditorMode.CLEAN &&
+            !isPrintMode &&
+            !this.options.pageBreak.disabled
+          ) {
             this.pageBreakParticle.render(ctx, element, x, y)
           }
         } else if (element.type === ElementType.SECTION_BREAK) {
-          if (this.mode !== EditorMode.CLEAN && !isPrintMode) {
+          if (
+            this.mode !== EditorMode.CLEAN &&
+            !isPrintMode &&
+            !this.options.sectionBreak.disabled
+          ) {
             this.sectionBreakParticle.render(ctx, element, x, y)
           }
         } else if (
@@ -4598,23 +5264,30 @@ export class Draw {
           ) {
             this.underline.render(ctx)
           }
-          // 行间距
-          const rowMargin = this.getElementRowMargin(element)
           // 元素向左偏移量
           const offsetX = element.left || 0
           // 下标元素y轴偏移值
-          let offsetY = 0
+          let subscriptOffsetY = 0
           if (element.type === ElementType.SUBSCRIPT) {
-            offsetY = this.subscriptParticle.getOffsetY(element)
+            subscriptOffsetY = this.subscriptParticle.getOffsetY(element)
           }
           // 占位符不参与颜色计算
           const color = element.control?.underline
             ? this.options.underlineColor
             : element.color
+          // Anchor underline to the per-letter baseline. `offsetY` (from
+          // position) already places the text baseline; just step down by the
+          // glyph descent so the stroke sits flush under the letters. Using
+          // row.height or row.ascent overshoots whenever rowMargin /
+          // spaceBefore / spaceAfter inflate the row geometry — the stroke
+          // would float into the line-spacing gap. Baseline-anchor matches
+          // Google Docs / Word.
+          const baselineY =
+            y + offsetY + metrics.boundingBoxDescent + subscriptOffsetY
           this.underline.recordFillInfo(
             ctx,
             x - offsetX,
-            y + curRow.height - rowMargin + offsetY,
+            baselineY,
             metrics.width + offsetX,
             0,
             color,
@@ -4847,6 +5520,7 @@ export class Draw {
       footerDisabled: footer.disabled,
       pageNumberDisabled: pageNumber.disabled,
       pageBorderDisabled: pageBorder.disabled,
+      marginIndicatorDisabled: this.options.marginIndicatorDisabled,
       headerExtraHeight: this.header.getExtraHeight(),
       watermarkData: watermark.data,
       watermarkLayer: watermark.layer,
@@ -5444,8 +6118,30 @@ export class Draw {
   ): IPagePaintPlan | null {
     if (!this.getIsPagingMode()) return null
     if (this.options.pagePaintStrategy === 'full') return null
-    if (this.visiblePageNoList.length === 0) return null
-    if (this._prevPageLayoutSignatures === null) return null
+    // When no scroll observer has reported visibility yet (initial render,
+    // jsdom tests, pre-first-scroll), fall back to full-sync paint ONLY if
+    // we also lack a dirty hint. With a dirty range we still know which page
+    // needs to repaint and can defer the rest — keeps per-keystroke cost
+    // bounded by dirty pages instead of total page count.
+    const hasVisibleInfo = this.visiblePageNoList.length > 0
+    if (
+      !hasVisibleInfo &&
+      this._dirtyRange === null &&
+      preLayoutDirtyPageSpan === null
+    ) {
+      return null
+    }
+    // 首次渲染或 decoration-only 路径未落盘签名时，fallback 到仅同步可见
+    // 页 + overscan——而非 null（全量同步），避免滚动时 35 页全部同步绘制。
+    if (this._prevPageLayoutSignatures === null) {
+      const pageCount = this.pageRowList.length
+      const syncPages = this._collectVisibleSyncPages(pageCount)
+      const deferredPages = new Set<number>()
+      for (let i = 0; i < pageCount; i++) {
+        if (!syncPages.has(i)) deferredPages.add(i)
+      }
+      return { firstShiftedPage: null, syncPages, deferredPages }
+    }
     const pageCount = this.pageRowList.length
     const syncPages = this._collectVisibleSyncPages(pageCount)
     const curSignatures = this._getPageLayoutSignatures()
@@ -5493,11 +6189,132 @@ export class Draw {
         deferredPages.add(i)
       }
     }
+    // PERF-PLAN §2.9 safe-net：无论 shifted/dirty 区间多大，同步绘制
+    // 仅限可见页 + overscan + 被标记为 dirty 的页。其余始终延后。
+    // 避免滚动等高频操作中 _dirtyRange 意外宽泛时同步 35 页导致 >2s 卡顿。
+    // Skip when no visibility info — dirty-range pages are the only sync
+    // candidates and must not be filtered out by an empty visibleSet.
+    if (hasVisibleInfo) {
+      const visibleSet = this._collectVisibleSyncPages(pageCount)
+      for (const p of syncPages) {
+        if (!visibleSet.has(p)) {
+          syncPages.delete(p)
+          deferredPages.add(p)
+        }
+      }
+    }
     return {
       firstShiftedPage,
       syncPages,
       deferredPages
     }
+  }
+
+  /**
+   * PERF: schedule a deferred full computePositionList to refresh the stale
+   * tail produced by a lazy-position render. Runs ~100ms after the trigger
+   * — long enough that the user's mouseup feels instant, short enough that
+   * a follow-up scroll usually finds positions already fresh. If the user
+   * scrolls to a stale page before this fires, `_lazyRender`'s observer
+   * (and the `paintPageOnDom` guard) calls `_flushLazyPositionRefresh`
+   * synchronously to ensure correct paint.
+   */
+  private _scheduleLazyPositionRefresh() {
+    if (this._lazyPositionRefreshTimer !== null) return
+    this._lazyPositionRefreshTimer = setTimeout(() => {
+      this._lazyPositionRefreshTimer = null
+      this._flushLazyPositionRefresh()
+    }, 100)
+  }
+
+  /**
+   * Progressive-paint helper used between chunked-rAF passes in
+   * `setPaperMarginAsync`. Takes the partial rowList produced by the chunk
+   * that just finished, computes pages for it, computes positions for the
+   * currently-visible pages only (lazy mode), and repaints those pages so
+   * the user sees the layout converging toward the new width during the
+   * multi-second compute pipeline instead of waiting for the final render.
+   *
+   * Correctness notes:
+   * - Partial pageRowList may be SHORTER than the previous frame's. We do
+   *   NOT touch this.pageList / canvas DOM — we only paint pages whose
+   *   index exists in BOTH partial pageRowList AND the existing pageList.
+   *   Pages past the partial layout retain their stale bitmap until the
+   *   final render() restores them.
+   * - Visible page geometry may not be FINAL — if a later chunk's table
+   *   split / paragraph wrap shifts a row from page N+1 back to page N,
+   *   the partial paint of page N is slightly off. The cumulative drift
+   *   converges by the final chunk, and the final render's full paint
+   *   reconciles everything. Acceptable for the perceived-snappiness win.
+   * - Caller has already set this._chunkedOpId; we don't re-check it
+   *   because the chunk we're painting for is the one that just ran.
+   */
+  private _progressivePaintVisible(
+    partialRowList: IRow[],
+    overscan: number = 0
+  ) {
+    if (!partialRowList.length) return
+    // Stash & swap so _computePageList / position list see the partial data.
+    this.rowList = partialRowList
+    this.pageRowList = this._computePageList()
+    // Pick the pages to repaint:
+    //   - currently visible pages (always)
+    //   - plus `overscan` pages past the last visible page when the partial
+    //     layout has already extended that far. This means as soon as a
+    //     chunk produces enough rows to cover the next viewport row, that
+    //     row paints — instead of waiting for the NEXT chunk to repaint.
+    // If visiblePageNoList is stale or empty, fall back to page 0.
+    const partialPageCount = this.pageRowList.length
+    if (partialPageCount === 0) return
+    let visible: number[]
+    if (this.visiblePageNoList.length > 0) {
+      const minV = Math.min(...this.visiblePageNoList)
+      const maxV = Math.max(...this.visiblePageNoList)
+      const targetMax = Math.min(partialPageCount - 1, maxV + overscan)
+      visible = []
+      for (let p = minV; p <= targetMax; p++) visible.push(p)
+    } else {
+      visible = partialPageCount > 0 ? [0] : []
+    }
+    if (visible.length === 0) return
+    const visibleMax = Math.max(...visible)
+    // Lazy positions: only compute up to the last visible page.
+    const stale = this.position.computePositionList({
+      maxPageNo: visibleMax
+    })
+    if (stale.stalePositionsFromPageNo !== null) {
+      this._lazyPositionStaleFromPageNo = stale.stalePositionsFromPageNo
+    } else {
+      this._lazyPositionStaleFromPageNo = null
+    }
+    const elementList = this.getOriginalMainElementList()
+    const positionList = this.position.getOriginalMainPositionList()
+    for (const pageNo of visible) {
+      if (!this.pageRowList[pageNo]) continue
+      if (!this.pageList[pageNo]) continue
+      this.paintPageOnDom({
+        elementList,
+        positionList,
+        rowList: this.pageRowList[pageNo],
+        pageNo
+      })
+    }
+  }
+
+  /**
+   * Force-flush any pending lazy-position refresh: run a full
+   * computePositionList and clear the stale marker. Cheap on a doc whose
+   * positions are already current (no-op) since position.computePositionList
+   * just rewrites the list — but we only get here when stale data exists.
+   */
+  private _flushLazyPositionRefresh() {
+    if (this._lazyPositionStaleFromPageNo === null) return
+    if (this._lazyPositionRefreshTimer !== null) {
+      clearTimeout(this._lazyPositionRefreshTimer)
+      this._lazyPositionRefreshTimer = null
+    }
+    this.position.computePositionList()
+    this._lazyPositionStaleFromPageNo = null
   }
 
   private _getMainIndexPageNo(index: number): number | null {
@@ -5725,7 +6542,12 @@ export class Draw {
       isDecorationOnly:
         a.isDecorationOnly === true && b.isDecorationOnly === true
           ? true
-          : undefined
+          : undefined,
+      // isLazyPosition merges as last-write-wins — a render that opts out
+      // shouldn't be silently kept in lazy mode just because an earlier
+      // coalesced payload requested it.
+      isLazyPosition:
+        b.isLazyPosition !== undefined ? b.isLazyPosition : a.isLazyPosition
     }
     // remoteDirtyRange：取区间并集
     if (a.remoteDirtyRange || b.remoteDirtyRange) {
@@ -5744,6 +6566,16 @@ export class Draw {
   }
 
   public render(payload?: IDrawOption) {
+    // PERF chunked-rAF: if an async chunked reflow is in flight and an
+    // EXTERNAL render fires (typing / Enter / cursor mutation / option
+    // change), cancel the chunked op so its trailing fast-lane doesn't
+    // overwrite this render's result. `_skipMainRowCompute` distinguishes
+    // the chunked driver's OWN fast-lane render (which we want to allow)
+    // from external renders that arrived mid-stream.
+    if (this._chunkedAsyncInFlight && !this._skipMainRowCompute) {
+      this._chunkedOpId++
+      this._chunkedAsyncInFlight = false
+    }
     // 同步 render 进入时若仍有 rAF 队列：合并并取消，确保后续调用看到的视图与
     // history 是最新的（避免被即将到来的 rAF 回调覆盖）。
     if (this._pendingRenderPayload || this._pendingRenderFrameId !== null) {
@@ -5776,7 +6608,8 @@ export class Draw {
       isSourceHistory = false,
       isFirstRender = false,
       isTextInput = false,
-      isDecorationOnly = false
+      isDecorationOnly = false,
+      isLazyPosition = false
     } = payload || {}
     let { curIndex } = payload || {}
     const innerWidth = this.getInnerWidth()
@@ -5829,6 +6662,10 @@ export class Draw {
       // setCursor / history 都不应在 decoration-only 路径上跑——decoration 不
       // 改变光标位置（光标位置由 selection drag 期间另行 setRange 触发）。
       // history 同理——选区拖拽不需要进入 undo stack。
+      // 仍需写入 _prevPage* 签名，否则下次全量 render 时
+      // _buildPagePaintPlan 因签名缺失倒退到全页面同步。
+      this._prevPageRowCounts = this.pageRowList.map(rl => rl.length)
+      this._prevPageLayoutSignatures = this._getPageLayoutSignatures()
       return
     }
     // 计算文档信息
@@ -5843,10 +6680,13 @@ export class Draw {
       // 即便用户在 HEADER/FOOTER 区也必须刷新主体的 pageRowList / positionList，
       // 否则光标位置会停留在旧 scale 下、与已缩放的 rowList 出现 ½× 错位。
       const mainNeedsCompute =
-        isMainZone ||
         this._dirtyRange !== null ||
         this._prevPageRowCounts === null ||
-        this._skipMainRowCompute
+        this._skipMainRowCompute ||
+        (isMainZone &&
+          this._dirtyRange === null &&
+          this._prevPageRowCounts !== null &&
+          !this._isLayoutSigCompatible({ isPagingMode, innerWidth }))
       // 清空浮动元素位置信息（仅当本帧确实会重新布局主体时才清空，否则保留上次缓存）
       // PERF-PLAN §2.3：增量路径下浮动列表交给 computePositionListIncremental 自行
       // 按 dirty 边界过滤，因此这里不能无条件清空——延后到 _tryBuildResumeFrom 决定
@@ -5890,6 +6730,12 @@ export class Draw {
         this.position.setFloatPositionList([])
         this.pageRowList = this._computePageList()
         this.position.computePositionList()
+        // Full position recompute — any pending lazy-stale tail is now fresh.
+        this._lazyPositionStaleFromPageNo = null
+        if (this._lazyPositionRefreshTimer !== null) {
+          clearTimeout(this._lazyPositionRefreshTimer)
+          this._lazyPositionRefreshTimer = null
+        }
         this.area.compute()
         if (!this.isPrintMode()) {
           const searchKeyword = this.search.getSearchKeyword()
@@ -6134,21 +6980,108 @@ export class Draw {
           const convergedReuse = paginationStable
             ? convergedReuseInfo
             : (stablePageConvergedReuse ?? undefined)
+          // PERF: lazy-positions hint. When the caller passes
+          // `isLazyPosition: true`, cap position recomputation at the
+          // visible window (+ overscan) and at the dirty zone's own page —
+          // both must be inside the processed range or the visible / dirty
+          // areas would render with stale coords. Off-screen pages keep
+          // their previous-frame entries and are refreshed lazily.
+          // Mutually exclusive with convergedReuse — the lazy tail restore
+          // doesn't honor `deltaElems` rewrites, so if the caller wants
+          // convergence reuse, lazy mode is bypassed.
+          let lazyMaxPageNo: number | undefined = undefined
+          if (isLazyPosition && convergedReuse === undefined) {
+            const overscan = 2
+            const visibleMax =
+              this.visiblePageNoList.length > 0
+                ? Math.max(...this.visiblePageNoList)
+                : 0
+            // Locate the dirty range's page in the freshly-built pageRowList.
+            let cumulativeRows = 0
+            let dirtyPageNo = 0
+            const targetRow = resumeFrom.prefixRowList.length
+            for (let p = 0; p < this.pageRowList.length; p++) {
+              cumulativeRows += this.pageRowList[p].length
+              if (cumulativeRows > targetRow) {
+                dirtyPageNo = p
+                break
+              }
+            }
+            lazyMaxPageNo = Math.min(
+              this.pageRowList.length - 1,
+              Math.max(visibleMax, dirtyPageNo) + overscan
+            )
+          }
+          let lazyResult: { stalePositionsFromElementIndex: number | null } = {
+            stalePositionsFromElementIndex: null
+          }
           if (lastPrefixMutated) {
-            this.position.computePositionListIncremental({
+            lazyResult = this.position.computePositionListIncremental({
               fromRowGlobalIndex: resumeFrom.prefixRowList.length - 1,
               fromElementIndex: lastPrefixRow.startIndex,
-              convergedReuse: convergedReuse ?? undefined
+              convergedReuse: convergedReuse ?? undefined,
+              maxPageNo: lazyMaxPageNo
             })
           } else {
-            this.position.computePositionListIncremental({
+            lazyResult = this.position.computePositionListIncremental({
               fromRowGlobalIndex: resumeFrom.prefixRowList.length,
               fromElementIndex: resumeFrom.startElementIndex,
-              convergedReuse: convergedReuse ?? undefined
+              convergedReuse: convergedReuse ?? undefined,
+              maxPageNo: lazyMaxPageNo
             })
           }
+          if (
+            lazyResult.stalePositionsFromElementIndex !== null &&
+            lazyMaxPageNo !== undefined
+          ) {
+            // Stale tail exists. Stale-from-page = first page past the
+            // lazy cap. _lazyRender's observer + scheduled refresh below
+            // bring everything back to fresh before the user notices.
+            this._lazyPositionStaleFromPageNo = lazyMaxPageNo + 1
+            this._scheduleLazyPositionRefresh()
+          }
         } else {
-          this.position.computePositionList()
+          // No resumeFrom — `_tryBuildResumeFrom` rejected (most often because
+          // innerWidth changed via a left/right margin drag). Full computeRowList
+          // already ran above; the only thing left to defer is the position list
+          // itself, which previously cost ~150ms for a 28k-element doc.
+          // In lazy mode, only process visible+overscan pages and the dirty page;
+          // tail entries are preserved (stale) from the previous frame.
+          if (isLazyPosition && this.visiblePageNoList.length > 0) {
+            const overscan = 2
+            const visibleMax = Math.max(...this.visiblePageNoList)
+            // Locate dirty page so we always include it even if visible is elsewhere.
+            let cumulativeRows = 0
+            let dirtyPageNo = 0
+            const targetRow = this._dirtyRange?.start ?? 0
+            for (let p = 0; p < this.pageRowList.length; p++) {
+              cumulativeRows += this.pageRowList[p].length
+              if (cumulativeRows > targetRow) {
+                dirtyPageNo = p
+                break
+              }
+            }
+            const lazyMaxPageNo = Math.min(
+              this.pageRowList.length - 1,
+              Math.max(visibleMax, dirtyPageNo) + overscan
+            )
+            const stale = this.position.computePositionList({
+              maxPageNo: lazyMaxPageNo
+            })
+            if (stale.stalePositionsFromPageNo !== null) {
+              this._lazyPositionStaleFromPageNo = stale.stalePositionsFromPageNo
+              this._scheduleLazyPositionRefresh()
+            } else {
+              this._lazyPositionStaleFromPageNo = null
+            }
+          } else {
+            this.position.computePositionList()
+            this._lazyPositionStaleFromPageNo = null
+            if (this._lazyPositionRefreshTimer !== null) {
+              clearTimeout(this._lazyPositionRefreshTimer)
+              this._lazyPositionRefreshTimer = null
+            }
+          }
         }
         trace?.mark(
           resumeFrom ? 'computePositionList(incr)' : 'computePositionList(full)'
@@ -6214,11 +7147,7 @@ export class Draw {
       }
     }
     const pagePaintPlan =
-      isPagingMode &&
-      isLazy &&
-      !isInit &&
-      !isFirstRender &&
-      !this._skipMainRowCompute
+      isPagingMode && isLazy && !isInit && !isFirstRender
         ? this._buildPagePaintPlan(preLayoutDirtyPageSpan)
         : null
     this._paintPlanFirstShiftedPage = pagePaintPlan?.firstShiftedPage ?? null
@@ -6428,7 +7357,6 @@ export class Draw {
   }
 
   public submitHistory(curIndex: number | undefined) {
-    console.log('[HIST-ENTER] submitHistory called, disabled:', this._historyDisabled, 'stack before:', this.historyManager['undoStack'].length)
     if (this._historyDisabled) return
     // PERF-PLAN §1.2 / Phase 1.2：尝试走 delta 分支——上一次 submit 之后只
     // 经历了 main / table（含 tdPath）纯 splice，没有 deletable 跳过、没有
@@ -6667,6 +7595,9 @@ export class Draw {
     this._typingBatchActive = false
     this._typingBatchLastCurIndex = undefined
     this._invalidatePaintCache()
+    // Tear down ruler before the container is removed so its document-level
+    // mousemove/mouseup listeners don't outlive the editor.
+    this.ruler?.destroy()
     this.container.remove()
     this.globalEvent.removeEvent()
     this.scrollObserver.removeEvent()

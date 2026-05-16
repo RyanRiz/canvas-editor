@@ -37,6 +37,7 @@ import { IGraffitiData, IGraffitiOption } from './Graffiti'
 import { IWhiteSpaceOption } from './WhiteSpace'
 import { IMagnifierOption } from './Magnifier'
 import { IPageLayeredOption } from './PageLayered'
+import { IRulerOption } from './Ruler'
 
 export interface IEditorData {
   header?: IElement[]
@@ -79,6 +80,7 @@ export interface IEditorOption {
   resizerSize?: number
   marginIndicatorSize?: number
   marginIndicatorColor?: string
+  marginIndicatorDisabled?: boolean
   margins?: IMargin
   pageMode?: PageMode
   renderMode?: RenderMode
@@ -129,6 +131,8 @@ export interface IEditorOption {
   imgCaption?: IImgCaptionOption
   list?: IListOption
   magnifier?: IMagnifierOption
+  /** MS Word-style ruler (horizontal + vertical strips around each page). */
+  ruler?: IRulerOption
   // PERF-PLAN — Strategy B：分层 canvas + 装饰层独立重绘。
   // 默认开启；selection drag / search-next 等高频交互省去全量 base 重绘。
   pageLayered?: IPageLayeredOption

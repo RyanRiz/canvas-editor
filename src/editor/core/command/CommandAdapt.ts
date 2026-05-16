@@ -294,6 +294,10 @@ export class CommandAdapt {
   }
 
   public forceUpdate(options?: IForceUpdateOption) {
+    // Any external sync render must preempt an in-flight chunked reflow
+    // (e.g. setPaperMarginAsync running in the background): otherwise its
+    // trailing chunks would commit a rowList based on now-stale options.
+    this.draw.cancelChunkedReflow()
     const { isSubmitHistory = false } = options || {}
     this.range.clearRange()
     this.draw.render({
@@ -1957,6 +1961,83 @@ export class CommandAdapt {
     this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
 
+  public specialIndent(kind: 'none' | 'firstLine' | 'hanging') {
+    const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
+    if (isDisabled) return
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return
+    const paragraphInfo = this.range.getRangeParagraphInfo()
+    if (!paragraphInfo) return
+    const paragraphEndIndex =
+      paragraphInfo.startIndex + paragraphInfo.elementList.length - 1
+
+    let targetIndent = 0
+    let targetFirst = 0
+    switch (kind) {
+      case 'none':
+        targetIndent = 0
+        targetFirst = 0
+        break
+      case 'firstLine':
+        targetIndent = 0
+        targetFirst = 2
+        break
+      case 'hanging':
+        targetIndent = 2
+        targetFirst = -2
+        break
+    }
+
+    const oldValues = paragraphInfo.elementList.map(el => ({
+      el,
+      indent: el.indent,
+      firstLineIndent: el.firstLineIndent
+    }))
+
+    const allSame =
+      oldValues.every(v => (v.indent || 0) === targetIndent) &&
+      oldValues.every(v => (v.firstLineIndent || 0) === targetFirst)
+    if (allSame) return
+
+    const applyForward = () => {
+      for (const item of oldValues) {
+        if (targetIndent === 0) delete item.el.indent
+        else item.el.indent = targetIndent
+        if (targetFirst === 0) delete item.el.firstLineIndent
+        else item.el.firstLineIndent = targetFirst
+      }
+    }
+    const applyBackward = () => {
+      for (const item of oldValues) {
+        if (item.indent !== undefined) item.el.indent = item.indent
+        else delete item.el.indent
+        if (item.firstLineIndent !== undefined)
+          item.el.firstLineIndent = item.firstLineIndent
+        else delete item.el.firstLineIndent
+      }
+    }
+    applyForward()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyForward()
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        applyBackward()
+        this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+        this.draw.cancelScheduledRender()
+        this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    this.draw.markDirty(paragraphInfo.startIndex, paragraphEndIndex)
+    this.draw.cancelScheduledRender()
+    this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+  }
+
   public insertTable(row: number, col: number) {
     const isDisabled = this.draw.isReadonly() || this.draw.isDisabled()
     if (isDisabled) return
@@ -3014,8 +3095,26 @@ export class CommandAdapt {
     this.draw.setPaperSize(width, height)
   }
 
+  public paperSizeAsync(width: number, height: number) {
+    return this.draw.setPaperSizeAsync(width, height)
+  }
+
   public paperDirection(payload: PaperDirection) {
     this.draw.setPaperDirection(payload)
+  }
+
+  public paperDirectionAsync(payload: PaperDirection) {
+    return this.draw.setPaperDirectionAsync(payload)
+  }
+
+  /**
+   * Generic chunked-rAF reflow escape hatch. Use when you've mutated
+   * layout-affecting options that don't have a dedicated *Async wrapper
+   * (e.g. `defaultRowMargin`, `defaultTabWidth`, `defaultSize`). See
+   * `Draw.runChunkedFullReflow` for details.
+   */
+  public runChunkedFullReflow() {
+    return this.draw.runChunkedFullReflow()
   }
 
   public getPaperMargin(): number[] {
@@ -3024,6 +3123,10 @@ export class CommandAdapt {
 
   public setPaperMargin(payload: IMargin) {
     return this.draw.setPaperMargin(payload)
+  }
+
+  public setPaperMarginAsync(payload: IMargin) {
+    return this.draw.setPaperMarginAsync(payload)
   }
 
   public setMainBadge(payload: IBadge | null) {

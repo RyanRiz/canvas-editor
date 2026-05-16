@@ -20,11 +20,17 @@ export class ScrollObserver {
     this.draw = draw
     this.options = draw.getOptions()
     this.scrollContainer = this.getScrollContainer()
-    // 监听滚轮
+    // 初次填充 visiblePageNoList——必须在 Editor 构造完成（pages 已挂载）之后
+    // 触发，所以用 setTimeout 推迟到下一个 macrotask。原实现上还套着
+    // `if (!window.scrollY)` 守卫——当宿主页面本身（document）已经滚动时
+    // 跳过初次填充，导致 visiblePageNoList 永远是空数组。继而
+    // `_buildPagePaintPlan` 返回 null，render() 回落到 `_immediateRender(null)`
+    // 全页同步绘制（35 页文档上每次 render 800-1400ms 仅 paint 阶段）。
+    // 这个守卫对非 document 的 scrollContainer 完全没有意义——它检查的是
+    // window 滚动而非容器滚动，与本编辑器无关。无条件触发一次即可，
+    // 内部的 debounce(_observer, 150) 自然消化后续滚动事件。
     setTimeout(() => {
-      if (!window.scrollY) {
-        this._observer()
-      }
+      this._observer()
     })
     this._addEvent()
   }

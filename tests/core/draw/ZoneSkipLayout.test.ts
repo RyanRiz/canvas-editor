@@ -69,6 +69,8 @@ describe('Draw - skip main layout when editing header/footer', () => {
     const draw = ctx.editor.draw
     draw.render({ isCompute: true, isSubmitHistory: false })
     // 默认就是 MAIN zone
+    // 标记 dirty 以确保布局签名兼容时也会重新计算（不变时跳过）
+    draw.markDirty(0, 1)
     const computeSpy = vi.spyOn(draw, 'computeRowList')
     draw.render({ isCompute: true, isSubmitHistory: false })
     const calledWithMain = computeSpy.mock.calls.some(

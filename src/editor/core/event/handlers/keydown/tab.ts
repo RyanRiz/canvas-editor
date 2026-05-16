@@ -1,5 +1,7 @@
 import { ZERO } from '../../../../dataset/constant/Common'
 import { MoveDirection } from '../../../../dataset/enum/Observer'
+import { EDITOR_ROW_ATTR } from '../../../../dataset/constant/Element'
+import { ElementType } from '../../../../dataset/enum/Element'
 import { IElement } from '../../../../interface/Element'
 import { CanvasEvent } from '../../CanvasEvent'
 
@@ -9,6 +11,7 @@ export function tab(evt: KeyboardEvent, host: CanvasEvent) {
   if (isReadonly) return
   evt.preventDefault()
 
+  // 在控件上下文时，tab 键控制控件之间移动
   const control = draw.getControl()
   const activeControl = control.getActiveControl()
   if (activeControl && control.getIsRangeWithinControl()) {
@@ -24,6 +27,7 @@ export function tab(evt: KeyboardEvent, host: CanvasEvent) {
   const isCollapsed = rangeManager.getIsCollapsed()
   const listParticle = draw.getListParticle()
 
+  // ── List-aware Tab/Shift+Tab (indent/outdent list items) ────────────────
   if (!isCollapsed) {
     const paragraphs = rangeManager.getRangeParagraphElementList()
     const hasList = paragraphs?.some(el => el.listId)
@@ -48,91 +52,103 @@ export function tab(evt: KeyboardEvent, host: CanvasEvent) {
     }
   }
 
-  // 缩进/减少缩进（Tab = 首行缩进：仅当前视觉行）
   if (!~startIndex && !~endIndex) return
-  // 收集本次受影响的「行内元素」及其在主元素列表中的索引——
-  //   1) executeDelta 需要稳定的 (el, oldIndent) 二元组以重放 / 反向应用；
-  //   2) markDirty 需要 [rowStart..rowEnd] 才能让 _tryBuildResumeFrom 把
-  //      整行装进 dirty 区间，否则 dirty 仅覆盖光标点，convergence 早于
-  //      行末退出，行宽变化得不到重排。
-  //   3) 走 executeDelta 而不是默认 snapshot：snapshot deepClone elementList，
-  //      undo 时 this.elementList 被整片替换，旧的 row.elementList 全部失效，
-  //      下一帧 _tryConvergeIncrementalRowList 找不到任何 ref 相等的旧行，
-  //      退化为 walk-to-end-of-doc（实测 ~2.5s on 34 页）。
-  const rangeRow = rangeManager.getRangeRow()
-  if (!rangeRow) return
-  const positionList = draw.getPosition().getPositionList()
-  // Tab mutates only the first element of each visual row. Draw.ts locks
-  // curRow.offsetX off the row's first element (see Draw.ts §"first-line-Tab +
-  // wrapped elements"), so indenting trailing elements is redundant for the
-  // current layout — but it becomes harmful after a wrap: bumping indent
-  // narrows the row, a tail element pushes to the next row carrying its
-  // freshly-set indent, and the next row's offsetX gets locked from it too →
-  // two visual rows indented for one Tab. Restricting the mutation to the
-  // row-leading element keeps "first-line indent" semantics stable under
-  // reflow. dirtyStart/dirtyEnd still span every row position so the
-  // incremental layout reflows the full affected row, not just its head.
-  const affected: Array<{ el: IElement; oldIndent: number | undefined }> = []
-  const seenRows = new Set<string>()
-  let dirtyStart = Number.POSITIVE_INFINITY
-  let dirtyEnd = Number.NEGATIVE_INFINITY
-  for (let p = 0; p < positionList.length; p++) {
-    const position = positionList[p]
-    const rowSet = rangeRow.get(position.pageNo)
-    if (!rowSet) continue
-    if (rowSet.has(position.rowNo)) {
-      const el = elementList[p]
-      if (!el) continue
-      const rowKey = `${position.pageNo}:${position.rowNo}`
-      if (!seenRows.has(rowKey)) {
-        seenRows.add(rowKey)
-        affected.push({ el, oldIndent: el.indent })
-      }
-      if (p < dirtyStart) dirtyStart = p
-      if (p > dirtyEnd) dirtyEnd = p
-    }
-  }
-  if (!affected.length) return
+
+  // MS Word-style Tab behavior:
+  //
+  //   Tab       — insert an ElementType.TAB character. Layout engine
+  //               (Draw.ts) advances to the next tab stop or the next
+  //               default-tab-grid position when no explicit tab stops
+  //               exist — matching Word's "Tab always inserts a tab".
+  //
+  //   Shift+Tab — decrease paragraph left indent by one tab-width step
+  //               (Word: "outdent"). No-op when indent is already 0.
+  //
   const isShift = evt.shiftKey
-  // 当前路径下没有任何元素的 indent 会变化（全 0 时按 shift+Tab）→ 不入栈也不重渲染
-  if (isShift && affected.every(({ el }) => (el.indent || 0) === 0)) {
+  const caretEl = elementList[endIndex]
+  const prevEl = endIndex > 0 ? elementList[endIndex - 1] : null
+
+  // ── Shift+Tab: decrease indent ──────────────────────────────────────────
+  if (isShift) {
+    const info = rangeManager.getRangeParagraphInfo()
+    if (!info || !info.elementList.length) return
+    const paragraphElements = info.elementList
+    const paragraphStart = info.startIndex
+    const paragraphEnd = paragraphStart + paragraphElements.length - 1
+
+    const first = paragraphElements[0]
+    const curIndent = first.indent || 0
+    if (curIndent <= 0) return
+
+    const newIndent = curIndent - 1
+    // Preserve firstLineIndent delta relative to indent:
+    // firstLine stays the same, so when indent moves left by 1,
+    // the absolute first-line position also moves left by 1.
+    const curFirst = first.firstLineIndent || 0
+
+    const before = paragraphElements.map(el => ({
+      el,
+      indent: el.indent,
+      firstLineIndent: el.firstLineIndent
+    }))
+
+    const applyMutation = () => {
+      for (const el of paragraphElements) {
+        if (newIndent === 0) delete el.indent
+        else el.indent = newIndent
+        if (curFirst === 0) delete el.firstLineIndent
+        else el.firstLineIndent = curFirst
+      }
+    }
+    const revertMutation = () => {
+      for (const item of before) {
+        if (item.indent !== undefined) item.el.indent = item.indent
+        else delete item.el.indent
+        if (item.firstLineIndent !== undefined)
+          item.el.firstLineIndent = item.firstLineIndent
+        else delete item.el.firstLineIndent
+      }
+    }
+
+    applyMutation()
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    draw.getHistoryManager().executeDelta({
+      applyForward: () => {
+        applyMutation()
+        draw.markDirty(paragraphStart, paragraphEnd)
+        draw.cancelScheduledRender()
+        draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      },
+      applyBackward: () => {
+        revertMutation()
+        draw.markDirty(paragraphStart, paragraphEnd)
+        draw.cancelScheduledRender()
+        draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
+      }
+    })
+    draw.markDirty(paragraphStart, paragraphEnd)
+    draw.cancelScheduledRender()
+    draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
     return
   }
-  // 就地应用 forward，使本次操作立刻生效；同样的闭包用作 redo。
-  const applyMutation = () => {
-    for (const { el } of affected) {
-      const cur = el.indent || 0
-      if (isShift) {
-        if (cur > 0) el.indent = cur - 1
-      } else {
-        el.indent = cur + 1
+
+  // ── Tab: insert TAB character (Word always-inserts-tab behavior) ────────
+  if (isCollapsed) {
+    const tabEl: IElement = { type: ElementType.TAB, value: '' }
+    // Propagate paragraph-level attributes (EDITOR_ROW_ATTR — indent,
+    // firstLineIndent, rightIndent, tabStops, …) from the surrounding
+    // element onto the new TAB. insertElementList runs formatElementList
+    // but NOT formatElementContext, so it doesn't auto-propagate.
+    const source = caretEl || prevEl
+    if (source) {
+      for (const attr of EDITOR_ROW_ATTR) {
+        const v = source[attr]
+        if (v !== undefined) {
+          ;(tabEl as unknown as Record<string, unknown>)[attr] = v
+        }
       }
     }
+    draw.insertElementList([tabEl])
   }
-  const revertMutation = () => {
-    for (const { el, oldIndent } of affected) {
-      if (oldIndent !== undefined) el.indent = oldIndent
-      else delete el.indent
-    }
-  }
-  applyMutation()
-  const isSetCursor = startIndex === endIndex
-  const curIndex = isSetCursor ? endIndex : startIndex
-  draw.getHistoryManager().executeDelta({
-    applyForward: () => {
-      applyMutation()
-      draw.markDirty(dirtyStart, dirtyEnd)
-      draw.cancelScheduledRender()
-      draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
-    },
-    applyBackward: () => {
-      revertMutation()
-      draw.markDirty(dirtyStart, dirtyEnd)
-      draw.cancelScheduledRender()
-      draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
-    }
-  })
-  draw.markDirty(dirtyStart, dirtyEnd)
-  draw.cancelScheduledRender()
-  draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
 }

@@ -40,6 +40,23 @@ export interface IRenderConfig {
   // 调用方需保证主元素列表未变更——否则视觉将停留在上一帧 base 文本。
   // 仅在 options.pageLayered.enable=true 且未设置 isCompute=true 时生效。
   isDecorationOnly?: boolean
+  /**
+   * PERF: Lazy-positions hint. When true, computePositionListIncremental
+   * stops after processing visible pages (+ overscan) and the dirty page.
+   * Off-screen pages keep their previous-frame `positionList` entries
+   * (stale — wrong coordinates) and are refreshed lazily, either on scroll
+   * via `_lazyRender`'s observer or via a setTimeout-scheduled full pass
+   * shortly after this render returns.
+   *
+   * Use case: H-ruler paragraph-indent drag on a long document. The drag
+   * shifts pagination for every page after the paragraph; computing fresh
+   * positions for all 28k post-paragraph elements is the dominant cost
+   * (~166ms observed). Visible page typically only needs ~3 pages worth.
+   *
+   * Caller is responsible for the dirty zone being well-defined
+   * (markDirty before render). Mutually exclusive with `isDecorationOnly`.
+   */
+  isLazyPosition?: boolean
 }
 
 /**
@@ -138,6 +155,31 @@ export interface IComputeRowListPayload {
   // 仅在确认 dirty range 起点之前的所有行都未受影响时才安全。
   checkpointSink?: ILayoutCheckpoint[]
   resumeFrom?: IComputeRowListResumePayload
+  /**
+   * PERF: chunked-rAF support. When set, the main for-loop stops at the
+   * top of the iteration whose element index exceeds `maxElementIndex`,
+   * leaving `rowList` containing rows for elements processed so far. Used
+   * by `setPaperMarginAsync` to keep the main thread responsive during the
+   * inherent O(N) cost of re-wrapping every paragraph at a new innerWidth
+   * (left/right page-margin drag on a 28k-element doc costs ~2s).
+   *
+   * Pairs with `chunkSink` — caller passes both, and on break the
+   * pre-iteration loop state is captured into `chunkSink.state` so the
+   * caller can resume in a follow-up `computeRowList(..., resumeFrom)` call.
+   */
+  maxElementIndex?: number
+  chunkSink?: { state: IChunkResumeState | null }
+}
+
+/**
+ * PERF: pre-iteration loop state captured on chunked-rAF break. Has the
+ * same shape as `ILayoutCheckpoint` plus the element index where the next
+ * chunk should resume processing. Caller turns it into an
+ * `IComputeRowListResumePayload` (with the partial rowList as prefix) for
+ * the next chunk's call.
+ */
+export interface IChunkResumeState extends ILayoutCheckpoint {
+  startElementIndex: number
 }
 
 /**

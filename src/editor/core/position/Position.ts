@@ -302,17 +302,48 @@ export class Position {
     return { x, y, index }
   }
 
-  public computePositionList() {
-    // 置空原位置信息
-    this.positionList = []
+  public computePositionList(options?: {
+    /**
+     * Lazy-positions hint for the full recompute path. Stops after `maxPageNo`
+     * and preserves the OLD positionList entries beyond that page (stale —
+     * wrong coordinates), so the painter / area.compute / cursor logic still
+     * see defined entries at every index. Caller tracks the stale window and
+     * refreshes either on scroll (paintPageOnDom guard in Draw.ts) or via the
+     * scheduled async pass. Returns the first stale page index.
+     *
+     * Use case: left/right-margin drag triggers `_tryBuildResumeFrom`
+     * rejection (innerWidth signature mismatch) so the incremental position
+     * path can't engage. The full path used to compute every page (~150ms on
+     * 28k-element doc); with this hint we cap it at visible+overscan and
+     * lazy-refresh the rest.
+     */
+    maxPageNo?: number
+  }): { stalePositionsFromPageNo: number | null } {
+    const maxPageNo = options?.maxPageNo
     const pageRowList = this.draw.getPageRowList()
     const margins = this.draw.getMargins()
-    // 起始位置受页眉影响
     const header = this.draw.getHeader()
     const extraHeight = header.getExtraHeight()
     const startY = margins[0] + extraHeight
+    // Snapshot the OLD list ONLY when lazy mode is engaged — typical full
+    // recompute path stays allocation-free.
+    const oldList = maxPageNo !== undefined ? this.positionList : null
+    // 置空原位置信息
+    this.positionList = []
     let startRowIndex = 0
     for (let i = 0; i < pageRowList.length; i++) {
+      if (maxPageNo !== undefined && i > maxPageNo && oldList) {
+        // Lazy-mode early exit. Restore the tail from the snapshot so
+        // positionList still has defined entries at every index — those
+        // entries reflect the OLD layout (wrong pageNo / coordinates for
+        // the new layout), so callers must check staleness before depending
+        // on accuracy. paintPageOnDom in Draw.ts handles this for paint.
+        const newTailStart = this.positionList.length
+        for (let t = newTailStart; t < oldList.length; t++) {
+          this.positionList[t] = oldList[t]
+        }
+        return { stalePositionsFromPageNo: i }
+      }
       const rowList = pageRowList[i]
       if (!rowList?.length) continue
       for (let k = 0; k < rowList.length; k++) {
@@ -331,6 +362,7 @@ export class Position {
       }
       startRowIndex += rowList.length
     }
+    return { stalePositionsFromPageNo: null }
   }
 
   /**
@@ -373,18 +405,37 @@ export class Position {
       fromNewRowGlobalIndex: number
       deltaElems: number
     }
-  }) {
-    const { fromRowGlobalIndex, fromElementIndex, convergedReuse } = payload
+    /**
+     * Lazy-positions hint (PERF): stop computing positions after `maxPageNo`
+     * and preserve the OLD positionList entries beyond that point in place.
+     * Caller becomes responsible for refreshing those stale positions later
+     * (typically on scroll into view OR via a deferred async pass).
+     *
+     * Use case: paragraph-indent / right-margin drag in long documents.
+     * computePositionList is the dominant cost (~166ms on 28k-element doc)
+     * because every element after the dirty paragraph gets a new
+     * IElementPosition. Visible-page paint only needs positions for visible
+     * pages, so we can short-circuit and finish later.
+     *
+     * Mutually exclusive with `convergedReuse` — caller picks one.
+     * If maxPageNo >= last page, behavior matches no-hint mode.
+     */
+    maxPageNo?: number
+  }): { stalePositionsFromElementIndex: number | null } {
+    const { fromRowGlobalIndex, fromElementIndex, convergedReuse, maxPageNo } =
+      payload
     if (fromElementIndex <= 0 || fromRowGlobalIndex <= 0) {
       // 没有可保留的前缀——退化成全量
       this.computePositionList()
-      return
+      return { stalePositionsFromElementIndex: null }
     }
     // PERF-PLAN follow-up：在截断前快照旧 positionList，供后段「收敛尾部复用」使用。
     // 仅当 convergedReuse 存在时拷贝，正常路径无开销。
-    const oldPositionSnapshot = convergedReuse
-      ? this.positionList.slice()
-      : null
+    // Lazy-mode: also snapshot so we can restore the tail past maxPageNo.
+    const oldPositionSnapshot =
+      convergedReuse || maxPageNo !== undefined
+        ? this.positionList.slice()
+        : null
     // 1) 截断 positionList——前缀部分继续沿用上一帧
     if (this.positionList.length > fromElementIndex) {
       this.positionList.length = fromElementIndex
@@ -404,7 +455,16 @@ export class Position {
     const startY = margins[0] + extraHeight
     let startRowIndex = 0
     let reuseHit = false
+    let stoppedAtElementIndex: number | null = null
     outer: for (let i = 0; i < pageRowList.length; i++) {
+      // Lazy-mode early exit: we've processed up to maxPageNo. Positions for
+      // pages > maxPageNo stay as their previous-frame values (stale; caller
+      // refreshes them lazily). When this fires, set the marker so we know
+      // the tail starting element index.
+      if (maxPageNo !== undefined && i > maxPageNo) {
+        stoppedAtElementIndex = this.positionList.length
+        break outer
+      }
       const rowList = pageRowList[i]
       if (!rowList?.length) continue
       // 整页都在 fromRowGlobalIndex 之前——直接跳过
@@ -464,7 +524,27 @@ export class Position {
         old.index += delta
         this.positionList[newReuseStart + t] = old
       }
+      return { stalePositionsFromElementIndex: null }
     }
+    // Lazy-mode tail restore: we early-exited at maxPageNo before processing
+    // all rows. Restore previous-frame positions for the unprocessed tail so
+    // positionList still has entries at every index — they reflect the OLD
+    // layout though, so callers must refresh them before depending on their
+    // coordinates (paint of those pages, cursor placement, selection geometry).
+    if (stoppedAtElementIndex !== null && oldPositionSnapshot) {
+      const tailStart = stoppedAtElementIndex
+      const tailCount = oldPositionSnapshot.length - tailStart
+      if (tailCount > 0) {
+        this.positionList.length = tailStart + tailCount
+        for (let t = 0; t < tailCount; t++) {
+          const old = oldPositionSnapshot[tailStart + t]
+          if (!old) continue
+          this.positionList[tailStart + t] = old
+        }
+      }
+      return { stalePositionsFromElementIndex: stoppedAtElementIndex }
+    }
+    return { stalePositionsFromElementIndex: null }
   }
 
   public computeRowPosition(

@@ -7,4 +7,5 @@ export interface ISectionBreak {
   font?: string
   fontSize?: number
   lineDash?: number[]
+  disabled?: boolean
 }

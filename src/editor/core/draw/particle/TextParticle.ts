@@ -24,6 +24,14 @@ export class TextParticle {
   private curStyle: string
   private curColor?: string
   public cacheMeasureText: Map<string, TextMetrics>
+  // Per-font cache for measureBasisWord. The basis-word metrics depend only
+  // on the font string, but every TEXT element in computeRowList calls into
+  // measureBasisWord, which does ctx.save / ctx.font = / ctx.restore — that
+  // canvas font mutation alone is ~10-50µs per call on Chrome. On a 28k
+  // element doc that's 300ms-1.4s of pure canvas-state churn even though
+  // the underlying measureText is already cached. Cache the resolved
+  // ITextMetrics by font string and skip the canvas roundtrip entirely.
+  private cacheMeasureBasis: Map<string, ITextMetrics>
 
   constructor(draw: Draw) {
     this.draw = draw
@@ -34,18 +42,22 @@ export class TextParticle {
     this.text = ''
     this.curStyle = ''
     this.cacheMeasureText = new Map()
+    this.cacheMeasureBasis = new Map()
   }
 
   public measureBasisWord(
     ctx: CanvasRenderingContext2D,
     font: string
   ): ITextMetrics {
+    const cached = this.cacheMeasureBasis.get(font)
+    if (cached) return cached
     ctx.save()
     ctx.font = font
     const textMetrics = this.measureText(ctx, {
       value: METRICS_BASIS_TEXT
     })
     ctx.restore()
+    this.cacheMeasureBasis.set(font, textMetrics)
     return textMetrics
   }
 

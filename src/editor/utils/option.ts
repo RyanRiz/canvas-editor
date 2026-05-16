@@ -66,6 +66,8 @@ import { IWhiteSpaceOption } from '../interface/WhiteSpace'
 import { defaultWhiteSpaceOption } from '../dataset/constant/WhiteSpace'
 import { IPageLayeredOption } from '../interface/PageLayered'
 import { defaultPageLayeredOption } from '../dataset/constant/PageLayered'
+import { IRulerOption } from '../interface/Ruler'
+import { defaultRulerOption } from '../dataset/constant/Ruler'
 
 export function mergeOption(
   options: IEditorOption = {}
@@ -186,6 +188,10 @@ export function mergeOption(
     ...defaultPageLayeredOption,
     ...options.pageLayered
   }
+  const rulerOptions: Required<IRulerOption> = {
+    ...defaultRulerOption,
+    ...options.ruler
+  }
   const modeRuleOption: DeepRequired<IModeRule> = {
     print: {
       ...defaultModeRuleOption.print,
@@ -231,6 +237,7 @@ export function mergeOption(
     resizerSize: 5,
     marginIndicatorSize: 35,
     marginIndicatorColor: '#BABABA',
+    marginIndicatorDisabled: false,
     margins: [100, 120, 100, 120],
     pageMode: PageMode.PAGING,
     renderMode: RenderMode.SPEED,
@@ -280,6 +287,7 @@ export function mergeOption(
     imgCaption: imgCaptionOptions,
     list: listOptions,
     magnifier: magnifierOptions,
-    pageLayered: pageLayeredOptions
+    pageLayered: pageLayeredOptions,
+    ruler: rulerOptions
   }
 }

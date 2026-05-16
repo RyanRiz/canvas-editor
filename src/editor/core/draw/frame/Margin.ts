@@ -12,6 +12,7 @@ export class Margin {
   }
 
   public render(ctx: CanvasRenderingContext2D, pageNo: number) {
+    if (this.options.marginIndicatorDisabled) return
     const { marginIndicatorColor, pageMode } = this.options
     const width = this.draw.getWidth()
     const height =

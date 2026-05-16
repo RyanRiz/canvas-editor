@@ -20,6 +20,8 @@ export const EDITOR_ROW_ATTR: Array<keyof IElement> = [
   'rowMargin',
   'indent',
   'rightIndent',
+  'firstLineIndent',
+  'tabStops',
   'spaceBefore',
   'spaceAfter',
   'paragraphShading'
@@ -47,6 +49,8 @@ export const EDITOR_ELEMENT_COPY_ATTR: Array<keyof IElement> = [
   'extension',
   'indent',
   'rightIndent',
+  'firstLineIndent',
+  'tabStops',
   'spaceBefore',
   'spaceAfter',
   'paragraphShading'
@@ -67,6 +71,10 @@ export const EDITOR_ELEMENT_ZIP_ATTR: Array<keyof IElement> = [
   'rowMargin',
   'indent',
   'rightIndent',
+  'firstLineIndent',
+  'tabStops',
+  'spaceBefore',
+  'spaceAfter',
   'paragraphShading',
   'dashArray',
   'trList',
