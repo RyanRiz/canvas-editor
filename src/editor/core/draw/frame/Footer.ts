@@ -61,6 +61,10 @@ export class Footer {
     this.elementList = elementList
     this.variantStorage[this.activeVariant] = elementList
     this.cachedVariantLayouts.delete(this.activeVariant)
+    // Replacing the elementList reference invalidates any in-flight delta
+    // history mutations captured against the OLD reference. Force the next
+    // submitHistory to snapshot so the change is recorded correctly.
+    this.draw.markDeltaHistoryUnsafe()
   }
 
   public getElementList(): IElement[] {
@@ -86,10 +90,15 @@ export class Footer {
       this.elementList = list
     }
     this.cachedVariantLayouts.delete(variant)
+    this.draw.markDeltaHistoryUnsafe()
   }
 
   public setActiveVariant(variant: ChromeVariant) {
     if (variant === this.activeVariant) return
+    // Variant switch swaps `this.elementList` to a different array — any
+    // pending delta mutations captured against the previous variant's
+    // reference are no longer valid. Force snapshot for this submit.
+    this.draw.markDeltaHistoryUnsafe()
     this.variantStorage[this.activeVariant] = this.elementList
     this.activeVariant = variant
     const next = this.variantStorage[variant]
@@ -112,8 +121,19 @@ export class Footer {
 
   public compute() {
     this.recovery()
-    this._computeRowList()
-    this._computePositionList()
+    // Per-section orientation MVP: same treatment as Header.compute — pin
+    // the active page's direction so the cached rowList/positionList that
+    // the cursor reads from is laid out at the right margins / pageHeight.
+    const prevOverride = this.draw.getPaintDirectionOverride()
+    this.draw.setPaintDirectionOverride(
+      this.draw.getPageDirection(this.draw.getPageNo())
+    )
+    try {
+      this._computeRowList()
+      this._computePositionList()
+    } finally {
+      this.draw.setPaintDirectionOverride(prevOverride)
+    }
   }
 
   public recovery() {
@@ -230,15 +250,24 @@ export class Footer {
     const isActive = variant === this.activeVariant
     const elementList = isActive
       ? this.elementList
-      : this.variantStorage[variant] ?? []
+      : (this.variantStorage[variant] ?? [])
     if (!elementList.length) return
     const sourceRowList = isActive
       ? this.rowList
       : this._ensureVariantLayout(variant).rowList
-    const positionList = isActive
-      ? this.positionList
-      : this._ensureVariantLayout(variant).positionList
     if (!sourceRowList.length) return
+
+    // Per-section orientation MVP: the footer's Y is anchored to the page
+    // bottom (`pageHeight - footerBottom - footerHeight`). When the page
+    // being rendered has a different orientation than the one the cached
+    // positionList was computed at, the cached Y values sit OFF-page (e.g.
+    // a portrait-anchored footer on a landscape page falls below the page's
+    // bottom edge). Set the override to this page's direction and recompute
+    // a fresh positionList for that direction. The rowList is reused — text
+    // metrics are font-driven, not direction-driven; only positions are.
+    const prevDirectionOverride = this.draw.getPaintDirectionOverride()
+    const pageDirection = this.draw.getPageDirection(pageNo)
+    this.draw.setPaintDirectionOverride(pageDirection)
 
     ctx.save()
     ctx.globalAlpha = this.zone.isFooterActive()
@@ -256,6 +285,9 @@ export class Footer {
       rowList.push(row)
       curRowHeight += row.height
     }
+    // Recompute a positionList sized to the rendered page's direction.
+    const positionList: IElementPosition[] = []
+    this._computePositionListFor(sourceRowList, positionList)
     const restore = applyPageNumberTokens(elementList, this.draw, pageNo)
     try {
       this.draw.drawRow(ctx, {
@@ -270,6 +302,7 @@ export class Footer {
     } finally {
       restore()
       ctx.restore()
+      this.draw.setPaintDirectionOverride(prevDirectionOverride)
     }
   }
 }

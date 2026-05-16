@@ -608,7 +608,8 @@ export class Position {
           currentPageRows
             .filter(row => {
               const startX = row.pageStartX ?? this.draw.getMargins()[3]
-              const endX = startX + (row.innerWidth ?? this.draw.getInnerWidth())
+              const endX =
+                startX + (row.innerWidth ?? this.draw.getInnerWidth())
               return x >= startX && x <= endX
             })
             .map(row => row.rowIndex)
@@ -855,44 +856,60 @@ export class Position {
     if (!isLastArea) {
       // 页眉页脚正文切换
       if (this.draw.getIsPagingMode()) {
-        const margins = this.draw.getMargins()
-        // 页眉底部距离页面顶部距离
-        const header = this.draw.getHeader()
-        const headerHeight = header.getHeight()
-        const headerBottomY = header.getHeaderTop() + headerHeight
-        // 页脚上部距离页面顶部距离
-        const footer = this.draw.getFooter()
-        const pageHeight = this.draw.getHeight()
-        const footerTopY =
-          pageHeight - (footer.getFooterBottom() + footer.getHeight())
-        // 扩大页眉页脚命中区域：整个顶部/底部页边距都视为可点击
-        // (即使页眉/页脚为空也能点入编辑)
-        const headerHitBottomY = Math.max(headerBottomY, margins[0])
-        const footerHitTopY = Math.min(footerTopY, pageHeight - margins[2])
-        // 判断所属位置是否属于页眉页脚区域
-        if (isMainActive) {
-          // 页眉：当前位置小于扩大后的页眉底部位置
-          if (y < headerHitBottomY) {
-            return {
-              index: -1,
-              zone: EditorZone.HEADER
+        // Per-section orientation MVP: the click coordinate `y` is in the
+        // clicked page's coordinate space. Use that page's direction (not
+        // the document-wide one) when reading margins / pageHeight, so the
+        // footer hit-region is computed against the LANDSCAPE page bottom
+        // rather than the portrait one — otherwise `footerTopY` ends up
+        // off-page on a landscape page and a click in the actual footer
+        // band falls through to MAIN, blocking the dblclick-to-edit
+        // workflow the user expects.
+        const prevDirectionOverride = this.draw.getPaintDirectionOverride()
+        this.draw.setPaintDirectionOverride(
+          this.draw.getPageDirection(curPageNo)
+        )
+        try {
+          const margins = this.draw.getMargins()
+          // 页眉底部距离页面顶部距离
+          const header = this.draw.getHeader()
+          const headerHeight = header.getHeight()
+          const headerBottomY = header.getHeaderTop() + headerHeight
+          // 页脚上部距离页面顶部距离
+          const footer = this.draw.getFooter()
+          const pageHeight = this.draw.getHeight()
+          const footerTopY =
+            pageHeight - (footer.getFooterBottom() + footer.getHeight())
+          // 扩大页眉页脚命中区域：整个顶部/底部页边距都视为可点击
+          // (即使页眉/页脚为空也能点入编辑)
+          const headerHitBottomY = Math.max(headerBottomY, margins[0])
+          const footerHitTopY = Math.min(footerTopY, pageHeight - margins[2])
+          // 判断所属位置是否属于页眉页脚区域
+          if (isMainActive) {
+            // 页眉：当前位置小于扩大后的页眉底部位置
+            if (y < headerHitBottomY) {
+              return {
+                index: -1,
+                zone: EditorZone.HEADER
+              }
+            }
+            // 页脚：当前位置大于扩大后的页脚顶部位置
+            if (y > footerHitTopY) {
+              return {
+                index: -1,
+                zone: EditorZone.FOOTER
+              }
+            }
+          } else {
+            // main区域：当前位置在扩大后的页眉/页脚之间
+            if (y <= footerHitTopY && y >= headerHitBottomY) {
+              return {
+                index: -1,
+                zone: EditorZone.MAIN
+              }
             }
           }
-          // 页脚：当前位置大于扩大后的页脚顶部位置
-          if (y > footerHitTopY) {
-            return {
-              index: -1,
-              zone: EditorZone.FOOTER
-            }
-          }
-        } else {
-          // main区域：当前位置在扩大后的页眉/页脚之间
-          if (y <= footerHitTopY && y >= headerHitBottomY) {
-            return {
-              index: -1,
-              zone: EditorZone.MAIN
-            }
-          }
+        } finally {
+          this.draw.setPaintDirectionOverride(prevDirectionOverride)
         }
       }
       // 正文上-循环首行
