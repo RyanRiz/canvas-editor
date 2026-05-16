@@ -26,6 +26,7 @@
 }
 
 .ce-contextmenu-content .ce-contextmenu-item {
+  position: relative;
   min-width: 140px;
   padding: 0 32px 0 16px;
   height: 30px;
@@ -38,6 +39,18 @@
 
 .ce-contextmenu-content .ce-contextmenu-item.hover {
   background: rgba(25, 55, 88, .04);
+}
+
+/* Active marker for exclusive-group leaves (e.g. image text-wrap modes). The
+   :not() avoids clashing with sub-item's own ::after arrow. */
+.ce-contextmenu-content .ce-contextmenu-item--active:not(.ce-contextmenu-sub-item)::after {
+  position: absolute;
+  content: "✓";
+  right: 12px;
+  color: #1f4480;
+  font-size: 14px;
+  line-height: 30px;
+  font-weight: 600;
 }
 
 .ce-contextmenu-content .ce-contextmenu-item span {

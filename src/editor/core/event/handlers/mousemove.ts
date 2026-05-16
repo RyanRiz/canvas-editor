@@ -61,6 +61,12 @@ export function mousemove(evt: MouseEvent, host: CanvasEvent) {
       x: evt.offsetX,
       y: evt.offsetY
     })
+    // Hand cursor over image/LaTeX hits, default text cursor elsewhere
+    // (page canvas is created with cursor: 'text', see Draw._createPageCanvas).
+    if (target && target.style) {
+      target.style.cursor =
+        ~positionResult.index && positionResult.isImage ? 'grab' : 'text'
+    }
     if (positionResult.isTable && ~positionResult.index) {
       tableTool.render({
         positionContext: positionResult,

@@ -215,6 +215,14 @@ export interface IListOption {
   inheritStyle?: boolean // 是否让列表序号继承文字样式
 }
 
+export interface IImageBorder {
+  /** Border thickness in CSS pixels (the canvas-editor unit). UI surfaces
+   *  convert to/from points (pt × 96/72 = px). */
+  width: number
+  color: string
+  style: 'solid' | 'round-dot' | 'dash'
+}
+
 export interface IImageBasic {
   imgDisplay?: ImageDisplay
   imgFloatPosition?: {
@@ -227,6 +235,12 @@ export interface IImageBasic {
   imgFigureLabel?: string
   imgFigureCaption?: string
   imgFigureDescription?: string
+  imgBorder?: IImageBorder
+  imgRotate?: number
+  /** Mirror horizontally (about the vertical centre line). */
+  imgFlipH?: boolean
+  /** Mirror vertically (about the horizontal centre line). */
+  imgFlipV?: boolean
 }
 
 export type IImageElement = IImageBasic & IImageRule

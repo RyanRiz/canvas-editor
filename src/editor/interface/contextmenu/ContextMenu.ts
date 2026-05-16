@@ -28,6 +28,10 @@ export interface IRegisterContextMenu {
   shortCut?: string
   disable?: boolean
   when?: (payload: IContextMenuContext) => boolean
+  /** Returns true to render the item with a "selected" checkmark — used by
+   *  exclusive groups (e.g. image text-wrap submenu) to mark the active
+   *  option. Evaluated on every context-menu open. */
+  isActive?: (payload: IContextMenuContext) => boolean
   callback?: (command: Command, context: IContextMenuContext) => void
   childMenus?: IRegisterContextMenu[]
 }
