@@ -53,14 +53,27 @@ export function mousemove(evt: MouseEvent, host: CanvasEvent) {
   const position = draw.getPosition()
   if (!host.isAllowSelection || !host.mouseDownStartPosition) {
     const tableTool = draw.getTableTool()
-    if (draw.isReadonly() || draw.getMode() === EditorMode.FORM) {
-      tableTool.dispose()
-      return
-    }
+    // Checkbox / radio cursor feedback — pointer when hovering over a
+    // clickable interactive element on the canvas.
     const positionResult = position.getPositionByXY({
       x: evt.offsetX,
       y: evt.offsetY
     })
+    const pageList = draw.getPageList()
+    if (positionResult.isCheckbox || positionResult.isRadio) {
+      pageList.forEach(p => (p.style.cursor = 'pointer'))
+    } else {
+      pageList.forEach(p => {
+        // Don't overwrite cursor set by painter, copy, or other features
+        if (p.style.cursor !== 'text') {
+          p.style.cursor = 'text'
+        }
+      })
+    }
+    if (draw.isReadonly() || draw.getMode() === EditorMode.FORM) {
+      tableTool.dispose()
+      return
+    }
     if (positionResult.isTable && ~positionResult.index) {
       tableTool.render({
         positionContext: positionResult,

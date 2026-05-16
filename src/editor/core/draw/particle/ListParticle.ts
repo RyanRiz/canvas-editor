@@ -1,6 +1,9 @@
 import { ZERO } from '../../../dataset/constant/Common'
+import { TEXTLIKE_ELEMENT_TYPE } from '../../../dataset/constant/Element'
 import { LIST_INDENT_STEP } from '../../../dataset/constant/listLevel'
 import { ElementType } from '../../../dataset/enum/Element'
+
+const LIST_ROW_MARGIN = 1.25
 import { KeyMap } from '../../../dataset/enum/KeyMap'
 import {
   ListStyle,
@@ -77,6 +80,11 @@ export class ListParticle {
       this.unsetList()
       return
     }
+    // Detect checklist→non-checklist conversion early so the neighbour
+    // expansion loop (below) can force isSelected on all paragraphs.
+    const isChecklistSource = changeElementList.some(
+      el => el.listStyle === ListStyle.CHECKBOX && el.listId
+    ) && effectiveStyle !== ListStyle.CHECKBOX && listType !== null
     // Word parity: when the selected paragraph(s) already belong to a list,
     // keep the existing numbering continuous across an interrupted block
     // (e.g. OL→bullet→OL stays 1,2,3,•,4,5) even if legacy data fragmented
@@ -155,11 +163,38 @@ export class ListParticle {
         listStyle: el.listStyle,
         listLevel: el.listLevel,
         checklistStyle: el.checklistStyle,
-        isSelected: isCollapsed
+        isSelected: isChecklistSource ? true : isCollapsed
       })
     }
     const draw = this.draw
     const requestedChecklistStyle = checklistStyle
+    const checklistCleanup: Array<{
+      zeroIndex: number
+      textIndices: Array<{ index: number; strikeout: boolean | undefined; color: string | undefined }>
+    }> = []
+    if (isChecklistSource) {
+      const cleanupStart = seedListId ? spanStart : firstChangeIdx
+      const cleanupEnd = seedListId ? spanEnd : lastChangeIdx
+      for (let p = cleanupStart; p <= cleanupEnd && p < mainList.length; p++) {
+        const el = mainList[p]
+        if (el.checkbox?.value && el.listStyle === ListStyle.CHECKBOX) {
+          const textEntries: Array<{ index: number; strikeout: boolean | undefined; color: string | undefined }> = []
+          let t = p + 1
+          while (t < mainList.length && mainList[t].value !== ZERO) {
+            const tt = mainList[t].type
+            if (!tt || TEXTLIKE_ELEMENT_TYPE.includes(tt)) {
+              textEntries.push({
+                index: t,
+                strikeout: mainList[t].strikeout,
+                color: mainList[t].color
+              })
+            }
+            t++
+          }
+          checklistCleanup.push({ zeroIndex: p, textIndices: textEntries })
+        }
+      }
+    }
     const applyForward = () => {
       const list = draw.getElementList()
       for (const rec of unifyRecords) {
@@ -170,9 +205,37 @@ export class ListParticle {
           el.listType = listType
           el.listStyle = effectiveStyle
           el.listLevel = 1
+          // Issue 3: looser line spacing for list items (only when entering
+          // a list — preserve existing rowMargin on conversion).
+          if (!rec.listId) {
+            el.rowMargin = LIST_ROW_MARGIN
+          }
           // Apply checklistStyle when entering checklist mode
           if (effectiveStyle === ListStyle.CHECKBOX && requestedChecklistStyle !== undefined) {
             el.checklistStyle = requestedChecklistStyle
+          }
+        }
+      }
+      // Issue 4: clear checklist-derived styling on conversion
+      for (const cs of checklistCleanup) {
+        const zero = list[cs.zeroIndex]
+        if (zero) {
+          delete zero.checkbox
+          delete zero.checklistStyle
+        }
+        for (const t of cs.textIndices) {
+          const te = list[t.index]
+          if (te) {
+            delete te.strikeout
+            delete te.color
+          }
+        }
+      }
+      if (isChecklistSource) {
+        for (const rec of unifyRecords) {
+          if (rec.isSelected) {
+            const el = list[rec.mainIndex]
+            if (el) delete el.checklistStyle
           }
         }
       }
@@ -184,6 +247,7 @@ export class ListParticle {
         if (!el) continue
         if (rec.listId === undefined) {
           delete el.listId
+          delete el.rowMargin
         } else {
           el.listId = rec.listId
         }
@@ -206,6 +270,22 @@ export class ListParticle {
           delete el.checklistStyle
         } else {
           el.checklistStyle = rec.checklistStyle
+        }
+      }
+      // Issue 4: restore checklist-derived styling on undo
+      for (const cs of checklistCleanup) {
+        const zero = list[cs.zeroIndex]
+        if (zero) {
+          zero.checkbox = { value: true }
+        }
+        for (const t of cs.textIndices) {
+          const te = list[t.index]
+          if (te) {
+            if (t.strikeout !== undefined) te.strikeout = t.strikeout
+            else delete te.strikeout
+            if (t.color !== undefined) te.color = t.color
+            else delete te.color
+          }
         }
       }
     }
@@ -302,6 +382,38 @@ export class ListParticle {
         listLevel: el.listLevel
       }))
       .filter(v => v.mainIndex >= 0)
+    // Issue 4: when unsetting a checklist, clear checklist-derived text
+    // styling (strikethrough, muted color) and checked state.
+    const isChecklistUnset = changeElementList.some(
+      el => el.listStyle === ListStyle.CHECKBOX && el.listId
+    )
+    const checklistCleanup: Array<{
+      zeroIndex: number
+      textIndices: Array<{ index: number; strikeout: boolean | undefined; color: string | undefined }>
+    }> = []
+    if (isChecklistUnset) {
+      const clMainList = this.draw.getElementList()
+      for (const el of changeElementList) {
+        if (el.checkbox?.value && el.listStyle === ListStyle.CHECKBOX) {
+          const zeroIdx = clMainList.indexOf(el)
+          if (zeroIdx < 0) continue
+          const textEntries: Array<{ index: number; strikeout: boolean | undefined; color: string | undefined }> = []
+          let t = zeroIdx + 1
+          while (t < clMainList.length && clMainList[t].value !== ZERO) {
+            const tt = clMainList[t].type
+            if (!tt || TEXTLIKE_ELEMENT_TYPE.includes(tt)) {
+              textEntries.push({
+                index: t,
+                strikeout: clMainList[t].strikeout,
+                color: clMainList[t].color
+              })
+            }
+            t++
+          }
+          checklistCleanup.push({ zeroIndex: zeroIdx, textIndices: textEntries })
+        }
+      }
+    }
     // 应用变更
     if (needZeroInsert) {
       elementList.splice(zeroInsertIndex, 0, { value: ZERO })
@@ -313,6 +425,15 @@ export class ListParticle {
       delete el.listWrap
       delete el.listLevel
     })
+    // Issue 4: clear checklist-derived styling immediately
+    for (const cs of checklistCleanup) {
+      const zero = elementList[cs.zeroIndex]
+      if (zero) { delete zero.checkbox; delete zero.checklistStyle }
+      for (const t of cs.textIndices) {
+        const te = elementList[t.index]
+        if (te) { delete te.strikeout; delete te.color }
+      }
+    }
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
     const draw = this.draw
@@ -328,6 +449,15 @@ export class ListParticle {
           delete el.listStyle
           delete el.listWrap
           delete el.listLevel
+        }
+        // Issue 4: clear checklist-derived styling
+        for (const cs of checklistCleanup) {
+          const zero = list[cs.zeroIndex]
+          if (zero) { delete zero.checkbox; delete zero.checklistStyle }
+          for (const t of cs.textIndices) {
+            const te = list[t.index]
+            if (te) { delete te.strikeout; delete te.color }
+          }
         }
         if (needZeroInsert) {
           list.splice(zeroInsertIndex, 0, { value: ZERO })
@@ -347,6 +477,22 @@ export class ListParticle {
           el.listStyle = item.listStyle
           if (item.listWrap !== undefined) el.listWrap = item.listWrap
           if (item.listLevel !== undefined) el.listLevel = item.listLevel
+        }
+        // Issue 4: restore checklist-derived styling
+        for (const cs of checklistCleanup) {
+          const zero = list[cs.zeroIndex]
+          if (zero) {
+            zero.checkbox = { value: true }
+          }
+          for (const t of cs.textIndices) {
+            const te = list[t.index]
+            if (te) {
+              if (t.strikeout !== undefined) te.strikeout = t.strikeout
+              else delete te.strikeout
+              if (t.color !== undefined) te.color = t.color
+              else delete te.color
+            }
+          }
         }
         draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
       }
@@ -537,6 +683,39 @@ export class ListParticle {
     }
     const unifiedListId = seedListId || getUUID()
     const changeSet = new Set(changeElementList)
+    // Issue 4: when converting FROM a checklist to another list type, clear
+    // checklist-derived text styling (strikethrough, muted color) and checked
+    // state so the styling doesn't leak into the new non-checklist list.
+    const isChecklistSourceSetListWithStyle = changeElementList.some(
+      el => el.listStyle === ListStyle.CHECKBOX && el.listId
+    ) && effectiveStyle !== ListStyle.CHECKBOX && listType !== null
+    const checklistCleanupSetListWithStyle: Array<{
+      zeroIndex: number
+      textIndices: Array<{ index: number; strikeout: boolean | undefined; color: string | undefined }>
+    }> = []
+    if (isChecklistSourceSetListWithStyle) {
+      const cleanupStart = seedListId ? spanStart : firstChangeIdx
+      const cleanupEnd = seedListId ? spanEnd : lastChangeIdx
+      for (let p = cleanupStart; p <= cleanupEnd && p < mainList.length; p++) {
+        const el = mainList[p]
+        if (el.checkbox?.value && el.listStyle === ListStyle.CHECKBOX) {
+          const textEntries: Array<{ index: number; strikeout: boolean | undefined; color: string | undefined }> = []
+          let t = p + 1
+          while (t < mainList.length && mainList[t].value !== ZERO) {
+            const tt = mainList[t].type
+            if (!tt || TEXTLIKE_ELEMENT_TYPE.includes(tt)) {
+              textEntries.push({
+                index: t,
+                strikeout: mainList[t].strikeout,
+                color: mainList[t].color
+              })
+            }
+            t++
+          }
+          checklistCleanupSetListWithStyle.push({ zeroIndex: p, textIndices: textEntries })
+        }
+      }
+    }
     type UnifyRecord = {
       mainIndex: number
       listId: string | undefined
@@ -569,7 +748,9 @@ export class ListParticle {
         listType: el.listType,
         listStyle: el.listStyle,
         listLevel: el.listLevel,
-        isSelected: isCollapsed
+        // When converting FROM checklist, force all neighbours to be
+        // selected so the entire block changes list type uniformly.
+        isSelected: isChecklistSourceSetListWithStyle ? true : isCollapsed
       })
     }
 
@@ -602,7 +783,7 @@ export class ListParticle {
             listBulletChar: el.listBulletChar,
             listNumberStyle: el.listNumberStyle
           }))
-          .filter(v => v.mainIndex >= 0)
+      .filter(v => v.mainIndex >= 0)
       : []
 
     // ---- Combined apply ----
@@ -617,6 +798,9 @@ export class ListParticle {
           el.listType = listType
           el.listStyle = effectiveStyle
           el.listLevel = 1
+          if (!rec.listId) {
+            el.rowMargin = LIST_ROW_MARGIN
+          }
         }
       }
       if (byLevel) {
@@ -633,6 +817,29 @@ export class ListParticle {
             }
           } else if (cfg.numberStyle) {
             el.listNumberStyle = cfg.numberStyle
+          }
+        }
+      }
+      // Issue 4: clear checklist-derived styling on conversion
+      for (const cs of checklistCleanupSetListWithStyle) {
+        const zero = list[cs.zeroIndex]
+        if (zero) {
+          delete zero.checkbox
+          delete zero.checklistStyle
+        }
+        for (const t of cs.textIndices) {
+          const te = list[t.index]
+          if (te) {
+            delete te.strikeout
+            delete te.color
+          }
+        }
+      }
+      if (isChecklistSourceSetListWithStyle) {
+        for (const rec of unifyRecords) {
+          if (rec.isSelected) {
+            const el = list[rec.mainIndex]
+            if (el) delete el.checklistStyle
           }
         }
       }
@@ -681,6 +888,22 @@ export class ListParticle {
           delete el.listNumberStyle
         } else {
           el.listNumberStyle = item.listNumberStyle
+        }
+      }
+      // Issue 4: restore checklist-derived styling on undo
+      for (const cs of checklistCleanupSetListWithStyle) {
+        const zero = list[cs.zeroIndex]
+        if (zero) {
+          zero.checkbox = { value: true }
+        }
+        for (const t of cs.textIndices) {
+          const te = list[t.index]
+          if (te) {
+            if (t.strikeout !== undefined) te.strikeout = t.strikeout
+            else delete te.strikeout
+            if (t.color !== undefined) te.color = t.color
+            else delete te.color
+          }
         }
       }
     }
@@ -1035,30 +1258,34 @@ export class ListParticle {
       .getRangeParagraphElementList()
       ?.filter(el => el.listId && el.listStyle === ListStyle.CHECKBOX)
     if (!changeElementList || !changeElementList.length) return false
-    const isCollapsed = startIndex === endIndex
-    // Expand to entire list block when cursor is collapsed
-    if (isCollapsed && changeElementList[0]?.listId) {
-      const blockListId = changeElementList[0].listId
+    // Expand to entire list block.
+    // First pass: walk same-listId neighbours (handles unified lists).
+    // Second pass: walk any adjacent list paragraph (any listId) to catch
+    // fragmented listIds from separate creation events.
+    if (changeElementList[0]?.listId) {
       const mainList = this.draw.getElementList()
       let blockStart = mainList.indexOf(changeElementList[0])
-      while (
-        blockStart > 0 &&
-        mainList[blockStart - 1]?.listId === blockListId
-      ) {
-        blockStart--
-      }
       let blockEnd = mainList.indexOf(
         changeElementList[changeElementList.length - 1]
       )
-      while (
-        blockEnd < mainList.length - 1 &&
-        mainList[blockEnd + 1]?.listId === blockListId
-      ) {
+      const blockListId = changeElementList[0].listId
+      // First pass: same listId
+      while (blockStart > 0 && mainList[blockStart - 1]?.listId === blockListId) {
+        blockStart--
+      }
+      while (blockEnd < mainList.length - 1 && mainList[blockEnd + 1]?.listId === blockListId) {
+        blockEnd++
+      }
+      // Second pass: any adjacent list paragraph (any listId)
+      while (blockStart > 0 && mainList[blockStart - 1]?.listId) {
+        blockStart--
+      }
+      while (blockEnd < mainList.length - 1 && mainList[blockEnd + 1]?.listId) {
         blockEnd++
       }
       const expanded: IElement[] = []
       for (let i = blockStart; i <= blockEnd; i++) {
-        if (mainList[i].listId === blockListId) {
+        if (mainList[i].listStyle === ListStyle.CHECKBOX) {
           expanded.push(mainList[i])
         }
       }
@@ -1081,12 +1308,48 @@ export class ListParticle {
       }))
       .filter(v => v.mainIndex >= 0)
     const draw = this.draw
+    // Issue 2: when switching checklist style, also refresh text styling
+    // (strikethrough, muted color) on already-checked items so the visual
+    // updates immediately instead of waiting for a re-toggle.
+    const mutedColor = '#5F6368'
+    const textRefresh: Array<{
+      index: number
+      oldStrikeout: boolean | undefined
+      oldColor: string | undefined
+    }> = []
+    for (const el of checklistElements) {
+      if (el.checkbox?.value && el.value === ZERO) {
+        let t = mainList.indexOf(el) + 1
+        while (t < mainList.length && mainList[t].value !== ZERO) {
+          const tt = mainList[t].type
+          if (!tt || TEXTLIKE_ELEMENT_TYPE.includes(tt)) {
+            textRefresh.push({
+              index: t,
+              oldStrikeout: mainList[t].strikeout,
+              oldColor: mainList[t].color
+            })
+          }
+          t++
+        }
+      }
+    }
     const applyForward = () => {
       const list = draw.getElementList()
       for (const item of oldValues) {
         const el = list[item.mainIndex]
         if (!el) continue
         el.checklistStyle = checklistStyle
+      }
+      // Issue 2: re-apply text styling for checked items
+      for (const tr of textRefresh) {
+        const te = list[tr.index]
+        if (!te) continue
+        te.color = mutedColor
+        if (checklistStyle === 'standard') {
+          te.strikeout = true
+        } else {
+          delete te.strikeout
+        }
       }
     }
     const applyBackward = () => {
@@ -1099,6 +1362,15 @@ export class ListParticle {
         } else {
           el.checklistStyle = item.checklistStyle
         }
+      }
+      // Issue 2: restore old text styling
+      for (const tr of textRefresh) {
+        const te = list[tr.index]
+        if (!te) continue
+        if (tr.oldStrikeout !== undefined) te.strikeout = tr.oldStrikeout
+        else delete te.strikeout
+        if (tr.oldColor !== undefined) te.color = tr.oldColor
+        else delete te.color
       }
     }
     applyForward()
