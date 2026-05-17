@@ -79,7 +79,9 @@ export function enter(evt: KeyboardEvent, host: CanvasEvent) {
       const isSetCursor = true
       const curIndex = endIndex
       const dirtyStart = endIndex
-      const dirtyEnd = endIndex + (belowIndices.length > 0 ? belowIndices[belowIndices.length - 1] : 0)
+      const dirtyEnd =
+        endIndex +
+        (belowIndices.length > 0 ? belowIndices[belowIndices.length - 1] : 0)
       draw.getHistoryManager().executeDelta({
         applyForward: () => {
           const list = draw.getElementList()
@@ -141,12 +143,32 @@ export function enter(evt: KeyboardEvent, host: CanvasEvent) {
     value: ZERO
   }
   // Inherit list properties so Enter inside a non-empty list item creates a
-  // continuing list item (Word Desktop / Google Docs pattern).
+  // continuing list item (Word Desktop / Google Docs pattern). Inherit ALL
+  // marker-affecting fields — without listTemplateId / listFormat /
+  // listBulletChar / listNumberStyle the new item falls through to the
+  // engine's default render path and produces a marker that doesn't match
+  // its siblings (e.g. "e." with period instead of "e)" with parenthesis
+  // in an alphanumeric-mixed multi-level template).
   if (startElement.listId) {
     enterText.listId = startElement.listId
     enterText.listType = startElement.listType
     enterText.listStyle = startElement.listStyle
     enterText.listLevel = startElement.listLevel ?? 1
+    if (startElement.listFormat !== undefined) {
+      enterText.listFormat = startElement.listFormat
+    }
+    if (startElement.listBulletChar !== undefined) {
+      enterText.listBulletChar = startElement.listBulletChar
+    }
+    if (startElement.listNumberStyle !== undefined) {
+      enterText.listNumberStyle = startElement.listNumberStyle
+    }
+    if (startElement.listTemplateId !== undefined) {
+      enterText.listTemplateId = startElement.listTemplateId
+    }
+    if (startElement.checklistStyle !== undefined) {
+      enterText.checklistStyle = startElement.checklistStyle
+    }
   }
   if (evt.shiftKey && startElement.listId) {
     enterText.listWrap = true

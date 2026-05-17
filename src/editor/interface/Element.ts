@@ -113,6 +113,26 @@ export interface IListElement {
   listNumberStyle?: ListNumberStyle
   listBulletChar?: string
   checklistStyle?: 'standard' | 'plain'
+  /**
+   * Word-style "Set Numbering Value" — overrides the implicit 1-based start
+   * for this list-paragraph's bucket. When present on the first list-start
+   * of a (listId, listType) bucket, computeListGlyphMap seeds
+   * `counters[level - 1] = listStartValue - 1` so the natural `+= 1`
+   * increment lands on `listStartValue`. Stamped on every paragraph of the
+   * list block (mirrors listFormat), but only the first encountered start
+   * actually shifts the counter.
+   */
+  listStartValue?: number
+  /**
+   * Word-style "Multi-Level List" template identifier. References a template
+   * registered via `registerMultilevelTemplate(id, IListStyle)` in
+   * `utils/listNumbering`. When present, `computeListGlyphMap` consults the
+   * template's `levels[listLevel - 1]` config (numberStyle / format /
+   * bulletChar) at RENDER time — Tab/Shift+Tab change `listLevel` and the
+   * glyph cascades automatically across levels without re-stamping each
+   * paragraph. Stamped on every paragraph of the list block.
+   */
+  listTemplateId?: string
 }
 
 export interface ITableAttr {

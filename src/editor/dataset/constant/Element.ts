@@ -155,7 +155,15 @@ export const LIST_CONTEXT_ATTR: Array<keyof IElement> = [
   'listFormat',
   'listNumberStyle',
   'listBulletChar',
-  'checklistStyle'
+  'checklistStyle',
+  // Multi-level template binding — must propagate so Enter / text input /
+  // paste preserve the template attachment. Without this, a new sibling of
+  // a level-N template paragraph would lose the templateId and fall through
+  // to engine defaults (e.g. "e." instead of "e)" for alphanumeric-mixed).
+  'listTemplateId',
+  // Per-list-block start value — must propagate so Enter at the end of a
+  // list with "Set Numbering Value" preserves the seeded counter base.
+  'listStartValue'
 ]
 
 export const CONTROL_CONTEXT_ATTR: Array<keyof IElement> = [

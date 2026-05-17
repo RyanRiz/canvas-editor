@@ -16,6 +16,10 @@ import {
 import { ElementType } from './dataset/enum/Element'
 import { SectionBreakType } from './dataset/enum/SectionBreak'
 import { formatElementList } from './utils/element'
+import {
+  registerMultilevelTemplate,
+  getMultilevelTemplate
+} from './utils/listNumbering'
 import { Register } from './core/register/Register'
 import { ContextMenu } from './core/contextmenu/ContextMenu'
 import {
@@ -185,7 +189,9 @@ export {
   splitText,
   createDomFromElementList,
   getElementListByHTML,
-  getTextFromElementList
+  getTextFromElementList,
+  registerMultilevelTemplate,
+  getMultilevelTemplate
 }
 
 // 对外常量

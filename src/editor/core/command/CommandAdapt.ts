@@ -1294,7 +1294,11 @@ export class CommandAdapt {
     const selectedStart =
       startIndex === endIndex
         ? clampIndex(endIndex)
-        : clampIndex(elementList[startIndex]?.value === ZERO ? startIndex : startIndex + 1)
+        : clampIndex(
+            elementList[startIndex]?.value === ZERO
+              ? startIndex
+              : startIndex + 1
+          )
     const selectedEnd = clampIndex(endIndex)
 
     let paragraphStart = selectedStart
@@ -1467,7 +1471,9 @@ export class CommandAdapt {
 
     const paragraphStarts = new Set<number>()
     for (let i = 0; i < elementList.length; i++) {
-      const ext = elementList[i].extension as { wordStyle?: unknown } | undefined
+      const ext = elementList[i].extension as
+        | { wordStyle?: unknown }
+        | undefined
       if (!ext || typeof ext !== 'object' || ext.wordStyle !== styleId) {
         continue
       }
@@ -1482,12 +1488,16 @@ export class CommandAdapt {
       indexes.add(start)
       if (
         elementList[start]?.value === ZERO &&
-        (start + 1 >= elementList.length || elementList[start + 1]?.value === ZERO)
+        (start + 1 >= elementList.length ||
+          elementList[start + 1]?.value === ZERO)
       ) {
         continue
       }
       let end = start
-      while (end + 1 < elementList.length && elementList[end + 1]?.value !== ZERO) {
+      while (
+        end + 1 < elementList.length &&
+        elementList[end + 1]?.value !== ZERO
+      ) {
         end++
       }
       for (let i = start; i <= end; i++) indexes.add(i)
@@ -1625,7 +1635,11 @@ export class CommandAdapt {
     this.draw.render({ curIndex, isSetCursor, isSubmitHistory: false })
   }
 
-  public list(listType: ListType | null, listStyle?: ListStyle, checklistStyle?: 'standard' | 'plain') {
+  public list(
+    listType: ListType | null,
+    listStyle?: ListStyle,
+    checklistStyle?: 'standard' | 'plain'
+  ) {
     const isReadonly = this.draw.isReadonly()
     if (isReadonly) return
     this.draw.getListParticle().setList(listType, listStyle, checklistStyle)
@@ -1651,6 +1665,17 @@ export class CommandAdapt {
     this.draw.getListParticle().setLevel(level)
   }
 
+  public listSetStartValue(
+    value: number,
+    continuePrevious?: boolean,
+    advance?: boolean
+  ) {
+    if (this.draw.isReadonly()) return
+    this.draw
+      .getListParticle()
+      .setStartValue(value, !!continuePrevious, !!advance)
+  }
+
   public listStyle(style: IListStyle) {
     if (this.draw.isReadonly()) return
     this.draw.getListParticle().applyStyle(style)
@@ -1662,7 +1687,9 @@ export class CommandAdapt {
     styleConfig?: IListStyle
   ) {
     if (this.draw.isReadonly()) return
-    this.draw.getListParticle().setListWithStyle(listType, listStyle, styleConfig)
+    this.draw
+      .getListParticle()
+      .setListWithStyle(listType, listStyle, styleConfig)
   }
 
   public checklistStyle(checklistStyle: 'standard' | 'plain'): boolean {
@@ -1834,7 +1861,8 @@ export class CommandAdapt {
     }
     const applyBackward = () => {
       for (const item of oldValues) {
-        if (item.rightIndent !== undefined) item.el.rightIndent = item.rightIndent
+        if (item.rightIndent !== undefined)
+          item.el.rightIndent = item.rightIndent
         else delete item.el.rightIndent
       }
     }

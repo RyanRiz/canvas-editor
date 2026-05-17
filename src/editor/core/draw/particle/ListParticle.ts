@@ -21,7 +21,10 @@ import {
 } from '../../../interface/List'
 import { IRow, IRowElement } from '../../../interface/Row'
 import { getUUID } from '../../../utils'
-import { computeListGlyphMap } from '../../../utils/listNumbering'
+import {
+  computeListGlyphMap,
+  getMultilevelTemplate
+} from '../../../utils/listNumbering'
 import { RangeManager } from '../../range/RangeManager'
 import { Draw } from '../Draw'
 
@@ -74,8 +77,23 @@ export class ListParticle {
         : listType === ListType.OL
           ? (this.currentOrderedStyle as unknown as ListStyle)
           : undefined)
-    const changeElementList = this.range.getRangeParagraphElementList()
+    // Word-parity collapsed-cursor scope: when the user clicks a list-type
+    // toggle with a collapsed cursor on a multi-level list paragraph,
+    // restrict scope to paragraphs at the SAME listLevel as the cursor.
+    // Without this, parent (level 1) + child (level 2) paragraphs sharing
+    // one listId all flip, dropping the parent's custom markers.
+    const cursorElForScope = this.draw.getElementList()[endIndex]
+    const cursorLevel = cursorElForScope?.listLevel ?? 1
+    const isCollapsedLevelScope =
+      startIndex === endIndex && !!cursorElForScope?.listId
+    let changeElementList = this.range.getRangeParagraphElementList()
     if (!changeElementList || !changeElementList.length) return
+    if (isCollapsedLevelScope) {
+      const filtered = changeElementList.filter(
+        el => !el.listId || (el.listLevel ?? 1) === cursorLevel
+      )
+      if (filtered.length) changeElementList = filtered
+    }
     // Skip toggle-off when explicitly changing checklist style variant
     const isUnsetList =
       !checklistStyle &&
@@ -165,6 +183,12 @@ export class ListParticle {
       const el = mainList[p]
       if (!el.listId) continue
       if (changeSet.has(el)) continue
+      // Neighbour inclusion under collapsed-cursor scope: only flip
+      // paragraphs at the SAME listLevel as the cursor. Level-mismatched
+      // neighbours stay in the unification (one listId, continuous numbering)
+      // but keep their own listType/listStyle.
+      const sameLevel =
+        !isCollapsedLevelScope || (el.listLevel ?? 1) === cursorLevel
       unifyRecords.push({
         mainIndex: p,
         listId: el.listId,
@@ -172,7 +196,7 @@ export class ListParticle {
         listStyle: el.listStyle,
         listLevel: el.listLevel,
         checklistStyle: el.checklistStyle,
-        isSelected: isChecklistSource ? true : isCollapsed
+        isSelected: isChecklistSource ? true : isCollapsed && sameLevel
       })
     }
     const draw = this.draw
@@ -221,11 +245,15 @@ export class ListParticle {
         if (rec.isSelected) {
           el.listType = listType
           el.listStyle = effectiveStyle
-          el.listLevel = 1
-          // Issue 3: looser line spacing for list items (only when entering
-          // a list — preserve existing rowMargin on conversion).
+          // Preserve listLevel when the paragraph was already in a list
+          // (changing TYPE shouldn't outdent). Default to 1 only when
+          // entering a list from plain text. Mirrors Word's "toggling list
+          // type keeps multi-level indent" behaviour.
           if (!rec.listId) {
+            el.listLevel = 1
             el.rowMargin = LIST_ROW_MARGIN
+          } else if (rec.listLevel !== undefined) {
+            el.listLevel = rec.listLevel
           }
           // Apply checklistStyle when entering checklist mode
           if (
@@ -342,9 +370,21 @@ export class ListParticle {
       .getRangeParagraphElementList()
       ?.filter(el => el.listId)
     if (!changeElementList || !changeElementList.length) return
+    // Word-parity collapsed-cursor scope: restrict to same listLevel.
+    const ulCursorEl = this.draw.getElementList()[endIndex]
+    const ulCursorLevel = ulCursorEl?.listLevel ?? 1
+    const ulIsCollapsedLevelScope =
+      startIndex === endIndex && !!ulCursorEl?.listId
+    if (ulIsCollapsedLevelScope) {
+      const filtered = changeElementList.filter(
+        el => (el.listLevel ?? 1) === ulCursorLevel
+      )
+      if (filtered.length) changeElementList = filtered
+    }
     // Word parity: when the selection is collapsed and the cursor sits
     // inside a list, remove the list from the ENTIRE contiguous block
     // (same listId), not just the one paragraph the cursor touches.
+    // Multi-level: only paragraphs at the SAME listLevel are unset.
     const isCollapsed = startIndex === endIndex
     let didExpandBlock = false
     if (isCollapsed && changeElementList[0]?.listId) {
@@ -368,9 +408,12 @@ export class ListParticle {
       }
       const expanded: IElement[] = []
       for (let i = blockStart; i <= blockEnd; i++) {
-        if (mainList[i].listId === blockListId) {
-          expanded.push(mainList[i])
+        const el = mainList[i]
+        if (el.listId !== blockListId) continue
+        if (ulIsCollapsedLevelScope && (el.listLevel ?? 1) !== ulCursorLevel) {
+          continue
         }
+        expanded.push(el)
       }
       if (expanded.length > changeElementList.length) {
         changeElementList = expanded
@@ -757,6 +800,18 @@ export class ListParticle {
           : undefined)
     let changeElementList = this.range.getRangeParagraphElementList()
     if (!changeElementList || !changeElementList.length) return
+    // Word-parity collapsed-cursor scope: restrict to same listLevel.
+    const mainList = this.draw.getElementList()
+    const lwsCursorEl = mainList[endIndex]
+    const lwsCursorLevel = lwsCursorEl?.listLevel ?? 1
+    const lwsIsCollapsedLevelScope =
+      startIndex === endIndex && !!lwsCursorEl?.listId
+    if (lwsIsCollapsedLevelScope) {
+      const filtered = changeElementList.filter(
+        el => !el.listId || (el.listLevel ?? 1) === lwsCursorLevel
+      )
+      if (filtered.length) changeElementList = filtered
+    }
     // Only toggle-off when no explicit styleConfig was provided (plain toggle).
     // When styleConfig is present (dropdown pick), the user wants to change
     // the style — not toggle the list off — even if type+style happen to match.
@@ -769,13 +824,13 @@ export class ListParticle {
       this.unsetList()
       return
     }
-    const mainList = this.draw.getElementList()
     // Word parity: when the selection is collapsed and the cursor sits in
     // an existing list block, expand changeElementList to cover the entire
     // contiguous listId block — so the style config (bullet char, format)
     // gets applied uniformly across the whole logical list, not just the
     // cursor paragraph. Range selections only affect their highlighted
-    // paragraphs (no expansion).
+    // paragraphs (no expansion). Restricted to same listLevel under
+    // collapsed-cursor scope (see lwsIsCollapsedLevelScope above).
     {
       const isCollapsedCheck = startIndex === endIndex
       const cursorListId = changeElementList[0]?.listId
@@ -795,7 +850,15 @@ export class ListParticle {
         }
         const expanded: IElement[] = []
         for (let i = bStart; i <= bEnd; i++) {
-          if (mainList[i].listId === cursorListId) expanded.push(mainList[i])
+          const el = mainList[i]
+          if (el.listId !== cursorListId) continue
+          if (
+            lwsIsCollapsedLevelScope &&
+            (el.listLevel ?? 1) !== lwsCursorLevel
+          ) {
+            continue
+          }
+          expanded.push(el)
         }
         if (expanded.length > changeElementList.length) {
           changeElementList = expanded
@@ -897,6 +960,10 @@ export class ListParticle {
       const el = mainList[p]
       if (!el.listId) continue
       if (changeSet.has(el)) continue
+      // Neighbour inclusion under collapsed-cursor scope: only flip
+      // paragraphs at the SAME listLevel as the cursor.
+      const sameLevel =
+        !lwsIsCollapsedLevelScope || (el.listLevel ?? 1) === lwsCursorLevel
       unifyRecords.push({
         mainIndex: p,
         listId: el.listId,
@@ -905,7 +972,9 @@ export class ListParticle {
         listLevel: el.listLevel,
         // When converting FROM checklist, force all neighbours to be
         // selected so the entire block changes list type uniformly.
-        isSelected: isChecklistSourceSetListWithStyle ? true : isCollapsed
+        isSelected: isChecklistSourceSetListWithStyle
+          ? true
+          : isCollapsed && sameLevel
       })
     }
 
@@ -919,24 +988,42 @@ export class ListParticle {
     // When cursor is collapsed, apply style config (bullet char, number style)
     // to the entire contiguous list block, not just the cursor's paragraph.
     // Mirrors the block-expansion pattern in applyStyle().
+    // Critical: respects `lwsIsCollapsedLevelScope` so the style config does
+    // NOT leak onto out-of-level paragraphs (multi-level scope correctness).
+    // Without this filter, level-1 parents would receive level-1's cfg fields
+    // (listFormat / listBulletChar) stamped on top of their custom format,
+    // corrupting the parent list's markers.
     if (isCollapsed && byLevel) {
       const expanded: IElement[] = []
       for (let p = spanStart; p <= spanEnd && p < mainList.length; p++) {
-        if (mainList[p].listId) {
-          expanded.push(mainList[p])
+        const el = mainList[p]
+        if (!el.listId) continue
+        if (
+          lwsIsCollapsedLevelScope &&
+          (el.listLevel ?? 1) !== lwsCursorLevel
+        ) {
+          continue
         }
+        expanded.push(el)
       }
       if (expanded.length > changeElementList.length) {
         changeElementList = expanded
       }
     }
+    // Word multi-level template: when styleConfig.id matches a registered
+    // template, treat this as a template apply — stamp listTemplateId on each
+    // paragraph and clear per-element format/bulletChar/numberStyle so the
+    // render-time template lookup wins on every level.
+    const isTemplateSetListWithStyle =
+      !!styleConfig?.id && !!getMultilevelTemplate(styleConfig.id)
     const styleOldValues = byLevel
       ? changeElementList
           .map(el => ({
             mainIndex: mainList.indexOf(el),
             listFormat: el.listFormat,
             listBulletChar: el.listBulletChar,
-            listNumberStyle: el.listNumberStyle
+            listNumberStyle: el.listNumberStyle,
+            listTemplateId: el.listTemplateId
           }))
           .filter(v => v.mainIndex >= 0)
       : []
@@ -952,9 +1039,14 @@ export class ListParticle {
         if (rec.isSelected) {
           el.listType = listType
           el.listStyle = effectiveStyle
-          el.listLevel = 1
+          // Preserve listLevel when the paragraph was already in a list —
+          // toggling list TYPE must not outdent multi-level items. Defaults
+          // to 1 only when entering a list from plain text.
           if (!rec.listId) {
+            el.listLevel = 1
             el.rowMargin = LIST_ROW_MARGIN
+          } else if (rec.listLevel !== undefined) {
+            el.listLevel = rec.listLevel
           }
         }
       }
@@ -962,6 +1054,15 @@ export class ListParticle {
         for (const item of styleOldValues) {
           const el = list[item.mainIndex]
           if (!el) continue
+          if (isTemplateSetListWithStyle && styleConfig?.id) {
+            el.listTemplateId = styleConfig.id
+            // Clear per-element fields so render-time template lookup wins
+            // on every level — Tab cascade depends on these NOT being set.
+            delete el.listFormat
+            delete el.listBulletChar
+            delete el.listNumberStyle
+            continue
+          }
           const lvl = el.listLevel ?? 1
           const cfg = byLevel.get(lvl)
           if (!cfg) continue
@@ -1043,6 +1144,11 @@ export class ListParticle {
           delete el.listNumberStyle
         } else {
           el.listNumberStyle = item.listNumberStyle
+        }
+        if (item.listTemplateId === undefined) {
+          delete el.listTemplateId
+        } else {
+          el.listTemplateId = item.listTemplateId
         }
       }
       // Issue 4: restore checklist-derived styling on undo
@@ -1178,11 +1284,26 @@ export class ListParticle {
       ?.filter(el => el.listId)
     if (!changeElementList || !changeElementList.length) return false
     if (!style?.levels?.length) return false
+    // Word-parity collapsed-cursor scope: restrict style-config stamping
+    // to paragraphs at the SAME listLevel as the cursor. Without this filter
+    // a level-2 child apply would stamp level-1's cfg.format / cfg.bulletChar
+    // onto the surrounding level-1 parents.
+    const asCursorEl = this.draw.getElementList()[endIndex]
+    const asCursorLevel = asCursorEl?.listLevel ?? 1
+    const asIsCollapsedLevelScope =
+      startIndex === endIndex && !!asCursorEl?.listId
+    if (asIsCollapsedLevelScope) {
+      const filtered = changeElementList.filter(
+        el => (el.listLevel ?? 1) === asCursorLevel
+      )
+      if (filtered.length) changeElementList = filtered
+    }
     // Word parity: when the selection is collapsed, apply the style
     // config to the entire contiguous listId block — same expansion
     // pattern used by setList() and unsetList(). Without this, the
     // cursor paragraph gets properties (e.g. listBulletChar) that
     // neighbor paragraphs lack, causing divergent glyph rendering.
+    // Level-filtered when collapsed-cursor-scope applies (multi-level).
     const isCollapsed = startIndex === endIndex
     if (isCollapsed && changeElementList[0]?.listId) {
       const blockListId = changeElementList[0].listId
@@ -1205,14 +1326,23 @@ export class ListParticle {
       }
       const expanded: IElement[] = []
       for (let i = blockStart; i <= blockEnd; i++) {
-        if (mainList[i].listId === blockListId) {
-          expanded.push(mainList[i])
+        const el = mainList[i]
+        if (el.listId !== blockListId) continue
+        if (asIsCollapsedLevelScope && (el.listLevel ?? 1) !== asCursorLevel) {
+          continue
         }
+        expanded.push(el)
       }
       if (expanded.length > changeElementList.length) {
         changeElementList = expanded
       }
     }
+    // Word multi-level template: when `style.id` matches a template registered
+    // via `registerMultilevelTemplate`, stamp `listTemplateId` on every
+    // paragraph and CLEAR per-element list fields. Render-time template
+    // lookup in `computeListGlyphMap` then cascades the glyph per listLevel
+    // without further mutation on Tab.
+    const isTemplate = !!getMultilevelTemplate(style.id)
     const byLevel = new Map<number, (typeof style.levels)[number]>()
     for (const lvl of style.levels) byLevel.set(lvl.level, lvl)
     // Capture by index, not by reference, so deltas survive snapshot restore
@@ -1223,7 +1353,8 @@ export class ListParticle {
         mainIndex: mainListForApply.indexOf(el),
         listFormat: el.listFormat,
         listBulletChar: el.listBulletChar,
-        listNumberStyle: el.listNumberStyle
+        listNumberStyle: el.listNumberStyle,
+        listTemplateId: el.listTemplateId
       }))
       .filter(v => v.mainIndex >= 0)
     const draw = this.draw
@@ -1232,6 +1363,15 @@ export class ListParticle {
       for (const item of oldValues) {
         const el = list[item.mainIndex]
         if (!el) continue
+        if (isTemplate) {
+          el.listTemplateId = style.id
+          // Clear per-element fields so template render-time lookup wins
+          // on every level (Tab cascade depends on these NOT being set).
+          delete el.listFormat
+          delete el.listBulletChar
+          delete el.listNumberStyle
+          continue
+        }
         const lvl = el.listLevel ?? 1
         const cfg = byLevel.get(lvl)
         if (!cfg) continue
@@ -1262,6 +1402,11 @@ export class ListParticle {
           delete el.listNumberStyle
         } else {
           el.listNumberStyle = item.listNumberStyle
+        }
+        if (item.listTemplateId === undefined) {
+          delete el.listTemplateId
+        } else {
+          el.listTemplateId = item.listTemplateId
         }
       }
     }
@@ -1301,6 +1446,109 @@ export class ListParticle {
     if (!mutated) return false
     const isSetCursor = startIndex === endIndex
     const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.invalidatePaintCache?.()
+    this.draw.invalidateListLayoutCache?.()
+    this.draw.render({ curIndex, isSetCursor })
+    return true
+  }
+
+  /**
+   * Word-style "Set Numbering Value". Two modes:
+   *
+   * 1. `continuePrevious = false` (default — "Start new list"): stamps
+   *    `listStartValue = value` on every paragraph of the current list block.
+   *    `computeListGlyphMap` seeds the bucket so the first item renders
+   *    `value`, and subsequent items continue naturally (`value+1`, `value+2`…).
+   *
+   * 2. `continuePrevious = true` ("Continue from previous list"): finds the
+   *    nearest preceding list element with a matching `listStyle`, copies its
+   *    `listId` (and listStyle / listFormat / listNumberStyle) onto the
+   *    current list block so both share one counter bucket. If `advance` is
+   *    true, also stamps `listStartValue = value` to push the counter past
+   *    the natural next number. If false, the counter just continues
+   *    naturally from where the previous list left off.
+   *
+   * Pushes one snapshot history entry via the standard render path.
+   *
+   * @param value           1-based start (or skip-to value when advance=true)
+   * @param continuePrevious  true → merge with prior list of same style
+   * @param advance         only honored when continuePrevious=true; true means
+   *                        the counter jumps to `value`, false means continue
+   *                        from the natural next number
+   */
+  public setStartValue(
+    value: number,
+    continuePrevious: boolean = false,
+    advance: boolean = false
+  ): boolean {
+    if (this.draw.isReadonly()) return false
+    const { startIndex, endIndex } = this.range.getRange()
+    if (!~startIndex && !~endIndex) return false
+    const changeElementList = this.range
+      .getRangeParagraphElementList()
+      ?.filter(el => el.listId)
+    if (!changeElementList || !changeElementList.length) return false
+    const v = Math.max(1, Math.floor(value))
+    let mutated = false
+
+    if (continuePrevious) {
+      const mainList = this.draw.getElementList()
+      const firstChangeIdx = mainList.indexOf(changeElementList[0])
+      if (firstChangeIdx < 0) return false
+      const targetStyle = changeElementList[0].listStyle
+      let prev: IElement | undefined
+      for (let i = firstChangeIdx - 1; i >= 0; i--) {
+        const candidate = mainList[i]
+        if (!candidate.listId) continue
+        if (candidate.listId === changeElementList[0].listId) continue
+        if (candidate.listStyle !== targetStyle) continue
+        prev = candidate
+        break
+      }
+      if (!prev || !prev.listId) return false
+      const targetListId = prev.listId
+      const targetFormat = prev.listFormat
+      const targetNumberStyle = prev.listNumberStyle
+      changeElementList.forEach(el => {
+        if (el.listId !== targetListId) {
+          el.listId = targetListId
+          mutated = true
+        }
+        if (targetFormat !== undefined && el.listFormat !== targetFormat) {
+          el.listFormat = targetFormat
+          mutated = true
+        }
+        if (
+          targetNumberStyle !== undefined &&
+          el.listNumberStyle !== targetNumberStyle
+        ) {
+          el.listNumberStyle = targetNumberStyle
+          mutated = true
+        }
+        if (advance) {
+          if (el.listStartValue !== v) {
+            el.listStartValue = v
+            mutated = true
+          }
+        } else if (el.listStartValue !== undefined) {
+          delete el.listStartValue
+          mutated = true
+        }
+      })
+    } else {
+      changeElementList.forEach(el => {
+        if (el.listStartValue !== v) {
+          el.listStartValue = v
+          mutated = true
+        }
+      })
+    }
+
+    if (!mutated) return false
+    const isSetCursor = startIndex === endIndex
+    const curIndex = isSetCursor ? endIndex : startIndex
+    this.draw.invalidatePaintCache?.()
+    this.draw.invalidateListLayoutCache?.()
     this.draw.render({ curIndex, isSetCursor })
     return true
   }
@@ -1431,14 +1679,27 @@ export class ListParticle {
     if (this.draw.isReadonly()) return false
     const { startIndex, endIndex } = this.range.getRange()
     if (!~startIndex && !~endIndex) return false
+    // Word-parity collapsed-cursor scope: restrict to same listLevel.
+    const csCursorEl = this.draw.getElementList()[endIndex]
+    const csCursorLevel = csCursorEl?.listLevel ?? 1
+    const csIsCollapsedLevelScope =
+      startIndex === endIndex && !!csCursorEl?.listId
     let changeElementList = this.range
       .getRangeParagraphElementList()
       ?.filter(el => el.listId && el.listStyle === ListStyle.CHECKBOX)
     if (!changeElementList || !changeElementList.length) return false
+    if (csIsCollapsedLevelScope) {
+      const filtered = changeElementList.filter(
+        el => (el.listLevel ?? 1) === csCursorLevel
+      )
+      if (filtered.length) changeElementList = filtered
+    }
     // Expand to entire list block.
     // First pass: walk same-listId neighbours (handles unified lists).
     // Second pass: walk any adjacent list paragraph (any listId) to catch
     // fragmented listIds from separate creation events.
+    // Both passes respect listLevel under collapsed-cursor scope so child
+    // checklist items don't drag parent checklist levels along.
     if (changeElementList[0]?.listId) {
       const mainList = this.draw.getElementList()
       let blockStart = mainList.indexOf(changeElementList[0])
@@ -1446,31 +1707,43 @@ export class ListParticle {
         changeElementList[changeElementList.length - 1]
       )
       const blockListId = changeElementList[0].listId
+      const passesLevel = (el: IElement | undefined) =>
+        !csIsCollapsedLevelScope || (el?.listLevel ?? 1) === csCursorLevel
       // First pass: same listId
       while (
         blockStart > 0 &&
-        mainList[blockStart - 1]?.listId === blockListId
+        mainList[blockStart - 1]?.listId === blockListId &&
+        passesLevel(mainList[blockStart - 1])
       ) {
         blockStart--
       }
       while (
         blockEnd < mainList.length - 1 &&
-        mainList[blockEnd + 1]?.listId === blockListId
+        mainList[blockEnd + 1]?.listId === blockListId &&
+        passesLevel(mainList[blockEnd + 1])
       ) {
         blockEnd++
       }
       // Second pass: any adjacent list paragraph (any listId)
-      while (blockStart > 0 && mainList[blockStart - 1]?.listId) {
+      while (
+        blockStart > 0 &&
+        mainList[blockStart - 1]?.listId &&
+        passesLevel(mainList[blockStart - 1])
+      ) {
         blockStart--
       }
-      while (blockEnd < mainList.length - 1 && mainList[blockEnd + 1]?.listId) {
+      while (
+        blockEnd < mainList.length - 1 &&
+        mainList[blockEnd + 1]?.listId &&
+        passesLevel(mainList[blockEnd + 1])
+      ) {
         blockEnd++
       }
       const expanded: IElement[] = []
       for (let i = blockStart; i <= blockEnd; i++) {
-        if (mainList[i].listStyle === ListStyle.CHECKBOX) {
-          expanded.push(mainList[i])
-        }
+        if (mainList[i].listStyle !== ListStyle.CHECKBOX) continue
+        if (!passesLevel(mainList[i])) continue
+        expanded.push(mainList[i])
       }
       if (expanded.length > changeElementList.length) {
         changeElementList = expanded

@@ -40,6 +40,7 @@ export class Command {
   public executeListOutdent: CommandAdapt['listOutdent']
   public executeListFormat: CommandAdapt['listFormat']
   public executeListSetLevel: CommandAdapt['listSetLevel']
+  public executeListSetStartValue: CommandAdapt['listSetStartValue']
   public executeListStyle: CommandAdapt['listStyle']
   public executeListWithStyle: CommandAdapt['listWithStyle']
   public executeChecklistStyle: CommandAdapt['checklistStyle']
@@ -239,6 +240,7 @@ export class Command {
     this.executeListOutdent = adapt.listOutdent.bind(adapt)
     this.executeListFormat = adapt.listFormat.bind(adapt)
     this.executeListSetLevel = adapt.listSetLevel.bind(adapt)
+    this.executeListSetStartValue = adapt.listSetStartValue.bind(adapt)
     this.executeListStyle = adapt.listStyle.bind(adapt)
     this.executeListWithStyle = adapt.listWithStyle.bind(adapt)
     this.executeChecklistStyle = adapt.checklistStyle.bind(adapt)
