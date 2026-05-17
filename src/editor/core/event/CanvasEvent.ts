@@ -41,6 +41,13 @@ export class CanvasEvent {
   public cachePositionList: IElementPosition[] | null
   public cachePositionContext: IPositionContext | null
   public mouseDownStartPosition: ICurrentPosition | null
+  /**
+   * Index of the list-paragraph ZERO whose marker was last clicked, used to
+   * detect a "second click on the same marker" — toggles selection between
+   * whole-list-block (first click) and single-item (second click). Cleared on
+   * any non-marker click (mousedown handler).
+   */
+  public markerSelectionRow: number | null
 
   private draw: Draw
   private pageContainer: HTMLDivElement
@@ -68,6 +75,7 @@ export class CanvasEvent {
     this.cachePositionList = null
     this.cachePositionContext = null
     this.mouseDownStartPosition = null
+    this.markerSelectionRow = null
     this.autoScrollRafId = null
     this.autoScrollSpeed = 0
     this.lastSelectionMouse = null

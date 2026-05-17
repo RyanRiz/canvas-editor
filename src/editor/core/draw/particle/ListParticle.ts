@@ -1655,6 +1655,14 @@ export class ListParticle {
           height: height * scale
         }
       }
+      // Stamp checkbox bounds so mousedown can hit-test marker clicks
+      // (Google-Docs-style "click marker → select list").
+      row.listGlyphBounds = {
+        x: x - gap * scale,
+        y: y - height * scale,
+        width: (width + gap * 2) * scale,
+        height: height * scale
+      }
       this.draw.getCheckboxParticle().render({
         ctx,
         x: x - gap * scale,
@@ -1671,6 +1679,23 @@ export class ListParticle {
     if (!text) return
     ctx.save()
     ctx.font = this.getListFontStyle(elementList, scale)
+    // Stamp text-marker bounds so mousedown can hit-test marker clicks.
+    // Width from canvas measureText; height = font ascent + descent.
+    const metrics = ctx.measureText(text)
+    const glyphAscent =
+      metrics.actualBoundingBoxAscent ||
+      (metrics as TextMetrics).fontBoundingBoxAscent ||
+      ascent
+    const glyphDescent =
+      metrics.actualBoundingBoxDescent ||
+      (metrics as TextMetrics).fontBoundingBoxDescent ||
+      0
+    row.listGlyphBounds = {
+      x,
+      y: y - glyphAscent,
+      width: metrics.width,
+      height: glyphAscent + glyphDescent
+    }
     ctx.fillText(text, x, y)
     ctx.restore()
   }

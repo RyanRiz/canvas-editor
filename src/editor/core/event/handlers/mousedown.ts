@@ -1,3 +1,4 @@
+import { ZERO } from '../../../dataset/constant/Common'
 import { ImageDisplay } from '../../../dataset/enum/Common'
 import { EditorMode } from '../../../dataset/enum/Editor'
 import { ElementType } from '../../../dataset/enum/Element'
@@ -12,6 +13,86 @@ import { RadioControl } from '../../draw/control/radio/RadioControl'
 import { CanvasEvent } from '../CanvasEvent'
 import { IElement } from '../../../interface/Element'
 import { Draw } from '../../draw/Draw'
+
+/**
+ * Hit-test the click against any list-marker glyph painted on the current
+ * page (bounds stamped by ListParticle.drawListStyle). On hit:
+ *   • First click on a marker → setRange spanning the whole list block
+ *     (every paragraph sharing the same listId, contiguous)
+ *   • Second click on the SAME marker → setRange covering only that
+ *     paragraph
+ *
+ * Returns true when a marker was hit and the selection was updated, so the
+ * caller can bail out of the normal cursor-positioning path.
+ */
+function handleMarkerClick(evt: MouseEvent, host: CanvasEvent): boolean {
+  const draw = host.getDraw()
+  const target = evt.target as HTMLDivElement
+  const pageIndexAttr = target?.dataset?.index
+  if (pageIndexAttr === undefined) return false
+  const pageIndex = Number(pageIndexAttr)
+  const pageRowList = draw.getPageRowList()[pageIndex]
+  if (!pageRowList) return false
+  for (const row of pageRowList) {
+    const bounds = row.listGlyphBounds
+    if (!bounds) continue
+    if (
+      evt.offsetX >= bounds.x &&
+      evt.offsetX <= bounds.x + bounds.width &&
+      evt.offsetY >= bounds.y &&
+      evt.offsetY <= bounds.y + bounds.height
+    ) {
+      return applyMarkerSelection(host, draw, row.startIndex)
+    }
+  }
+  return false
+}
+
+/**
+ * Apply the Google-Docs marker selection rule given the paragraph's ZERO
+ * index. Idempotent: re-clicking the same marker toggles between
+ * whole-list-block and single-paragraph scope.
+ */
+function applyMarkerSelection(
+  host: CanvasEvent,
+  draw: Draw,
+  paragraphZeroIndex: number
+): boolean {
+  const elementList = draw.getElementList()
+  const zero = elementList[paragraphZeroIndex]
+  if (!zero?.listId) return false
+  const listId = zero.listId
+  const isSecondClick = host.markerSelectionRow === paragraphZeroIndex
+  let startIndex = paragraphZeroIndex
+  let endIndex = paragraphZeroIndex
+  if (isSecondClick) {
+    // Single paragraph: walk forward until next ZERO (paragraph boundary)
+    // or listId change.
+    while (
+      endIndex + 1 < elementList.length &&
+      elementList[endIndex + 1].listId === listId &&
+      elementList[endIndex + 1].value !== ZERO
+    ) {
+      endIndex++
+    }
+  } else {
+    // Whole list block: walk both directions through contiguous listId.
+    while (startIndex > 0 && elementList[startIndex - 1].listId === listId) {
+      startIndex--
+    }
+    while (
+      endIndex + 1 < elementList.length &&
+      elementList[endIndex + 1].listId === listId
+    ) {
+      endIndex++
+    }
+  }
+  const rangeManager = draw.getRange()
+  rangeManager.setRange(startIndex, endIndex)
+  host.markerSelectionRow = isSecondClick ? null : paragraphZeroIndex
+  draw.render({ isSubmitHistory: false, isCompute: false, isSetCursor: false })
+  return true
+}
 
 export function setRangeCache(host: CanvasEvent) {
   const draw = host.getDraw()
@@ -73,6 +154,20 @@ export function mousedown(evt: MouseEvent, host: CanvasEvent) {
     (range.isCrossRowCol || !rangeManager.getIsCollapsed())
   ) {
     return
+  }
+  // Google-Docs-style list-marker click: detect a left-button hit on the
+  // bounds of a list paragraph's marker glyph (stamped on each row by
+  // ListParticle.drawListStyle). First click selects the whole list block;
+  // a subsequent click on the same marker narrows to just that paragraph.
+  if (evt.button === MouseEventButton.LEFT) {
+    const handled = handleMarkerClick(evt, host)
+    if (handled) {
+      evt.preventDefault()
+      return
+    }
+    // Clear marker-selection state on non-marker click so a subsequent
+    // marker click starts fresh with whole-list selection.
+    host.markerSelectionRow = null
   }
   // 是否是选区拖拽
   if (!host.isAllowDrag) {

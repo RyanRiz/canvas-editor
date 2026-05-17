@@ -33,6 +33,18 @@ export interface IRow {
   listIndex?: number
   listLevel?: number
   listGlyph?: string
+  /**
+   * Painted bounds of the list-marker glyph in absolute canvas coordinates.
+   * Stamped by ListParticle.drawListStyle during render so mousedown can
+   * hit-test marker clicks (Google-Docs-style "click marker → select list").
+   * Not present on non-list rows or list-wrap continuation rows.
+   */
+  listGlyphBounds?: {
+    x: number
+    y: number
+    width: number
+    height: number
+  }
   offsetX?: number
   // Right-edge offset for paragraph right indent. Mirrors `offsetX` (left) and
   // is consumed by both the wrap calculation (Draw) and the row alignment math

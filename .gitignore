@@ -7,3 +7,5 @@ dist-ssr
 cache
 .temp
 coverage
+# OMC session state (auto-generated)
+/.omc/sessions/
