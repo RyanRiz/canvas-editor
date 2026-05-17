@@ -8,6 +8,10 @@ import { IElement } from '../../../interface/Element'
 import { IRangeElementStyle } from '../../../interface/Range'
 import { splitText } from '../../../utils'
 import { formatElementContext } from '../../../utils/element'
+import {
+  applyAutoFormat,
+  matchAutoFormatTrigger
+} from '../../../utils/autoFormat'
 import { CanvasEvent } from '../CanvasEvent'
 
 export function input(data: string, host: CanvasEvent) {
@@ -37,6 +41,29 @@ export function input(data: string, host: CanvasEvent) {
   const elementList = draw.getElementList()
   const copyElement = rangeManager.getRangeAnchorStyle(elementList, endIndex)
   if (!copyElement) return
+  // Word/GDocs auto-format triggers (e.g. "*" + space → bullet, "1." + space →
+  // numbered list). Detect a trigger BEFORE the space character is inserted;
+  // if matched, swap the typed space for an atomic paragraph→list conversion
+  // that submits a single history snapshot. Skipped during IME composition.
+  if (!isComposing && data === ' ' && startIndex === endIndex) {
+    const match = matchAutoFormatTrigger(elementList, endIndex, data)
+    if (match) {
+      const newIdx = applyAutoFormat(
+        elementList,
+        match.zeroIndex,
+        endIndex,
+        match.entry
+      )
+      rangeManager.setRange(newIdx, newIdx)
+      // Force paint + list-layout invalidation so the new list marker
+      // renders immediately. Direct elementList mutation here bypasses the
+      // markDirty/executeDelta cycle that toolbar list operations rely on.
+      draw.invalidatePaintCache?.()
+      draw.invalidateListLayoutCache?.()
+      draw.render({ curIndex: newIdx, isSubmitHistory: true })
+      return
+    }
+  }
   const isDesignMode = draw.isDesignMode()
   const inputData: IElement[] = splitText(text).map(value => {
     const newElement: IElement = {
