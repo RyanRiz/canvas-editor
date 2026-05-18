@@ -166,6 +166,7 @@ export function mousemove(evt: MouseEvent, host: CanvasEvent) {
   draw.render({
     isSubmitHistory: false,
     isSetCursor: false,
-    isCompute: false
+    isCompute: false,
+    isDecorationOnly: draw.getZone().isMainActive()
   })
 }
