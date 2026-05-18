@@ -105,12 +105,12 @@ describe('Phase 1.2 - delta-based history', () => {
     expect(internal._deltaHistoryUnsafe).toBe(false)
   })
 
-  it('header splice 期间走 snapshot（delta 仅覆盖 main）', () => {
+  it('header splice 在引用稳定时保持 delta-safe', () => {
     ctx = createTestEditor({ options: { pageMode: PageMode.PAGING } })
     ctx.editor.command.executeFocus()
     // 先建立基线 snapshot
     ctx.editor.command.executeInsertElementList([{ value: 'a' }])
-    // 直接 splice header 列表，触发 delta-unsafe
+    // 直接 splice 当前活动 header 列表：在未切换 variant / 未替换引用时应继续允许 delta
     ctx.editor.draw.spliceElementList(
       ctx.editor.draw.getHeaderElementList(),
       0,
@@ -118,9 +118,11 @@ describe('Phase 1.2 - delta-based history', () => {
       [{ value: 'h' }]
     )
     const internal = ctx.editor.draw as unknown as DrawInternals
-    expect(internal._deltaHistoryUnsafe).toBe(true)
-    // 进一步触发渲染流程把 unsafe 翻成 false——通过插入 main 元素让 submit 落盘
+    expect(internal._deltaHistoryUnsafe).toBe(false)
+    expect(internal._pendingHistoryMutations.length).toBe(1)
+    // 再插入 main 元素触发 submit 落盘；整轮 mixed main+header mutation 结束后内部状态重置
     ctx.editor.command.executeInsertElementList([{ value: 'b' }])
+    expect(internal._pendingHistoryMutations.length).toBe(0)
     expect(internal._deltaHistoryUnsafe).toBe(false)
   })
 

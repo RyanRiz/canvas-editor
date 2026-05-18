@@ -1,5 +1,6 @@
 import { ImageDisplay } from '../dataset/enum/Common'
 import { ControlComponent } from '../dataset/enum/Control'
+import { PaperDirection } from '../dataset/enum/Editor'
 import { ElementType } from '../dataset/enum/Element'
 import { SectionBreakType } from '../dataset/enum/SectionBreak'
 import { ListStyle, ListType } from '../dataset/enum/List'
@@ -185,6 +186,12 @@ export interface ISectionBreakElement {
   // dedicated node so the existing block-break plumbing (row.isPageBreak,
   // ctrl-backspace atomic delete, clipboard serialization) can be reused.
   sectionBreakType?: SectionBreakType
+  // Page orientation for the section that *precedes* this break. MS Word
+  // stores section properties on the section-break paragraph mark that ends
+  // the section; we follow the same convention. The trailing pseudo-section
+  // (everything after the last break, or the whole document if no breaks)
+  // falls back to `Draw.options.paperDirection`.
+  paperDirection?: PaperDirection
 }
 
 export interface IControlElement {
@@ -242,6 +249,14 @@ export interface IListOption {
   levelIndents?: number[] // px offset per level (length 9); index = level - 1
 }
 
+export interface IImageBorder {
+  /** Border thickness in CSS pixels (the canvas-editor unit). UI surfaces
+   *  convert to/from points (pt × 96/72 = px). */
+  width: number
+  color: string
+  style: 'solid' | 'round-dot' | 'dash'
+}
+
 export interface IImageBasic {
   imgDisplay?: ImageDisplay
   imgFloatPosition?: {
@@ -254,6 +269,12 @@ export interface IImageBasic {
   imgFigureLabel?: string
   imgFigureCaption?: string
   imgFigureDescription?: string
+  imgBorder?: IImageBorder
+  imgRotate?: number
+  /** Mirror horizontally (about the vertical centre line). */
+  imgFlipH?: boolean
+  /** Mirror vertically (about the horizontal centre line). */
+  imgFlipV?: boolean
 }
 
 export type IImageElement = IImageBasic & IImageRule

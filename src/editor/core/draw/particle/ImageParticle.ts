@@ -148,6 +148,23 @@ export class ImageParticle {
     width: number,
     height: number
   ) {
+    // Composed image transform: rotate + flip about the image centre.
+    // Flip applied AFTER rotate so the mirror axis stays parallel to the
+    // image's own edges (i.e. flipping a 90°-rotated image flips the visible
+    // top edge, matching Word's behavior).
+    const rotate = element.imgRotate || 0
+    const flipH = element.imgFlipH ? -1 : 1
+    const flipV = element.imgFlipV ? -1 : 1
+    const hasTransform = rotate !== 0 || flipH !== 1 || flipV !== 1
+    if (hasTransform) {
+      const cx = x + width / 2
+      const cy = y + height / 2
+      ctx.save()
+      ctx.translate(cx, cy)
+      if (rotate) ctx.rotate((rotate * Math.PI) / 180)
+      if (flipH !== 1 || flipV !== 1) ctx.scale(flipH, flipV)
+      ctx.translate(-cx, -cy)
+    }
     if (element.imgCrop) {
       const {
         x: cropX,
@@ -169,6 +186,26 @@ export class ImageParticle {
     } else {
       ctx.drawImage(img, x, y, width, height)
     }
+    if (element.imgBorder && element.imgBorder.width > 0) {
+      const { scale } = this.options
+      const { width: borderWidth, color, style } = element.imgBorder
+      const w = borderWidth * scale
+      ctx.save()
+      ctx.lineWidth = w
+      ctx.strokeStyle = color || '#000000'
+      // Round dot: zero-length dashes spaced by 2× the line width, drawn with
+      // a round line cap — that produces actual circular dots, not square ones.
+      // Dash: regular long dashes (3:2 ratio of dash to gap, scaled by width).
+      if (style === 'round-dot') {
+        ctx.lineCap = 'round'
+        ctx.setLineDash([0, w * 2])
+      } else if (style === 'dash') {
+        ctx.setLineDash([w * 3, w * 2])
+      }
+      ctx.strokeRect(x, y, width, height)
+      ctx.restore()
+    }
+    if (hasTransform) ctx.restore()
   }
 
   private _renderCaption(

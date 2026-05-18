@@ -62,6 +62,12 @@ export function mousemove(evt: MouseEvent, host: CanvasEvent) {
     const pageList = draw.getPageList()
     if (positionResult.isCheckbox || positionResult.isRadio) {
       pageList.forEach(p => (p.style.cursor = 'pointer'))
+    } else if (~positionResult.index && positionResult.isImage) {
+      // Hand cursor over image hits for drag affordance
+      // (page canvas default is 'text', see Draw._createPageCanvas).
+      if (target && target.style) {
+        target.style.cursor = 'grab'
+      }
     } else {
       pageList.forEach(p => {
         // Don't overwrite cursor set by painter, copy, or other features

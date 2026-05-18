@@ -31,11 +31,7 @@
 import { EDITOR_PREFIX } from '../../../dataset/constant/Editor'
 import { DeepRequired } from '../../../interface/Common'
 import { IEditorOption } from '../../../interface/Editor'
-import {
-  ITabStop,
-  RulerUnit,
-  TabStopType
-} from '../../../interface/Ruler'
+import { ITabStop, RulerUnit, TabStopType } from '../../../interface/Ruler'
 import { EventBus } from '../../event/eventbus/EventBus'
 import { EventBusMap } from '../../../interface/EventBus'
 import { Draw } from '../Draw'
@@ -80,15 +76,32 @@ interface PageFrame {
 }
 
 type DragMode =
-  | { kind: 'first-line'; pageNo: number; startElIndent: number; startElFirst: number }
+  | {
+      kind: 'first-line'
+      pageNo: number
+      startElIndent: number
+      startElFirst: number
+    }
   | { kind: 'hanging'; pageNo: number; startIndent: number; startFirst: number }
-  | { kind: 'left-indent'; pageNo: number; startIndent: number; startFirst: number }
+  | {
+      kind: 'left-indent'
+      pageNo: number
+      startIndent: number
+      startFirst: number
+    }
   | { kind: 'right-indent'; pageNo: number; startRight: number }
   | { kind: 'left-margin'; pageNo: number; startMargin: number }
   | { kind: 'right-margin'; pageNo: number; startMargin: number }
   | { kind: 'top-margin'; pageNo: number; startMargin: number }
   | { kind: 'bottom-margin'; pageNo: number; startMargin: number }
-  | { kind: 'col-boundary'; pageNo: number; colIndex: number; tableElIndex: number; startWidth: number; nextStartWidth: number }
+  | {
+      kind: 'col-boundary'
+      pageNo: number
+      colIndex: number
+      tableElIndex: number
+      startWidth: number
+      nextStartWidth: number
+    }
   | { kind: 'tab-stop'; pageNo: number; tabIndex: number }
 
 export class Ruler {
@@ -162,7 +175,9 @@ export class Ruler {
   constructor(draw: Draw) {
     this.draw = draw
     this.options = draw.getOptions()
-    this.eventBus = (draw as unknown as { eventBus: EventBus<EventBusMap> }).eventBus
+    this.eventBus = (
+      draw as unknown as { eventBus: EventBus<EventBusMap> }
+    ).eventBus
     this.size = this.options.ruler.size
 
     this.boundDocMouseMove = (e: MouseEvent) => this._onDocMouseMove(e)
@@ -282,27 +297,42 @@ export class Ruler {
     // paint-key cache once `visiblePageNoListChange` fires).
     const filterToVisible = visiblePages.length > 0
     const visible = filterToVisible ? new Set(visiblePages) : null
-    for (const frame of this.frames) {
-      if (
-        visible &&
-        !visible.has(frame.pageNo) &&
-        frame.pageNo !== activePage
-      ) {
-        // Off-screen and not the active page — defer the paint by clearing
-        // the cache entry so the next render (typically triggered by
-        // `visiblePageNoListChange` on scroll) will repaint this frame.
-        // Note: we do NOT clear the canvas — its last painted state stays
-        // until the canvas is next overwritten. Off-screen content is
-        // invisible anyway and any indent/tab-stop marker is correct as
-        // long as the source paragraph didn't change.
-        this.framePaintKey.delete(frame.wrapper)
-        continue
+    // Per-section orientation MVP: each ruler frame belongs to a specific
+    // page, and that page's direction (portrait/landscape) determines what
+    // its rulers should measure. Wrap each frame's paint-key computation
+    // AND paint pass in the page's direction override so every
+    // direction-sensitive Draw getter (`getMargins`, `getWidth`,
+    // `getOriginalMargins`) returns the values matching the page the frame
+    // sits over.
+    const prevOverride = this.draw.getPaintDirectionOverride()
+    try {
+      for (const frame of this.frames) {
+        if (
+          visible &&
+          !visible.has(frame.pageNo) &&
+          frame.pageNo !== activePage
+        ) {
+          // Off-screen and not the active page — defer the paint by clearing
+          // the cache entry so the next render (typically triggered by
+          // `visiblePageNoListChange` on scroll) will repaint this frame.
+          // Note: we do NOT clear the canvas — its last painted state stays
+          // until the canvas is next overwritten. Off-screen content is
+          // invisible anyway and any indent/tab-stop marker is correct as
+          // long as the source paragraph didn't change.
+          this.framePaintKey.delete(frame.wrapper)
+          continue
+        }
+        this.draw.setPaintDirectionOverride(
+          this.draw.getPageDirection(frame.pageNo)
+        )
+        const key = this._computePaintKey(frame)
+        if (this.framePaintKey.get(frame.wrapper) === key) continue
+        this.framePaintKey.set(frame.wrapper, key)
+        this._paintHorizontal(frame)
+        this._paintVertical(frame)
       }
-      const key = this._computePaintKey(frame)
-      if (this.framePaintKey.get(frame.wrapper) === key) continue
-      this.framePaintKey.set(frame.wrapper, key)
-      this._paintHorizontal(frame)
-      this._paintVertical(frame)
+    } finally {
+      this.draw.setPaintDirectionOverride(prevOverride)
     }
   }
 
@@ -647,8 +677,20 @@ export class Ruler {
    * too as a side effect of the early return.
    */
   private _sizeFrame(f: PageFrame) {
-    const pageW = this.draw.getWidth()
-    const pageH = this.draw.getHeight()
+    // Per-section orientation MVP: this frame belongs to page `f.pageNo`,
+    // whose direction may differ from `options.paperDirection`. Route
+    // `getWidth`/`getHeight` through that page's direction so the ruler
+    // strip is sized to the actual page, not the document default.
+    const prevOverride = this.draw.getPaintDirectionOverride()
+    this.draw.setPaintDirectionOverride(this.draw.getPageDirection(f.pageNo))
+    let pageW: number
+    let pageH: number
+    try {
+      pageW = this.draw.getWidth()
+      pageH = this.draw.getHeight()
+    } finally {
+      this.draw.setPaintDirectionOverride(prevOverride)
+    }
     const s = this.size
     const dpr = this.dpr || 1
     const hW = Math.round(pageW * dpr)
@@ -1097,7 +1139,6 @@ export class Ruler {
     ctx.lineTo(size - 0.5, pageHeight)
     ctx.stroke()
     ctx.restore()
-
     ;(f.vRuler as unknown as { _markers: Record<string, number> })._markers = {
       topMargin: margins[0],
       bottomMargin: pageHeight - margins[2]
@@ -1182,7 +1223,11 @@ export class Ruler {
     if (ctxInfo.isTable && colPositions.length) {
       for (let i = 1; i < colPositions.length - 1; i++) {
         if (Math.abs(colPositions[i] - x) <= TOL) {
-          return { kind: 'col-boundary', index: i - 1, centerPx: colPositions[i] }
+          return {
+            kind: 'col-boundary',
+            index: i - 1,
+            centerPx: colPositions[i]
+          }
         }
       }
     } else if (m) {
@@ -1196,8 +1241,7 @@ export class Ruler {
         // Check left-indent rectangle first in the bottom strip — it is the
         // wider, more forgiving target (Word: the rectangle is the primary
         // left-indent handle when the user reaches the very bottom).
-        if (Math.abs(m.leftRect - x) <= TOL + 4)
-          return { kind: 'left-indent' }
+        if (Math.abs(m.leftRect - x) <= TOL + 4) return { kind: 'left-indent' }
         // Fallback: hanging triangle if the cursor is near the hanging position
         // but wasn't captured by the rectangle's wider hit-box (e.g. narrow
         // ruler where the rect is tiny).
@@ -1219,7 +1263,11 @@ export class Ruler {
     return null
   }
 
-  private _hitTestVRuler(f: PageFrame, _x: number, y: number): MarkerHit | null {
+  private _hitTestVRuler(
+    f: PageFrame,
+    _x: number,
+    y: number
+  ): MarkerHit | null {
     const m = (f.vRuler as unknown as { _markers?: Record<string, number> })
       ._markers
     if (!m) return null
@@ -1369,7 +1417,8 @@ export class Ruler {
     }
     if (!hit) {
       const margins = this.draw.getMargins()
-      const isInContent = x > margins[3] && x < this.draw.getWidth() - margins[1]
+      const isInContent =
+        x > margins[3] && x < this.draw.getWidth() - margins[1]
       if (isInContent && !ctxInfo.isTable) {
         const scale = this.options.scale
         const logicalX = (x - margins[3]) / scale
@@ -1597,12 +1646,7 @@ export class Ruler {
         const newW = Math.max(20, drag.startWidth + deltaPx)
         const consumed = newW - drag.startWidth
         const newNext = Math.max(20, drag.nextStartWidth - consumed)
-        this._commitColumnWidth(
-          drag.tableElIndex,
-          drag.colIndex,
-          newW,
-          newNext
-        )
+        this._commitColumnWidth(drag.tableElIndex, drag.colIndex, newW, newNext)
         break
       }
       case 'tab-stop': {
@@ -1749,7 +1793,12 @@ export class Ruler {
   }
 
   private _commitMargin(slot: 0 | 1 | 2 | 3, value: number) {
-    const margins = this.options.margins.slice() as [number, number, number, number]
+    const margins = this.options.margins.slice() as [
+      number,
+      number,
+      number,
+      number
+    ]
     margins[slot] = value
     // Route through setPaperMargin so top/bottom-only drags hit the
     // computeRowList-skip fast path (Draw.ts:2010). Left/right drags fall
@@ -2085,10 +2134,7 @@ export class Ruler {
     const unit = this.options.ruler.unit
     const unitPxAt1 = this._unitPxAtScale(unit, 1)
     const defaultInUnit = (defaultLogicalX / unitPxAt1).toFixed(2)
-    const raw = window.prompt(
-      `Tab stop position (${unit}):`,
-      defaultInUnit
-    )
+    const raw = window.prompt(`Tab stop position (${unit}):`, defaultInUnit)
     if (raw === null) return
     const parsed = parseFloat(raw)
     if (!Number.isFinite(parsed) || parsed < 0) return

@@ -78,6 +78,11 @@ export const imageMenus: IRegisterContextMenu[] = [
         key: TEXT_WRAP_EMBED,
         i18nPath: 'contextmenu.image.textWrapType.embed',
         when: () => true,
+        // BLOCK is the default when imgDisplay is unset (the value canvas-
+        // editor falls back to during render), so treat absent === embed.
+        isActive: ctx =>
+          (ctx.startElement?.imgDisplay ?? ImageDisplay.BLOCK) ===
+          ImageDisplay.BLOCK,
         callback: (command: Command, context: IContextMenuContext) => {
           command.executeChangeImageDisplay(
             context.startElement!,
@@ -89,6 +94,7 @@ export const imageMenus: IRegisterContextMenu[] = [
         key: TEXT_WRAP_UP_DOWN,
         i18nPath: 'contextmenu.image.textWrapType.upDown',
         when: () => true,
+        isActive: ctx => ctx.startElement?.imgDisplay === ImageDisplay.INLINE,
         callback: (command: Command, context: IContextMenuContext) => {
           command.executeChangeImageDisplay(
             context.startElement!,
@@ -100,6 +106,7 @@ export const imageMenus: IRegisterContextMenu[] = [
         key: TEXT_WRAP_SURROUND,
         i18nPath: 'contextmenu.image.textWrapType.surround',
         when: () => true,
+        isActive: ctx => ctx.startElement?.imgDisplay === ImageDisplay.SURROUND,
         callback: (command: Command, context: IContextMenuContext) => {
           command.executeChangeImageDisplay(
             context.startElement!,
@@ -111,6 +118,7 @@ export const imageMenus: IRegisterContextMenu[] = [
         key: TEXT_WRAP_FLOAT_TOP,
         i18nPath: 'contextmenu.image.textWrapType.floatTop',
         when: () => true,
+        isActive: ctx => ctx.startElement?.imgDisplay === ImageDisplay.FLOAT_TOP,
         callback: (command: Command, context: IContextMenuContext) => {
           command.executeChangeImageDisplay(
             context.startElement!,
@@ -122,6 +130,8 @@ export const imageMenus: IRegisterContextMenu[] = [
         key: TEXT_WRAP_FLOAT_BOTTOM,
         i18nPath: 'contextmenu.image.textWrapType.floatBottom',
         when: () => true,
+        isActive: ctx =>
+          ctx.startElement?.imgDisplay === ImageDisplay.FLOAT_BOTTOM,
         callback: (command: Command, context: IContextMenuContext) => {
           command.executeChangeImageDisplay(
             context.startElement!,

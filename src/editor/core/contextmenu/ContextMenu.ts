@@ -229,6 +229,11 @@ export class ContextMenu {
       } else {
         const menuItem = document.createElement('div')
         menuItem.classList.add(`${EDITOR_PREFIX}-contextmenu-item`)
+        // Active-state marker — exclusive-group leaves (e.g. text-wrap modes)
+        // opt into a checkmark by returning true from isActive(context).
+        if (menu.isActive && this.context && menu.isActive(this.context)) {
+          menuItem.classList.add(`${EDITOR_PREFIX}-contextmenu-item--active`)
+        }
         // 菜单事件
         if (menu.childMenus) {
           const childMenus = this._filterMenuList(menu.childMenus)

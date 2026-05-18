@@ -241,16 +241,19 @@ export class CanvasEvent {
     } else {
       const positionList = this.position.getPositionList()
       this.range.setRange(0, positionList.length - 1)
+      const isMainZone = this.draw.getZone().isMainActive()
       // PERF — Strategy B: select-all only changes the selection rectangle,
       // not layout or text. Take the decoration-only fast path (same one used
       // by searchNavigatePre/Next) so render skips _drawPage on every visible
       // page and just re-stamps the decoration canvas. Without this, a 25-page
       // doc full-repaints all visible pages just to add the selection rect.
+      // Header/footer use a different paint path, so chrome zones must fall
+      // back to the normal render to show the selection correctly.
       this.draw.render({
         isSubmitHistory: false,
         isSetCursor: false,
         isCompute: false,
-        isDecorationOnly: true
+        isDecorationOnly: isMainZone
       })
     }
   }

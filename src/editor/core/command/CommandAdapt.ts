@@ -2758,13 +2758,28 @@ export class CommandAdapt {
     const activeControl = this.control.getActiveControl()
     if (activeControl) return
     const type = payload?.type ?? SectionBreakType.NEXT_PAGE
-    this.insertElementList([
+    // MS Word behavior: inserting a NEXT_PAGE / EVEN_PAGE / ODD_PAGE break
+    // lands the cursor on the new section's first paragraph. The break is
+    // a single WRAP element, so `insertElementList` would otherwise put
+    // the cursor at the existing element AFTER the break — typically the
+    // ZERO terminator of the same paragraph the user was in, which the
+    // pagination keeps on the OLD page (its rowList is bracketed by the
+    // break sentinel above and the next content below). Append our own
+    // ZERO terminator so the trailing section starts with a fresh empty
+    // paragraph, and `insertElementList` positions the caret there — on
+    // the new page. CONTINUOUS breaks stay on the same page so they don't
+    // need the extra paragraph.
+    const elements: IElement[] = [
       {
         type: ElementType.SECTION_BREAK,
         value: WRAP,
         sectionBreakType: type
       }
-    ])
+    ]
+    if (type !== SectionBreakType.CONTINUOUS) {
+      elements.push({ value: ZERO })
+    }
+    this.insertElementList(elements)
   }
 
   public columnLayout(payload: { columnCount?: number; columnGap?: number }) {
@@ -3474,12 +3489,78 @@ export class CommandAdapt {
     return this.draw.setPaperSizeAsync(width, height)
   }
 
+  /**
+   * Apply a paper-direction (portrait/landscape) change. MS Word semantics:
+   * the change applies only to the SECTION containing the cursor, not the
+   * whole document. For canvas-editor's per-section MVP we stamp the new
+   * direction on the SECTION_BREAK element that ends the section preceding
+   * the cursor — that section break carries the override that
+   * `getPaperDirectionAtIndex` picks up while walking forward.
+   *
+   * When the cursor is in the leading section (no SECTION_BREAK between
+   * doc start and the cursor), there is no carrier element, so we mutate
+   * `options.paperDirection` — that's the base direction for the document.
+   * Pages before any override-carrying break keep using this base value;
+   * pages after a break with its own override keep that override.
+   */
   public paperDirection(payload: PaperDirection) {
+    if (this._stampPaperDirectionOnCurrentSection(payload)) return
     this.draw.setPaperDirection(payload)
   }
 
   public paperDirectionAsync(payload: PaperDirection) {
+    if (this._stampPaperDirectionOnCurrentSection(payload)) {
+      return Promise.resolve()
+    }
     return this.draw.setPaperDirectionAsync(payload)
+  }
+
+  /**
+   * Stamps `payload` on the SECTION_BREAK element that bounds the section
+   * containing the cursor and triggers a re-render. Returns `true` when a
+   * stamp happened (caller skips the global setter); `false` when the
+   * cursor is in the leading section so the caller must fall through to
+   * the global behaviour.
+   */
+  private _stampPaperDirectionOnCurrentSection(
+    payload: PaperDirection
+  ): boolean {
+    const range = this.range.getRange()
+    if (range.startIndex < 0) return false
+    const elementList = this.draw.getElementList()
+    // Find the most recent SECTION_BREAK before or at the cursor — that's
+    // the break that "ends" the previous section and starts the section the
+    // cursor sits in. We treat any SECTION_BREAK flavour as a section
+    // boundary so per-section orientation works for NEXT_PAGE / EVEN_PAGE /
+    // ODD_PAGE (CONTINUOUS is currently same-page so it doesn't naturally
+    // separate orientations, but stamping there still gives a defined
+    // boundary the lookup will respect).
+    let breakIdx = -1
+    for (
+      let i = Math.min(range.startIndex, elementList.length - 1);
+      i >= 0;
+      i--
+    ) {
+      if (elementList[i].type === ElementType.SECTION_BREAK) {
+        breakIdx = i
+        break
+      }
+    }
+    if (breakIdx < 0) return false
+    if (elementList[breakIdx].paperDirection === payload) {
+      // Already correct — no-op (still truthy so caller skips global).
+      return true
+    }
+    elementList[breakIdx].paperDirection = payload
+    // Inner width may differ for the trailing section (a landscape page has
+    // a wider text column than portrait at the same paper size). Mark the
+    // break element as dirty so the next render reflows from that point.
+    this.draw.markDirty(breakIdx, elementList.length - 1)
+    this.draw.render({
+      isSubmitHistory: true,
+      isSetCursor: false
+    })
+    return true
   }
 
   /**

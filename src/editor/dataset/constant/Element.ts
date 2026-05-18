@@ -110,6 +110,10 @@ export const EDITOR_ELEMENT_ZIP_ATTR: Array<keyof IElement> = [
   'imgToolDisabled',
   'imgPreviewDisabled',
   'imgCrop',
+  'imgBorder',
+  'imgRotate',
+  'imgFlipH',
+  'imgFlipV',
   'imgCaption',
   'textDecoration',
   'extension',
@@ -120,7 +124,8 @@ export const EDITOR_ELEMENT_ZIP_ATTR: Array<keyof IElement> = [
   'label',
   'labelId',
   'lineWidth',
-  'sectionBreakType'
+  'sectionBreakType',
+  'paperDirection'
 ]
 
 export const TABLE_TD_ZIP_ATTR: Array<keyof ITd> = [
