@@ -879,6 +879,16 @@ export class Draw {
     return pageColumns
   }
 
+  private _mainHasMultiColumnLayout(): boolean {
+    if (this.getColumnCount(this.options.pageColumns) > 1) return true
+    for (let i = 0; i < this.elementList.length; i++) {
+      if (this.getColumnCount(this.elementList[i].pageColumns) > 1) {
+        return true
+      }
+    }
+    return false
+  }
+
   /**
    * Forward-walking lookup for the active paper direction at a given element
    * index. Mirrors `getPageColumnsAtIndex`: walks the element list from 0 to
@@ -2833,6 +2843,12 @@ export class Draw {
       )
       return null
     }
+    if (this._mainHasMultiColumnLayout()) {
+      console.warn(
+        '[IncrementalLayout] _tryBuildResumeFrom rejected: multi-column layout unsupported'
+      )
+      return null
+    }
     const dirtyStart = this._dirtyRange.start
     // 二分查找第一个 startIndex > dirtyStart 的行，O(log R) 替代 O(R)。
     // rowList 的 startIndex 单调非递减——同一 startIndex 出现多次时取最后一个，
@@ -2875,7 +2891,9 @@ export class Draw {
         listId: undefined,
         listIndex: 0,
         controlRealWidth: 0,
-        currentPageColumns: this.normalizePageColumns(undefined),
+        currentPageColumns: this.normalizePageColumns(
+          this.elementList[0]?.pageColumns
+        ),
         surroundElementList: []
       }
     }
