@@ -2741,47 +2741,71 @@ export class CommandAdapt {
     const cur = this.options.pageColumns
     const elementList = this.draw.getElementList()
     const { startIndex, endIndex } = this.range.getRange()
-    const hasSelection =
-      startIndex !== endIndex &&
-      startIndex >= 0 &&
-      endIndex >= 0 &&
-      endIndex < elementList.length
+    const hasRange =
+      startIndex >= 0 && endIndex >= 0 && endIndex < elementList.length
+    const hasSelection = hasRange && startIndex !== endIndex
+    let rangeStart = -1
+    let rangeEnd = -1
     if (hasSelection) {
-      const selectionStart =
+      rangeStart =
         elementList[startIndex]?.value === ZERO ? startIndex : startIndex + 1
-      const selectionEnd = endIndex
-      if (
-        selectionStart >= 0 &&
-        selectionStart <= selectionEnd &&
-        selectionStart < elementList.length
-      ) {
-        const beforeLayout = this.draw.getPageColumnsAtIndex(selectionStart - 1)
-        const afterIndex = selectionEnd + 1
-        const afterLayout =
-          afterIndex < elementList.length
-            ? this.draw.getPageColumnsAtIndex(afterIndex)
-            : null
-        for (let i = selectionStart; i <= selectionEnd; i++) {
-          delete elementList[i].pageColumns
-        }
-        if (this.draw.isSamePageColumns(beforeLayout, next)) {
-          delete elementList[selectionStart].pageColumns
-        } else {
-          elementList[selectionStart].pageColumns = next
-        }
-        if (afterIndex < elementList.length) {
-          if (afterLayout && this.draw.isSamePageColumns(afterLayout, next)) {
-            delete elementList[afterIndex].pageColumns
-          } else if (afterLayout) {
-            elementList[afterIndex].pageColumns = afterLayout
-          }
-        }
-        this.draw.render({
-          isSetCursor: false,
-          isSubmitHistory: false
-        })
-        return
+      rangeEnd = endIndex
+    } else if (hasRange) {
+      // Caret-implicit scope: target the paragraph at the cursor. Paragraphs
+      // are delimited by ZERO markers; walk back to this paragraph's leading
+      // ZERO and forward to the element just before the next ZERO so the
+      // bookkeeping below mirrors the selection branch.
+      let paraStart = Math.min(startIndex, elementList.length - 1)
+      while (paraStart > 0 && elementList[paraStart].value !== ZERO) {
+        paraStart--
       }
+      let paraEnd = paraStart
+      while (
+        paraEnd + 1 < elementList.length &&
+        elementList[paraEnd + 1].value !== ZERO
+      ) {
+        paraEnd++
+      }
+      rangeStart = paraStart
+      rangeEnd = paraEnd
+    }
+    if (
+      rangeStart >= 0 &&
+      rangeStart <= rangeEnd &&
+      rangeStart < elementList.length
+    ) {
+      const beforeLayout = this.draw.getPageColumnsAtIndex(rangeStart - 1)
+      const afterIndex = rangeEnd + 1
+      const afterLayout =
+        afterIndex < elementList.length
+          ? this.draw.getPageColumnsAtIndex(afterIndex)
+          : null
+      for (let i = rangeStart; i <= rangeEnd; i++) {
+        delete elementList[i].pageColumns
+      }
+      if (this.draw.isSamePageColumns(beforeLayout, next)) {
+        delete elementList[rangeStart].pageColumns
+      } else {
+        elementList[rangeStart].pageColumns = next
+      }
+      if (afterIndex < elementList.length) {
+        if (afterLayout && this.draw.isSamePageColumns(afterLayout, next)) {
+          delete elementList[afterIndex].pageColumns
+        } else if (afterLayout) {
+          elementList[afterIndex].pageColumns = afterLayout
+        }
+      }
+      // pageColumns mutations don't change the layout signature
+      // (`_buildLayoutSig` only covers scale/innerWidth/etc.), so without an
+      // explicit dirty marker the renderer would repaint the existing rowList
+      // with the stale layout. Mark from rangeStart to end-of-list because
+      // pageColumns propagates forward via getPageColumnsAtIndex.
+      this.draw.markDirty(rangeStart, elementList.length - 1)
+      this.draw.render({
+        isSetCursor: false,
+        isSubmitHistory: false
+      })
+      return
     }
     if (
       cur.columnCount === next.columnCount &&
