@@ -1,5 +1,10 @@
 import { EditorZone } from '../dataset/enum/Editor'
-import { IElement, IElementBasic, IElementFillRect, IElementStyle } from './Element'
+import {
+  IElement,
+  IElementBasic,
+  IElementFillRect,
+  IElementStyle
+} from './Element'
 
 export interface IRange {
   startIndex: number
@@ -11,6 +16,25 @@ export interface IRange {
   startTrIndex?: number
   endTrIndex?: number
   zone?: EditorZone
+}
+
+/**
+ * Google-Docs-style list-block selection state, parallel to the text-range
+ * selection. When set on RangeManager, the renderer paints full-row-width
+ * background fills instead of per-character text-selection fills.
+ *   • startIndex / endIndex: span in main element list (typically first
+ *     paragraph ZERO to last paragraph end)
+ *   • level: when set, only rows whose listLevel matches are highlighted —
+ *     used by "Select items at this level" so child paragraphs interleaved
+ *     with same-level peers don't appear selected
+ *   • listId: optional defensive filter; when set, only rows whose paragraph
+ *     shares this listId paint
+ */
+export interface IMarkerSelection {
+  startIndex: number
+  endIndex: number
+  level?: number
+  listId?: string
 }
 
 export type RangeRowArray = Map<number, number[]>

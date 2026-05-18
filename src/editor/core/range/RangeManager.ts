@@ -9,6 +9,7 @@ import { IElement } from '../../interface/Element'
 import { EventBusMap } from '../../interface/EventBus'
 import { IRangeStyle } from '../../interface/Listener'
 import {
+  IMarkerSelection,
   IRange,
   IRangeElementStyle,
   IRangeParagraphInfo,
@@ -31,6 +32,15 @@ export class RangeManager {
   private position: Position
   private historyManager: HistoryManager
   private defaultStyle: IRangeElementStyle | null
+  /**
+   * Google-Docs-style list-block selection state. When non-null, the row
+   * decoration pass in Draw paints full-row-width background fills for
+   * paragraphs whose row.startIndex falls between `startIndex` and `endIndex`,
+   * INSTEAD of the per-character text-selection fill. When `level` is set,
+   * only rows whose listLevel matches are painted. Cleared automatically by
+   * setRange() so any text click / typing reverts to text-range fill.
+   */
+  public markerSelection: IMarkerSelection | null
 
   constructor(draw: Draw) {
     this.draw = draw
@@ -44,6 +54,14 @@ export class RangeManager {
       endIndex: -1
     }
     this.defaultStyle = null
+    this.markerSelection = null
+  }
+
+  /** Set or clear the list-block selection state. Caller is responsible for
+   *  invoking after setRange() since setRange() auto-clears any prior
+   *  markerSelection (so text clicks revert to normal selection). */
+  public setMarkerSelection(s: IMarkerSelection | null): void {
+    this.markerSelection = s
   }
 
   public getRange(): IRange {
@@ -444,6 +462,12 @@ export class RangeManager {
       this.range.endTdIndex = endTdIndex
       this.range.startTrIndex = startTrIndex
       this.range.endTrIndex = endTrIndex
+      // Any change to the text-range selection (typing, click into text,
+      // arrow keys, etc.) clears the parallel list-block selection so the
+      // user's next action gets normal text-editing behavior. Marker click
+      // and context-menu select-actions re-set markerSelection AFTER calling
+      // setRange, so they're unaffected.
+      this.markerSelection = null
       this.range.isCrossRowCol = !!(
         startTdIndex ||
         endTdIndex ||

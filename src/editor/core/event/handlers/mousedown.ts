@@ -62,9 +62,11 @@ function applyMarkerSelection(
   const zero = elementList[paragraphZeroIndex]
   if (!zero?.listId) return false
   const listId = zero.listId
+  const clickedLevel = zero.listLevel ?? 1
   const isSecondClick = host.markerSelectionRow === paragraphZeroIndex
   let startIndex = paragraphZeroIndex
   let endIndex = paragraphZeroIndex
+  let selectionLevel: number | undefined
   if (isSecondClick) {
     // Single paragraph: walk forward until next ZERO (paragraph boundary)
     // or listId change.
@@ -76,19 +78,65 @@ function applyMarkerSelection(
       endIndex++
     }
   } else {
-    // Whole list block: walk both directions through contiguous listId.
-    while (startIndex > 0 && elementList[startIndex - 1].listId === listId) {
-      startIndex--
+    // Level-scoped selection (Google Docs default): walk the whole listId
+    // block, find first + last paragraph-start at the clicked marker's
+    // listLevel. Other-level paragraphs in between fall inside the text-
+    // range span but the render-level filter in Draw.drawRow skips painting
+    // them, so child rows don't appear selected.
+    selectionLevel = clickedLevel
+    let blockStart = paragraphZeroIndex
+    while (blockStart > 0 && elementList[blockStart - 1].listId === listId) {
+      blockStart--
     }
+    let blockEnd = paragraphZeroIndex
     while (
-      endIndex + 1 < elementList.length &&
-      elementList[endIndex + 1].listId === listId
+      blockEnd + 1 < elementList.length &&
+      elementList[blockEnd + 1].listId === listId
     ) {
-      endIndex++
+      blockEnd++
+    }
+    let firstAtLevel = -1
+    let lastAtLevel = -1
+    for (let i = blockStart; i <= blockEnd; i++) {
+      const el = elementList[i]
+      if (!el) continue
+      const isParaStart = el.value === ZERO && !el.listWrap
+      if (!isParaStart) continue
+      if ((el.listLevel ?? 1) !== clickedLevel) continue
+      if (firstAtLevel < 0) firstAtLevel = i
+      let pEnd = i
+      while (
+        pEnd + 1 < elementList.length &&
+        elementList[pEnd + 1].listId === listId &&
+        elementList[pEnd + 1].value !== ZERO
+      ) {
+        pEnd++
+      }
+      lastAtLevel = pEnd
+    }
+    if (firstAtLevel >= 0 && lastAtLevel >= 0) {
+      startIndex = firstAtLevel
+      endIndex = lastAtLevel
+    } else {
+      // Fallback: no paragraphs at this level (shouldn't happen since the
+      // clicked paragraph itself is at clickedLevel). Use single paragraph.
+      while (
+        endIndex + 1 < elementList.length &&
+        elementList[endIndex + 1].listId === listId &&
+        elementList[endIndex + 1].value !== ZERO
+      ) {
+        endIndex++
+      }
     }
   }
   const rangeManager = draw.getRange()
   rangeManager.setRange(startIndex, endIndex)
+  rangeManager.setMarkerSelection({
+    startIndex,
+    endIndex,
+    listId,
+    ...(selectionLevel !== undefined ? { level: selectionLevel } : {})
+  })
   host.markerSelectionRow = isSecondClick ? null : paragraphZeroIndex
   draw.render({ isSubmitHistory: false, isCompute: false, isSetCursor: false })
   return true

@@ -5466,8 +5466,58 @@ export class Draw {
       // 绘制选区——PERF-PLAN — Strategy B：当 _currentDecorationCtx 非空（_drawPage
       // 设置）时写到 decoration 层；否则保持旧行为（写到 base ctx，用于打印 / 单层）。
       const decorationCtx = this._currentDecorationCtx ?? ctx
+      // Google-Docs-style list-block selection: when RangeManager.markerSelection
+      // is set AND covers the current row (per startIndex/level/listId filter),
+      // paint a full-row-width background and SUPPRESS the per-character
+      // text-range fill. Mutually exclusive — a row painted in marker mode
+      // never gets the text-range fill.
+      const markerSel = this.range.markerSelection
+      const rowWithinMarkerRange =
+        !!markerSel &&
+        curRow.startIndex >= markerSel.startIndex &&
+        curRow.startIndex <= markerSel.endIndex
+      const inMarkerSel =
+        rowWithinMarkerRange &&
+        (markerSel!.level === undefined ||
+          (curRow.listLevel ?? 1) === markerSel!.level) &&
+        (markerSel!.listId === undefined ||
+          elementList[curRow.startIndex]?.listId === markerSel!.listId)
       if (!this._suppressDecorationPaint && !isPrintMode && !isGraffitiMode) {
-        if (rangeRecord.width && rangeRecord.height) {
+        if (rowWithinMarkerRange) {
+          // Row is inside the marker-selection range. Paint full-row-width
+          // highlight ONLY when level/listId filters pass; otherwise skip
+          // paint entirely (text-range fill is suppressed for these rows so
+          // child paragraphs interleaved with same-level peers don't render
+          // selected when "Select items at this level" is in effect).
+          if (inMarkerSel) {
+            const rowPos = positionList[curRow.startIndex]
+            // Narrow-column highlight (Google Docs style): paint from page
+            // margin to just past the marker glyph's right edge, leaving the
+            // text content area un-highlighted. Skip the highlight on rows
+            // without marker bounds (e.g. paragraph-wrap continuation rows).
+            const glyphBounds = curRow.listGlyphBounds
+            if (rowPos && glyphBounds) {
+              const rowLeft =
+                rowPos.coordinate.leftTop[0] - (curRow.offsetX ?? 0)
+              // Marker-gutter padding (px) — extends the bar a bit past the
+              // marker so the column reaches the text edge rather than
+              // ending tight on the glyph. Mirrors Google Docs' look.
+              const MARKER_GUTTER_PAD = 6
+              const columnRight =
+                glyphBounds.x + glyphBounds.width + MARKER_GUTTER_PAD
+              const columnWidth = Math.max(0, columnRight - rowLeft)
+              if (columnWidth > 0) {
+                this.range.render(
+                  decorationCtx,
+                  rowLeft,
+                  rowPos.coordinate.leftTop[1],
+                  columnWidth,
+                  curRow.height
+                )
+              }
+            }
+          }
+        } else if (rangeRecord.width && rangeRecord.height) {
           const { x, y, width, height } = rangeRecord
           this.range.render(decorationCtx, x, y, width, height)
         }
