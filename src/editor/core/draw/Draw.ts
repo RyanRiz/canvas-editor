@@ -5785,15 +5785,14 @@ export class Draw {
   }
 
   private _renderPageChromeCache(pageNo: number) {
-    const { inactiveAlpha, pageMode, header, footer, pageNumber, pageBorder } =
-      this.options
+    const { pageMode, header, footer, pageNumber, pageBorder } = this.options
     const isPrintMode = this.mode === EditorMode.PRINT
     const isContinuityMode = pageMode === PageMode.CONTINUITY
     const chromeCtx = this.chromeCacheCtxList[pageNo]
     const chromeCanvas = this.chromeCacheCanvasList[pageNo]
     if (!chromeCtx || !chromeCanvas) return
     chromeCtx.clearRect(0, 0, this.getWidth(), this.getHeight())
-    chromeCtx.globalAlpha = !this.zone.isMainActive() ? inactiveAlpha : 1
+    chromeCtx.globalAlpha = 1
     if (
       !isPrintMode ||
       !this.options.modeRule[EditorMode.PRINT]?.backgroundDisabled
@@ -5861,7 +5860,7 @@ export class Draw {
       this._paintDirectionOverride = this.pageDirectionList[pageNo]
     }
     try {
-      const { inactiveAlpha, lineNumber } = this.options
+      const { lineNumber } = this.options
       const isPrintMode = this.mode === EditorMode.PRINT
       const innerWidth = this.getInnerWidth()
       const canPartialPaint =
@@ -5886,9 +5885,10 @@ export class Draw {
       // 保持原行为（实际打印模式下 startIndex===endIndex，不会画选区）。
       this._suppressDecorationPaint = suppressDecorationPaint
       this._currentDecorationCtx = !isPrintMode ? decoCtx : null
-      // 判断当前激活区域-非正文区域时元素透明度降低
-      ctx.globalAlpha = !this.zone.isMainActive() ? inactiveAlpha : 1
-      if (decoCtx && decoCtx !== ctx) decoCtx.globalAlpha = ctx.globalAlpha
+      // Page-wide dimming made the whole canvas look soft while editing
+      // header/footer. Those sections already manage their own inactive alpha.
+      ctx.globalAlpha = 1
+      if (decoCtx && decoCtx !== ctx) decoCtx.globalAlpha = 1
       this._clearPageContexts(pageNo, ctx, decoCtx, clipTop)
       const needsClip = clipTop > 0 && clipTop < h
       if (needsClip) {
@@ -6011,9 +6011,7 @@ export class Draw {
       this._paintDirectionOverride = this.pageDirectionList[pageNo]
     }
     try {
-      decoCtx.globalAlpha = !this.zone.isMainActive()
-        ? this.options.inactiveAlpha
-        : 1
+      decoCtx.globalAlpha = 1
       decoCtx.clearRect(0, 0, this.getWidth(), this.getHeight())
       if (!this._isDecorationActive()) {
         return
@@ -6068,9 +6066,7 @@ export class Draw {
     // mousemove 抖动多次落到同一选区位置，or 拖拽穿过完全可见的多页时）。
     const cachedVersion = this._decorationDrawnPages.get(pageNo)
     if (cachedVersion === this._decorationVersion) return
-    decoCtx.globalAlpha = !this.zone.isMainActive()
-      ? this.options.inactiveAlpha
-      : 1
+    decoCtx.globalAlpha = 1
     decoCtx.clearRect(0, 0, this.getWidth(), this.getHeight())
     // B-β.1：装饰层逻辑「空状态」——选区收起、无搜索、非跨行表格选区时直接
     // 跳过整轮行遍历。clearRect 已经把上一帧的内容擦掉，绘制阶段无事可做。
