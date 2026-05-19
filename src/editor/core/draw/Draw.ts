@@ -5020,9 +5020,16 @@ export class Draw {
           let columnIndex = 0
           let columnHeightList = new Array(columnCount).fill(sectionTop)
           let columnHasContentList = new Array(columnCount).fill(false)
-          // 列平衡（Google Docs 风格）：当本节内容能在当前页放下时，
-          // 将每列填充到 ceil(剩余高度 / 列数)，让两列高度接近、并排显示，
-          // 而不是先把第 0 列填满整页才溢出到第 1 列。
+          // 列平衡（Google Docs 风格）：流式逐行判断
+          // ───────────────────────────────────────────────────────────
+          // 设阈值 = sectionTop + ceil(剩余高度 / columnCount)。每次放行前
+          // 用「行块真正中点」col + (offsetY + height) / 2 与阈值比较——
+          // 大于阈值则换下一列。中点用整段（offsetY + height）算，避免老
+          // 公式 `col + offsetY + height/2` 把段间距整段算成已发生而过早
+          // 切列、导致右列偏胖。
+          // 流式判断不依赖完整 sectionRows——在 chunked / 增量布局期间也
+          // 能给出稳定结果，不会出现典字时左列突然丢失。
+          // 内容超过双列容量时阈值 = contentBottomY，回退贪婪填充。
           let remainingSectionHeight = 0
           for (let i = 0; i < sectionRows.length; i++) {
             remainingSectionHeight +=
@@ -5032,7 +5039,6 @@ export class Draw {
             if (remaining <= 0) return contentBottomY
             const available = contentBottomY - top
             if (available <= 0) return contentBottomY
-            // 内容超过当前页所有列容量时，回退为贪婪填充
             if (remaining > available * columnCount) return contentBottomY
             return Math.min(
               contentBottomY,
@@ -5099,13 +5105,11 @@ export class Draw {
             const projectedHeight =
               columnHeightList[columnIndex] + rowOffsetY + row.height
             const overflowHard = projectedHeight > contentBottomY
-            // 软溢出：以行的中点作判断（"四舍五入"式平衡），
-            // 让 col 0 略高于 col 1，与 Google Docs 行为一致；
-            // 否则因 Math.ceil + 行高离散，col 0 总是少一行。
+            const rowBlockMidpoint =
+              columnHeightList[columnIndex] + (rowOffsetY + row.height) / 2
             const overflowBalance =
               balanceThreshold < contentBottomY &&
-              columnHeightList[columnIndex] + rowOffsetY + row.height / 2 >
-                balanceThreshold
+              rowBlockMidpoint > balanceThreshold
             if (overflowHard && columnHasContentList[columnIndex]) {
               if (columnIndex === columnCount - 1) {
                 if (!nextPage(row.startIndex)) {
@@ -5127,15 +5131,27 @@ export class Draw {
               columnHasContentList[columnIndex] &&
               columnIndex < columnCount - 1
             ) {
-              // 软溢出：仅切换到下一列以平衡列高，不强制换页
               columnIndex++
             }
+            // 列起点抑制：非首列首行的 row.offsetY 段落上边距会渲染成列顶空白，
+            // 让右列文字比左列低一截。用 pageStartY 减去同等量来抵消——
+            // computePageRowPosition 会 `y += row.offsetY` 把它加回去，
+            // 文字最终落在 sectionTop 与左列首行对齐。
+            // 不直接改写 row.offsetY：row 对象跨帧复用（PERF tail-reuse），
+            // mutation 会污染后续布局。
+            const suppressTopPadding =
+              columnIndex > 0 &&
+              !columnHasContentList[columnIndex] &&
+              rowOffsetY > 0
+            const effectiveOffsetY = suppressTopPadding ? 0 : rowOffsetY
             row.columnIndex = columnIndex
             row.innerWidth = columnInnerWidth
             row.pageStartX = this.getColumnStartX(columnIndex, pageColumns)
-            row.pageStartY = columnHeightList[columnIndex]
+            row.pageStartY =
+              columnHeightList[columnIndex] -
+              (suppressTopPadding ? rowOffsetY : 0)
             pushRow(row)
-            columnHeightList[columnIndex] += row.height + rowOffsetY
+            columnHeightList[columnIndex] += row.height + effectiveOffsetY
             columnHasContentList[columnIndex] = true
             remainingSectionHeight -= row.height + rowOffsetY
           }
@@ -6137,6 +6153,11 @@ export class Draw {
   ): { clipTop: number; fromRowIndex: number } | null {
     if (this._dirtyRange === null) return null
     if (!rowList.length) return null
+    // Dirty-clip partial repaint assumes rowList order matches increasing Y on the page.
+    // Multi-column pagination violates that once flow jumps back to the top of the next
+    // column, so clipping from the dirty row can erase lower rows in an earlier column
+    // without repainting them in the same pass. Fall back to full-page paint there.
+    if (rowList.some(row => (row.columnIndex || 0) > 0)) return null
     const dirtyIndex = Math.min(this._dirtyRange.start, this._dirtyRange.end)
     const pageStart = rowList[0].startIndex
     const lastRow = rowList[rowList.length - 1]
